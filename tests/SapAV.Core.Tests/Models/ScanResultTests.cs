@@ -172,6 +172,7 @@ public class ScanResultTests
     [InlineData(ScanStatus.AccessDenied)]
     [InlineData(ScanStatus.Locked)]
     [InlineData(ScanStatus.Error)]
+    [InlineData(ScanStatus.SkippedOffline)]
     public void NotScanned_HasNullVerdict_NeverClean(ScanStatus status)
     {
         var result = ScanResult.NotScanned(Item, status, Now);
@@ -217,7 +218,7 @@ public class ScanResultTests
 
     [Theory]
     [InlineData(-1)]
-    [InlineData(5)]
+    [InlineData(6)] // first value past SkippedOffline
     public void Constructor_RejectsUndefinedStatus(int raw)
     {
         var ex = Assert.Throws<ArgumentOutOfRangeException>(
@@ -230,6 +231,7 @@ public class ScanResultTests
     [InlineData(ScanStatus.AccessDenied)]
     [InlineData(ScanStatus.Locked)]
     [InlineData(ScanStatus.Error)]
+    [InlineData(ScanStatus.SkippedOffline)]
     public void NotScanned_RejectsDetections(ScanStatus status)
     {
         var ex = Assert.Throws<ArgumentException>(

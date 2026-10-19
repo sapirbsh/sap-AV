@@ -25,6 +25,7 @@ public class ScanStatusJsonTests
     [InlineData(ScanStatus.AccessDenied)]
     [InlineData(ScanStatus.Locked)]
     [InlineData(ScanStatus.Error)]
+    [InlineData(ScanStatus.SkippedOffline)]
     public void NotScanned_RoundTrips_ForEveryStatus_WithSha256(ScanStatus status)
     {
         var result = ScanResult.NotScanned(Item, status, Now, EicarSha256);

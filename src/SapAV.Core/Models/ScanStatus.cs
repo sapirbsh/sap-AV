@@ -15,4 +15,10 @@ public enum ScanStatus
     AccessDenied,
     Locked,
     Error,
+
+    /// <summary>
+    /// Not read because the file is offline or a cloud placeholder (e.g. OneDrive "online-only"),
+    /// so scanning doesn't trigger a download.
+    /// </summary>
+    SkippedOffline,
 }

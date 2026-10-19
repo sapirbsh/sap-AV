@@ -11,4 +11,9 @@
     <PackageReference Include="dnYara.NativePack" Version="2.1.0.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Test seams (e.g. Sha256Hasher.BeforeReadHook) are internal. -->
+    <InternalsVisibleTo Include="SapAV.Core.Tests" />
+  </ItemGroup>
+
 </Project>
