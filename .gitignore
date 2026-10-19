@@ -1,0 +1,25 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+*.log
+
+# Test artifacts
+TestResults/
+**/eicar*
+**/test-samples/
+
+# Secrets
+appsettings.Development.json
+*.secrets.json
+.env
+
+# Runtime data
+quarantine/
+
+# Claude Code personal settings
+.claude/settings.local.json
+sap-AV/

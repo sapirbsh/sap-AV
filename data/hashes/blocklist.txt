@@ -1,0 +1,1 @@
+﻿# SHA-256 blocklist: one lowercase hex hash per line. Lines starting with # are ignored.

@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- dnYara.NativePack ships the native libyara.dll under lib/, so MSBuild warns it has no
+         managed metadata. The DLL is still copied to output where it's needed at runtime. -->
+    <NoWarn>$(NoWarn);MSB3246</NoWarn>
+  </PropertyGroup>
+</Project>
