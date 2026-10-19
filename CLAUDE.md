@@ -21,6 +21,9 @@ The code is public on GitHub. Product name in the UI: "sap-AV".
 - Local caches (VirusTotal results, scan cache): SQLite via `Microsoft.Data.Sqlite` (approved; added at step C5 / D2)
 - Alert output: Windows Event Log, source "sap-AV" (structured data for SIEM)
 - Threat mapping: MITRE ATT&CK technique ID on every alert
+- Threat pack (planned, ROADMAP section E; packages need approval first): ETW via `Microsoft.Diagnostics.Tracing.TraceEvent`
+  (process + file-read events), WMI via `System.Management` (Defender status/exclusions, process command lines),
+  `System.Diagnostics.PerformanceCounter` (CPU/GPU), curated YARA-Forge rules in `data/rules/third-party/`
 - Tests: xUnit
 
 ## Solution layout
@@ -38,13 +41,18 @@ tests/
   SapAV.Engine.Tests/
 data/
   hashes/         Local SHA-256 blocklist (one hash per line)
-  rules/          YARA rules (*.yar)
+  rules/          YARA rules (*.yar); third-party/ = vendored YARA-Forge subset with licenses (planned, E2)
 ```
 
 ## Features
 Full plan, owners, and build order: see `ROADMAP.md`. Summary:
 - Phase 1 (MVP): Quick / Full / Custom scan (+ Explorer "Scan with sap-AV") and a results screen; local detection engine
-  (blocklist, Authenticode, YARA, heuristics); VirusTotal hash lookup; Mark-of-the-Web; real-time persistence monitoring.
+  (blocklist, Authenticode, YARA, heuristics); VirusTotal hash lookup; Mark-of-the-Web; real-time persistence monitoring;
+  cracked-software threat pack. The pack covers:
+  - infostealers, cryptominers, Defender tampering, script-based persistence and browser hijack
+  - a PUP / HackTool category
+  - user-confirmed "Remove threat", "Delete permanently" and reboot-time actions for locked files
+  It is included in Quick and Full Scan.
 - Phase 2: process parent-child monitoring, ransomware canary files, USB auto-scan, hosts file monitoring, scheduled scans.
 - Cross-cutting: every alert has a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
 
@@ -60,10 +68,18 @@ Full plan, owners, and build order: see `ROADMAP.md`. Summary:
 7. Heuristics: entropy, double extension (e.g. `.pdf.exe`), executable in Temp/Downloads/AppData, Mark-of-the-Web (internet origin)
 8. (Optional, if enabled + API key set) VirusTotal hash lookup, unsigned files only, cache first, rate-limited:
    real-time = new files in watched folders with risky extensions; scans = only Suspicious files
-9. Verdict: Clean / Suspicious / Malicious + reason + MITRE ID -> log + Event Log -> quarantine if Malicious -> notify GUI
+9. Verdict: Clean / Suspicious / PotentiallyUnwanted (PUP / HackTool, planned in E1) / Malicious + reason + MITRE ID
+   -> log + Event Log -> quarantine if Malicious (never PotentiallyUnwanted: the user decides) -> notify GUI
+
+Scans and real-time monitors also produce findings that aren't about a single file: persistence entries, Defender
+exclusions/status, proxy/hosts changes, process behaviour (miners, credential-store reads). These follow the same
+verdict + reason + MITRE + Event Log path.
 
 ## Rules for everyone (main session and all agents)
-- NEVER write, download, or commit real malware. Testing uses only the EICAR test string.
+- NEVER write, download, or commit real malware. Testing uses only the EICAR test string. This includes infostealers,
+  miners and cracks: threat-pack tests use synthetic data, fake event feeds and fake store files only. Third-party
+  YARA rules are allowed (rules only, never samples), with their licenses and attribution kept.
+- Tests NEVER change the real Microsoft Defender configuration; Defender access goes through an interface that is faked in tests.
 - The EICAR file is generated at test time into a temp folder. Never commit it to the repo.
 - NEVER commit API keys. For end users, keys live in local settings on their machine (`%ProgramData%\sap-AV\`, DPAPI-encrypted);
   for development, .NET User Secrets or environment variables.
@@ -74,6 +90,12 @@ Full plan, owners, and build order: see `ROADMAP.md`. Summary:
 - Quarantine must be reversible: move + rename + strip execute ability, keep metadata to restore.
 - Never delete user files automatically. Persistence entries are removed only when the user clicks "Block & remove",
   and always backed up first so they can be restored (services are disabled, not deleted).
+- "Remove threat" (kill process, remove persistence, quarantine, remove flagged Defender exclusions) runs only after the user
+  confirms a list of planned changes. Every change is recorded in one remediation record that can be undone; killing the
+  process is the only step that can't be undone.
+- The only permanent deletion is "Delete permanently" on the quarantine screen, with double confirmation. Locked files get a
+  reboot-time action: prefer a reboot-time move into quarantine, and delete at reboot only for "Delete permanently".
+- PUP / HackTool findings are never quarantined automatically.
 - Every alert gets a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
 - Performance matters: scanning must not freeze the PC. Use a queue, async I/O, background (low) CPU/IO priority for scan threads,
   and skip huge files by size limit.
@@ -88,10 +110,14 @@ Full plan, owners, and build order: see `ROADMAP.md`. Summary:
 
 ## Agents in this project
 - engine-dev: file monitoring, scan queue and scan modes (Quick / Full / Custom, scan cache, priority), persistence collectors
-  and real-time persistence monitoring, quarantine and "block & remove", Event Log, Windows Service, pipes
+  and real-time persistence monitoring, quarantine and "block & remove", Event Log, Windows Service, pipes; threat pack:
+  Defender/proxy/hosts collectors, ETW process and file-read events, CPU/GPU monitors, "Remove threat", delete permanently,
+  reboot-time actions
 - detection-dev: hashing, hash DB, Authenticode, YARA, heuristics, Mark-of-the-Web, VirusTotal client + cache + rate limiter,
-  persistence-entry judgement, MITRE mapping
-- ui-designer: WPF GUI and visual design, scan and results screens, settings, alerts, Explorer context menu
+  persistence-entry judgement, MITRE mapping; threat pack: PUP/HackTool category, YARA-Forge rules, infostealer/miner/
+  Defender/script-persistence/browser-hijack rules
+- ui-designer: WPF GUI and visual design, scan and results screens, settings, alerts, Explorer context menu; threat pack:
+  PUP/HackTool display, "Remove threat" flow and undo, quarantine "Delete permanently", pending reboot actions, idle-state reporting
 - tester: writes and runs tests
 - reviewer: read-only code review (bugs, performance, security)
 

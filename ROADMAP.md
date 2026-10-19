@@ -1,6 +1,6 @@
 # sap-AV Roadmap
 
-Status: **planning only** — nothing below is implemented yet beyond the initial skeleton.
+Status: **in progress.** Each completed step is committed as "<step>: …" (see `git log`).
 
 Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.Core), `ui-designer` (SapAV.App).
 Every build step goes through the standard workflow when done: **owner → tester → reviewer → fix**.
@@ -17,6 +17,7 @@ A step is done only when its tests pass (CLAUDE.md: "Every feature gets tests be
 | 3 | VirusTotal hash lookup (API v3) | 1 | detection-dev | engine-dev (wiring, pipe), ui-designer (settings, counter, upload button) |
 | 4 | Mark-of-the-Web | 1 | detection-dev | engine-dev (queue priority), ui-designer (show source URL) |
 | 5 | Real-time persistence monitoring | 1 | engine-dev | detection-dev (judge target exe), ui-designer (alert + "block & remove") |
+| 11 | Cracked-software threat pack (infostealers, miners, Defender tampering, script persistence, browser hijack, PUP/HackTool, "Remove threat") | 1 | detection-dev (rules, categories) | engine-dev (collectors, monitors, remediation), ui-designer (category display, Remove threat, delete permanently) |
 | 6 | Process monitoring + suspicious parent-child chains | 2 | engine-dev | detection-dev (chain rules), ui-designer |
 | 7 | Ransomware canary files | 2 | engine-dev | ui-designer |
 | 8 | USB auto-scan | 2 | engine-dev | ui-designer |
@@ -103,6 +104,68 @@ Does most of the work in every scan. Order:
   startup item moved to quarantine) so it can be restored. Services are **disabled**, not deleted.
 - **Never auto-remove.** The user always decides.
 
+#### 11. Cracked-software threat pack
+Targets what typically comes bundled with cracked games/software. The scan-time checks run in **both Quick Scan and Full Scan**;
+the behaviour monitors run in real time.
+
+**Detection**
+- **Infostealers**
+  - *Behaviour (real time):* a process that is not the owning app reads browser credential/cookie stores, Discord tokens or
+    crypto wallet files:
+    - Chrome/Edge `Login Data`, `Cookies`, `Local State`
+    - Firefox `logins.json`, `key4.db`, `cookies.sqlite`
+    - Discord `Local Storage\leveldb`
+    - wallet folders (Exodus, Electrum, Atomic, and browser-extension wallets such as MetaMask)
+
+    `FileSystemWatcher` does not report reads, so this needs ETW file I/O events (kernel file provider) in the SYSTEM service.
+    Expected readers (the browser itself, signed by its vendor) are allowlisted by signer + path.
+  - *Static (scans):* random-named executables in AppData (high name entropy, unsigned, no version info), plus public
+    infostealer YARA rules.
+  - **YARA-Forge rules only, never real samples.** Use a curated subset (infostealer, miner, hacktool/keygen) vendored under
+    `data/rules/third-party/`, with each rule's license/attribution kept and an update script. Each file is compiled separately,
+    so a rule our libyara version can't compile is skipped with a warning instead of breaking the whole set. A scan-time budget
+    keeps a large rule set from slowing scans.
+- **Cryptominers**
+  - *Static (scans):* known miner names and command lines (`xmrig`, `stratum+tcp://`, `stratum+ssl://`, `--donate-level`,
+    `-o pool…`, common pool ports such as 3333/4444/5555/7777/14444) in running processes, persistence entries and files.
+  - *Behaviour (real time):* sustained high CPU (per process) or GPU (PDH `GPU Engine` counters) while the user is idle.
+    The service runs in session 0 and can't see user input, so the App reports the idle state (`GetLastInputInfo`) over the pipe.
+    Also flags processes that exit or stop using the CPU/GPU right after `taskmgr.exe` / Process Explorer / Resource Monitor start.
+- **Defender tampering (scans)**
+  - Read Microsoft Defender status and exclusions through WMI `root\Microsoft\Windows\Defender`: `MSFT_MpComputerStatus` and
+    `MSFT_MpPreference` (`ExclusionPath` / `ExclusionExtension` / `ExclusionProcess`). This requires admin; the service runs as SYSTEM.
+  - Flag broad or suspicious exclusions: drive roots, `%AppData%`, `%LocalAppData%`, `%Temp%`, user profile roots, game folders,
+    executable extensions (`.exe`, `.dll`), and exclusions pointing at unsigned processes.
+  - Flag disabled real-time protection, behaviour monitoring or tamper protection.
+  - Developer exclusions can be legitimate, so these are findings for the user to judge, never auto-fixed.
+- **Script-based persistence (scans + real time):** scheduled tasks and Run keys with encoded PowerShell (`-enc`, `-e`,
+  `-EncodedCommand` and their abbreviations; the decoded command is shown to the user), `mshta`, or `rundll32` loading a DLL
+  from user-writable folders. This extends C3's persistence judgement and D4's real-time alerts.
+- **Browser hijack (scans)**
+  - Changed proxy settings: per logged-on user, `HKU\<SID>\…\Internet Settings` `ProxyEnable` / `ProxyServer` / `AutoConfigURL`,
+    plus the WinHTTP proxy.
+  - Hosts file entries that block or redirect security sites (AV vendors, Windows Update, VirusTotal). The domain list lives in `data/`.
+- **New category "PUP / HackTool"** (keygens, cracks, activators) is separate from Malicious:
+  - never auto-quarantined;
+  - shown with its own label so the user decides;
+  - a file that is both (e.g. a trojanized keygen) gets the worse verdict, Malicious.
+- Every finding has a MITRE ID (see X1).
+
+**Removal (always user-confirmed, never automatic)**
+- **"Remove threat"** button: shows the list of planned changes, then on confirmation:
+  1. kills the process (and its child processes);
+  2. removes its persistence (Registry / tasks / services, using D5);
+  3. quarantines the file (B2);
+  4. removes the flagged Defender exclusions.
+
+  Every change is backed up in one **remediation record** and can be undone as a group. The exception is killing the process,
+  which can't be undone and is shown as such.
+- **"Delete permanently"** from the quarantine screen, with **double confirmation**. Only the user can trigger it.
+- **Locked files:** schedule the action for the next reboot (`MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`, run by the SYSTEM
+  service). It should be a reboot-time *move into quarantine* (reversible) when the file is on the same volume as the quarantine
+  folder. A reboot-time *delete* is used only when the user chose "Delete permanently", or confirms it after being told the move
+  isn't possible (see Decisions). Pending reboot actions are listed in the UI and can be cancelled before the reboot.
+
 ### Build steps (in order)
 
 Each step is small enough for one agent session and one or a few commits.
@@ -115,7 +178,7 @@ Each step is small enough for one agent session and one or a few commits.
 | A2 | detection-dev | Streaming SHA-256 hasher with size limit + blocklist loader/lookup | EICAR hash found in a test blocklist; oversize file skipped |
 | A3 | detection-dev | Switch SapAV.Core, SapAV.Engine and both test projects to `net10.0-windows`. Authenticode checker (embedded + catalog signatures) returning Microsoft / OtherTrusted / Unsigned-or-invalid | `notepad.exe` (catalog-signed) → Microsoft; a temp unsigned file → Unsigned; Microsoft check uses root thumbprint, not name |
 | | | **Carried over from the A1 review:** add an optional `SignatureStatus` (Microsoft / OtherTrusted / UnsignedOrInvalid) and signer name to `ScanResult`, so a Clean result records *why* it is clean and the X2 Event Log payload can include the signer. Added as an optional parameter, without breaking existing callers. | Results carry the signature status; JSON round-trip still passes |
-| A4 | detection-dev | YARA wrapper: load/compile `data/rules/*.yar` once, scan file, read `mitre` meta | EICAR YARA rule matches the generated EICAR file |
+| A4 | detection-dev | YARA wrapper: load/compile `data/rules/*.yar` once, scan file, read `mitre` meta. **Carried over from the A1 review:** when the lenient MITRE parser (`MitreTechniqueIdFormat.TryNormalize` / `SelectOrDefault`) changes or drops a rule's `mitre` value (e.g. `T1059,001` → `T1059`, an invalid token dropped, or a fallback to T1204.002), log a warning naming the rule and the raw value. Never change it silently. Normalization that keeps the meaning (trim, uppercase) needs no warning | EICAR YARA rule matches the generated EICAR file |
 | A5 | detection-dev | Heuristics: entropy, double extension, risky-folder executable | Each heuristic has positive + negative cases |
 | A6 | detection-dev | Mark-of-the-Web reader (ZoneId, HostUrl, ReferrerUrl) | Test writes a Zone.Identifier ADS on a temp file and reads it back |
 | A7 | detection-dev | `FileScanner` orchestrator: A2 → A3 → A4 → A5/A6 → verdict + reasons + MITRE | Blocklist beats signature; Microsoft-signed skips YARA + heuristics; other trusted signed still gets YARA + heuristics but no VT; EICAR → Malicious |
@@ -136,7 +199,7 @@ Each step is small enough for one agent session and one or a few commits.
 | C1 | engine-dev | Custom Scan (file / folder) end to end through B3 + A7. **Carried over from the A1 review:** add `ScanPathPolicy` in Core. `ScanItem` only checks format, but the engine runs as SYSTEM and Custom Scan paths come from a normal user. The policy rejects device/namespace paths (`\\.\…`, `\\?\…` other than `\\?\X:\…`, `\\?\GLOBALROOT`), NUL characters, reserved device names (`CON`, `NUL`, …) and alternate data streams. It rejects UNC/network paths from the pipe, so SYSTEM never authenticates to a remote SMB server. It normalizes with `Path.GetFullPath`, so `..` can't bypass the "Ignore" exclusions or the C5 cache key | EICAR in a temp folder found; clean files Clean; policy tests for each rejected path form + normalization |
 | C2 | engine-dev | Persistence collectors: Run/RunOnce, Winlogon, IFEO, Services, Startup folders, Scheduled Tasks → `PersistenceEntry` with resolved target path | Command-line → path resolution tests (quotes, args, env vars, `rundll32` targets); collectors run read-only |
 | C3 | detection-dev | Persistence judgement: target scan + entry-specific rules (target in Temp, unsigned, IFEO debugger set, missing target), MITRE IDs | Rule unit tests on synthetic entries |
-| C4 | engine-dev | Quick Scan: processes + C2/C3 + high-risk folders + last-7-days files | Integration test on a temp tree; timing logged against the 3-minute target |
+| C4 | engine-dev | Quick Scan: processes + C2/C3 + high-risk folders + last-7-days files. Built from pluggable "scan checks", so the threat pack (E) adds its checks to Quick and Full Scan without changing the scan framework | Integration test on a temp tree; timing logged against the 3-minute target |
 | C5 | engine-dev | Scan cache (SQLite): path + size + last-write + hash + verdict; blocklist re-check on update. **Carried over from the A1 review:** `ScanItem` compares paths case-sensitively. Cache keys and "Ignore" exclusions must use the normalized path from `ScanPathPolicy` (C1), compared case-insensitively (`OrdinalIgnoreCase`), so `C:\X.bin` and `c:\x.bin` are the same file | Unchanged file skipped; changed file rescanned; blocklist update flags cached hash |
 | C6 | engine-dev | Full Scan: all fixed drives, reparse points skipped, cache used, full persistence check | Integration test on a temp tree; cancel mid-scan |
 
@@ -150,16 +213,39 @@ Each step is small enough for one agent session and one or a few commits.
 | D4 | engine-dev | Real-time persistence monitoring (registry, services, startup, tasks) with baseline diff → alerts | New HKCU Run value in a test key triggers an alert |
 | D5 | engine-dev | "Block & remove" with backup + restore for each persistence type | Remove → restore round-trip on HKCU test entries |
 
-**E. UI (ui-designer)**
+**E. Cracked-software threat pack (detection-dev, engine-dev)**
+
+Detection rules and categories come first, then the scan-time collectors (wired into Quick + Full Scan), then the real-time
+monitors, then removal. Tests never use real malware or miners. They use synthetic data, fake event feeds and temp files,
+and **never change the real Defender configuration** (Defender access goes through an interface with a fake in tests).
 
 | Step | Owner | Deliverable | Done when (tests) |
 |------|-------|-------------|-------------------|
-| E1 | ui-designer | Pipe client + scan screen: mode picker, progress bar, ETA, pause/resume/cancel | View-model tests with a fake pipe |
-| E2 | ui-designer | Scan results screen: verdict, reason, MITRE technique, MOTW source URL, quarantine / ignore / restore | View-model tests |
-| E3 | ui-designer | Explorer "Scan with sap-AV" (registry verb, register/unregister in settings) + command-line handling | Argument parsing tests; register/unregister under HKCU |
-| E4 | ui-designer | Settings: VirusTotal toggle + key entry (sent to the engine over the pipe, never stored by the App), usage counter, manual upload button with confirmation | View-model tests |
-| E5 | ui-designer | Persistence alert notification with "Block & remove" / "Allow" | View-model tests |
-| E6 | ui-designer | UI polish pass: dashboard, animations, empty/error states, consistent purple/graphite theme | Reviewer sign-off |
+| E1 | detection-dev | PUP / HackTool category: add `Verdict.PotentiallyUnwanted` (order Clean < Suspicious < PotentiallyUnwanted < Malicious) and a `ThreatCategory` on `Detection` (Malware, Pup, HackTool, Infostealer, Miner, DefenderTampering, BrowserHijack). PotentiallyUnwanted is never auto-quarantined. Add the new MITRE IDs from X1 to the catalog | Ordering + worst-verdict tests; JSON round-trip with the new values; catalog tests |
+| E2 | detection-dev | Third-party YARA rules: curated YARA-Forge subset (infostealer, miner, hacktool/keygen) in `data/rules/third-party/` with licenses/attribution + update script; per-file compile with skip-and-warn; scan-time budget | Every vendored file compiles or is reported; rule metadata gives MITRE IDs; timing test on a temp tree. No real samples: test strings only |
+| E3 | detection-dev | Static infostealer/miner heuristics: random-named unsigned executables in AppData; miner names, command lines and pool ports | Positive + negative cases on synthetic names/command lines |
+| E4 | detection-dev | Script-persistence rules (extends C3): encoded PowerShell (all `-enc` forms, decoded for display), `mshta`, `rundll32` with a user-folder DLL | Synthetic Run/task entries; decoding tests; no false positive on a normal `rundll32 shell32.dll,…` |
+| E5 | engine-dev + detection-dev | Defender collector (engine-dev: WMI `MSFT_MpPreference` / `MSFT_MpComputerStatus` behind an interface) + exclusion/status rules (detection-dev: broad paths, risky extensions, disabled protection) | Rule tests on synthetic exclusion lists; collector tested against a fake. Real Defender read only in a skippable integration test, never written |
+| E6 | engine-dev + detection-dev | Browser-hijack collector (per-user proxy via `HKU\<SID>`, WinHTTP proxy, hosts file) + rules (proxy/PAC set by a non-system source, hosts entries for security domains) | Synthetic proxy values and hosts files; per-SID enumeration tested with a test key |
+| E7 | engine-dev | Add E2–E6 as scan checks in Quick Scan (C4) and Full Scan (C6), including running-process command lines (WMI `Win32_Process.CommandLine`) | Quick and Full Scan results include pack findings on a synthetic setup; Quick Scan still within its time budget |
+| E8 | engine-dev | Process event source: process start/stop with command line and parent (ETW or WMI `Win32_ProcessStartTrace`). Pulled forward from Phase 2 #6, which then only adds the parent-child rules | Fake feed tests + one integration test that starts and stops a harmless child process |
+| E9 | engine-dev + detection-dev | Miner behaviour monitor: sustained per-process CPU / GPU (PDH `GPU Engine`) while idle (idle state from the App over the pipe), and "stops when Task Manager opens" (correlated with E8) | Fake counter/event feeds with a fake clock: sustained-vs-spike, idle-vs-active, taskmgr correlation |
+| E10 | engine-dev + detection-dev | Infostealer behaviour monitor: ETW file-read events on browser/Discord/wallet store paths by non-owning processes; allowlist by signer + path | Fake ETW feed tests; one integration test where a test process reads a **fake** store file in a temp folder that is registered as a watched pattern |
+| E11 | engine-dev | "Remove threat" remediation: kill the process tree → remove persistence (D5) → quarantine the file (B2) → remove the flagged Defender exclusions. One remediation record with grouped undo (the kill is not undoable) | Dry-run plan test; remove → undo round-trip on HKCU test entries + temp files + a fake Defender; partial-failure test: a failed step is reported and the earlier steps stay undoable |
+| E12 | engine-dev | Quarantine "Delete permanently" (engine requires an explicit confirmed request from the UI) + reboot-time actions for locked files (`MoveFileEx` delay; move into quarantine when possible, delete only for "Delete permanently"); list and cancel pending reboot actions | Delete only with confirmation; a pending reboot action is registered and can be cancelled (checked through `PendingFileRenameOperations`, then cleaned up) |
+
+**F. UI (ui-designer)**
+
+| Step | Owner | Deliverable | Done when (tests) |
+|------|-------|-------------|-------------------|
+| F1 | ui-designer | Pipe client + scan screen: mode picker, progress bar, ETA, pause/resume/cancel | View-model tests with a fake pipe |
+| F2 | ui-designer | Scan results screen: verdict, reason, MITRE technique, MOTW source URL, quarantine / ignore / restore. Shows the PUP / HackTool category with its own label, separate from Malicious | View-model tests |
+| F3 | ui-designer | Explorer "Scan with sap-AV" (registry verb, register/unregister in settings) + command-line handling | Argument parsing tests; register/unregister under HKCU |
+| F4 | ui-designer | Settings: VirusTotal toggle + key entry (sent to the engine over the pipe, never stored by the App), usage counter, manual upload button with confirmation | View-model tests |
+| F5 | ui-designer | Persistence alert notification with "Block & remove" / "Allow" | View-model tests |
+| F6 | ui-designer | "Remove threat" flow: planned-changes list, confirmation, result, and undo from the remediation history. Defender-tampering and browser-hijack findings view | View-model tests with a fake pipe |
+| F7 | ui-designer | Quarantine screen: restore, "Delete permanently" with double confirmation, and pending reboot actions (with cancel). Reports the user's idle state to the engine for E9 | View-model tests; the second confirmation can't be skipped |
+| F8 | ui-designer | UI polish pass: dashboard, animations, empty/error states, consistent purple/graphite theme | Reviewer sign-off |
 
 ---
 
@@ -167,10 +253,10 @@ Each step is small enough for one agent session and one or a few commits.
 
 | # | Feature | Owner | Notes |
 |---|---------|-------|-------|
-| 6 | Process monitoring + suspicious parent-child chains | engine-dev (process-start events via WMI `Win32_ProcessStartTrace` or ETW), detection-dev (chain rules) | e.g. Word/Excel/Outlook → powershell/cmd/wscript/cscript/mshta. MITRE T1059.x / T1566.001 |
+| 6 | Process monitoring + suspicious parent-child chains | detection-dev (chain rules), engine-dev | The process event source is built in Phase 1 (E8); this adds the chain rules. e.g. Word/Excel/Outlook → powershell/cmd/wscript/cscript/mshta. MITRE T1059.x / T1566.001 |
 | 7 | Ransomware canary files | engine-dev | Hidden decoy files in user folders; any modification → high-severity alert. MITRE T1486 |
 | 8 | USB auto-scan | engine-dev | Detect volume arrival, Custom Scan of the drive, autorun.inf check. MITRE T1091 |
-| 9 | Hosts file monitoring | engine-dev, detection-dev | Watch `drivers\etc\hosts`, diff, flag redirects of security/banking domains. MITRE T1565.001 |
+| 9 | Hosts file monitoring | engine-dev, detection-dev | Scan-time hosts checks are in Phase 1 (E6); this adds real-time watching. Watch `drivers\etc\hosts`, diff, flag redirects of security/banking domains. MITRE T1565.001 |
 | 10 | Scheduled scans | engine-dev, ui-designer | e.g. weekly Quick Scan; schedule stored in engine settings, editor in UI |
 
 ---
@@ -194,6 +280,16 @@ Every alert carries exactly one primary technique ID (more allowed as secondary)
 | Ransomware canary (Phase 2) | T1486 |
 | USB (Phase 2) | T1091 |
 | Hosts file (Phase 2) | T1565.001 |
+| Threat pack: reading browser credential stores | T1555.003 |
+| Threat pack: reading browser cookies | T1539 |
+| Threat pack: Discord tokens / credential files | T1552.001 |
+| Threat pack: crypto wallet files | T1005 |
+| Threat pack: cryptominer (CPU/GPU, miner command line, stops on Task Manager) | T1496.001 (Compute Hijacking; T1496 got sub-techniques in ATT&CK v16) |
+| Threat pack: Defender exclusions / disabled protection; hosts entries blocking security sites | T1562.001 |
+| Threat pack: encoded PowerShell | T1059.001 + T1027.010 |
+| Threat pack: `mshta` / `rundll32` from user folders | T1218.005 / T1218.011 |
+| Threat pack: proxy / PAC hijack | T1557 (closest fit: Adversary-in-the-Middle) |
+| Threat pack: random-named AppData executable, PUP / HackTool | T1204.002 |
 
 YARA rules may override with their own `mitre` meta value.
 
@@ -214,6 +310,16 @@ Approved:
 3. **Signature rule:** only Microsoft-signed files (incl. Windows catalog-signed) skip all checks; other trusted signed files
    skip VirusTotal only.
 4. **`%ProgramData%\sap-AV\`** is restricted to SYSTEM and Administrators.
+
+Open (decide before the step that needs it):
+- **New dependencies for the threat pack (E):**
+  - `Microsoft.Diagnostics.Tracing.TraceEvent`, for ETW process and file-read events (E8, E10);
+  - `System.Management`, for WMI: Defender, process command lines (E5, E7);
+  - `System.Diagnostics.PerformanceCounter`, for CPU/GPU counters (E9).
+- **YARA-Forge licensing:** the repo is public. Vendored rules must keep their per-rule licenses, and any rule whose license
+  doesn't allow redistribution is left out (or downloaded by the update script instead of committed). Decide at E2.
+- **Locked files on another volume:** a reboot-time move can't cross volumes. The options are a per-volume quarantine folder,
+  or a reboot-time delete after an extra confirmation. Decide at E12.
 
 Deferred:
 - **MalwareBazaar** is dropped from Phase 1 (VirusTotal only); can come back later as a second lookup source.
