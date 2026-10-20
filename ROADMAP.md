@@ -3,8 +3,23 @@
 Status: **in progress.** Each completed step is committed as "<step>: …" (see `git log`).
 
 Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.Core), `ui-designer` (SapAV.App).
-Every build step goes through the standard workflow when done: **owner → tester → reviewer → fix**.
-A step is done only when its tests pass (CLAUDE.md: "Every feature gets tests before it's considered done").
+### Workflow
+- **Every step:** the owning agent writes and runs its own tests. The step is done, and committed as `<step>: …`, when its
+  tests pass with 0 build warnings. There is no separate tester/reviewer pass per step.
+- **End of each section (A, B, C, D, E, F):** one **tester** pass and one **reviewer** pass over the whole section, then fix
+  until clean (committed as `<section>: section review fixes`).
+- **Exception — immediate review:** steps that run privileged code as SYSTEM, touch quarantine, write or remove Registry
+  entries, or touch the pipe get their own **reviewer** pass right after the step, before the next step starts:
+  - **B:** B1 (Event Log source registration), B2 (quarantine), B4 (pipe server)
+  - **C:** C1 (pipe-supplied scan paths, `ScanPathPolicy`)
+  - **D:** D3 (`%ProgramData%\sap-AV` ACL, API key), D5 (Block & remove: Registry/task/service changes)
+  - **E:** E5 (Defender access as SYSTEM), E8/E10 (ETW sessions as SYSTEM), E11 (Remove threat: kill/Registry/Defender writes),
+    E12 (Delete permanently, reboot-time actions)
+  - **F:** F1 (pipe client), F3 (Explorer context-menu Registry writes)
+- Tests that depend on certificates, files or software that exist on the dev PC but not everywhere must **skip cleanly**
+  (reported as Skipped, with a reason) so the suite also passes on a clean machine and on GitHub Actions `windows-latest`.
+- Work continues from step to step without waiting for approval. It stops only for a **Critical** security finding or a
+  decision the user has to make (e.g. a new package, a licensing question, or a deviation from an approved rule).
 
 ---
 
@@ -60,8 +75,12 @@ Does most of the work in every scan. Order:
 2. Authenticode signature check (`WinVerifyTrust`, including **catalog-signed** files, which covers most Windows system files).
    Revocation checks are off by default to keep it fast.
    - **Signed by Microsoft** (embedded or Windows catalog signature) → Clean, skip all remaining steps.
-     "Microsoft" is decided by the chain ending in a Microsoft root certificate (checked by thumbprint), not by the
-     publisher name text, which another CA could issue.
+     "Microsoft" is decided by certificate thumbprints, not by the publisher name text, which another CA could issue.
+     Two checks must both pass: the chain ends in a Microsoft product root, **and** the issuing CA is one of Microsoft's own
+     first-party code-signing CAs (e.g. Windows Production PCA 2011, Code Signing PCA 2010/2011).
+   - The Microsoft roots also sign third-party content: WHQL/attestation-signed drivers (Third Party Component CA),
+     Store/Marketplace apps, and Microsoft's Trusted/Artifact Signing service for any customer ("ID Verified" chain).
+     These count as **OtherTrusted**, so YARA and heuristics still run on them.
    - **Other valid trusted signature** → skip VirusTotal only; YARA and heuristics still run.
    - Unsigned or invalid signature → all steps run.
 3. YARA rules (compiled once, reused; rules carry a `mitre` meta field).
@@ -182,6 +201,7 @@ Each step is small enough for one agent session and one or a few commits.
 | A5 | detection-dev | Heuristics: entropy, double extension, risky-folder executable. **Carried over from the A2 review:** flag oversized executables padded to dodge the hash size limit (e.g. a PE file far over the limit, mostly zero-filled), reading only the headers and tail | Each heuristic has positive + negative cases |
 | A6 | detection-dev | Mark-of-the-Web reader (ZoneId, HostUrl, ReferrerUrl) | Test writes a Zone.Identifier ADS on a temp file and reads it back |
 | A7 | detection-dev | `FileScanner` orchestrator: A2 → A3 → A4 → A5/A6 → verdict + reasons + MITRE. **Carried over from the A2 review:** a hash that fails (`HashResult` not hashed) becomes `ScanResult.NotScanned` via `ToNotScannedResult`, never Clean. `SkippedTooLarge` and `SkippedOffline` are logged clearly | Blocklist beats signature; Microsoft-signed skips YARA + heuristics; other trusted signed still gets YARA + heuristics but no VT; EICAR → Malicious |
+| A8 | ui-designer | **Minimal sap-AV window** (right after section A's review): WPF + WPF-UI in the purple/graphite theme. One "Scan a file" button → file picker → result card showing verdict, reasons, MITRE technique, signature status/signer and SHA-256. Temporary: SapAV.App references SapAV.Core and runs `FileScanner` in-process, as the user, with no engine or pipe. F1 later replaces this with the pipe client. Adds a `tests/SapAV.App.Tests` project for view-models | View-model tests (fake scanner: Clean, Malicious, NotScanned, error); the app builds and starts; EICAR-hash blocklist hit shown as Malicious |
 
 **B. Engine infrastructure (engine-dev)**
 

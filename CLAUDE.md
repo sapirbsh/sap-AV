@@ -62,7 +62,9 @@ Full plan, owners, and build order: see `ROADMAP.md`. Summary:
 3. Scans: skip if unchanged since the last scan (cache: path + size + last-write time + hash)
 4. SHA-256 -> local hash blocklist. A match is Malicious even if the file is signed.
 5. Authenticode:
-   - Signed by Microsoft (embedded or Windows catalog signature; decided by Microsoft root thumbprint, not name) -> Clean, skip steps 6-8
+   - Signed by Microsoft (embedded or Windows catalog signature) -> Clean, skip steps 6-8. Decided by thumbprints, not name:
+     a Microsoft product root AND a Microsoft first-party issuing CA. Third-party content Microsoft signs (WHQL drivers,
+     Store apps, Trusted Signing / "ID Verified" customers) counts as OtherTrusted.
    - Other valid trusted signature -> skip step 8 (VirusTotal) only; YARA and heuristics still run
 6. YARA rules
 7. Heuristics: entropy, double extension (e.g. `.pdf.exe`), executable in Temp/Downloads/AppData, Mark-of-the-Web (internet origin)
@@ -118,8 +120,16 @@ verdict + reason + MITRE + Event Log path.
   Defender/script-persistence/browser-hijack rules
 - ui-designer: WPF GUI and visual design, scan and results screens, settings, alerts, Explorer context menu; threat pack:
   PUP/HackTool display, "Remove threat" flow and undo, quarantine "Delete permanently", pending reboot actions, idle-state reporting
-- tester: writes and runs tests
-- reviewer: read-only code review (bugs, performance, security)
+- tester: section-level test pass (gaps, portability, flakiness) — model: sonnet
+- reviewer: read-only code review (bugs, performance, security), per section and for privileged steps — model: opus
+- Models: detection-dev, engine-dev, reviewer = opus; tester, ui-designer = sonnet (set in `.claude/agents/*.md`)
 
-Workflow: the main session plans and builds the skeleton, then delegates.
-After any agent changes code -> tester -> reviewer -> fix.
+Workflow (details in ROADMAP.md "Workflow"):
+- The main session plans and delegates each step to its owning agent. That agent writes and runs its own tests;
+  the step is committed when they pass with 0 warnings.
+- At the end of each section (A–F): one tester pass + one reviewer pass over the whole section, then fix until clean.
+- Immediate reviewer pass right after any step that runs privileged code as SYSTEM, touches quarantine, writes/removes
+  Registry entries, or touches the pipe (the list is in ROADMAP.md).
+- Machine-dependent tests (certificates, installed software, Developer Mode, SMB loopback) must skip cleanly, so the
+  suite passes on a clean machine and GitHub Actions `windows-latest`.
+- Keep going from step to step without waiting. Stop only for a Critical security finding or a decision the user must make.
