@@ -18,6 +18,8 @@ public static class MitreCatalog
         new(MitreTechniqueIds.ScheduledTask, "Scheduled Task/Job: Scheduled Task"),
         new(MitreTechniqueIds.DoubleFileExtension, "Masquerading: Double File Extension"),
         new(MitreTechniqueIds.SoftwarePacking, "Obfuscated Files or Information: Software Packing"),
+        new(MitreTechniqueIds.BinaryPadding, "Obfuscated Files or Information: Binary Padding"),
+        new(MitreTechniqueIds.RightToLeftOverride, "Masquerading: Right-to-Left Override"),
         new(MitreTechniqueIds.MaliciousFile, "User Execution: Malicious File"),
         new(MitreTechniqueIds.SpearphishingAttachment, "Phishing: Spearphishing Attachment"),
         new(MitreTechniqueIds.CommandAndScriptingInterpreter, "Command and Scripting Interpreter"),

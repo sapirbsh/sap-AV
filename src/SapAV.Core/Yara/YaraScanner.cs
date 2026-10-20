@@ -1,5 +1,4 @@
 using System.IO.MemoryMappedFiles;
-using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Hashing;
 
@@ -125,65 +124,15 @@ public sealed unsafe class YaraScanner : IYaraScanner
         ArgumentNullException.ThrowIfNull(path);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
+        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
+        if (handle is null)
         {
-            return YaraScanResult.NotScanned(YaraFailureReason.InvalidPath, "Path is empty, blank or contains a NUL character.");
-        }
-
-        if (Sha256Hasher.IsDeviceNamespacePath(path))
-        {
-            return YaraScanResult.NotScanned(YaraFailureReason.NotRegularFile,
-                "Device-namespace path (pipe, device or volume), not a regular file.");
-        }
-
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(path);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return YaraScanResult.NotScanned(YaraFailureReason.InvalidPath, ex.Message);
-        }
-
-        if (Sha256Hasher.IsDeviceNamespacePath(fullPath))
-        {
-            return YaraScanResult.NotScanned(YaraFailureReason.NotRegularFile,
-                $"Path resolves to a device ({fullPath}), not a regular file.");
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-
-        using var handle = NativeFile.OpenForMemoryMap(fullPath, out int error);
-        if (handle.IsInvalid)
-        {
-            return YaraScanResult.NotScanned(YaraScanResult.FromHashFailure(Sha256Hasher.MapWin32Error(error)),
-                $"{Marshal.GetPInvokeErrorMessage(error)} (Win32 error {error})");
+            return YaraScanResult.NotScanned(YaraScanResult.FromHashFailure(failure.Reason), failure.Message, failure.Length);
         }
 
         try
         {
-            // First thing after opening: only disk files go further.
-            uint fileType = NativeFile.GetFileType(handle);
-            if (fileType != NativeFile.FileTypeDisk)
-            {
-                return YaraScanResult.NotScanned(YaraFailureReason.NotRegularFile,
-                    $"Not a regular file (file type {fileType}: device, pipe or other non-disk target).");
-            }
-
-            var attributes = File.GetAttributes(handle);
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                return YaraScanResult.NotScanned(YaraFailureReason.Directory, "Path is a directory.");
-            }
-
             long length = RandomAccess.GetLength(handle);
-            if (Sha256Hasher.IsOfflineOrPlaceholder(attributes))
-            {
-                return YaraScanResult.NotScanned(YaraFailureReason.Offline,
-                    "File is offline or a cloud placeholder; not read to avoid a download.", length);
-            }
-
             if (length > MaxSizeBytes)
             {
                 return YaraScanResult.NotScanned(YaraFailureReason.TooLarge,

@@ -26,8 +26,19 @@ public class MitreCatalogTests
         { "T1565.001", "Data Manipulation: Stored Data Manipulation" },
     };
 
+    /// <summary>
+    /// Techniques added after the X1 starting map (A5 heuristics). Listed separately so the X1 rows stay a copy
+    /// of ROADMAP.md; X1 should gain these rows.
+    /// </summary>
+    public static TheoryData<string, string> AddedTechniques => new()
+    {
+        { "T1027.001", "Obfuscated Files or Information: Binary Padding" },
+        { "T1036.002", "Masquerading: Right-to-Left Override" },
+    };
+
     [Theory]
     [MemberData(nameof(X1Techniques))]
+    [MemberData(nameof(AddedTechniques))]
     public void TryGet_ReturnsOfficialName_ForEveryX1Technique(string id, string expectedName)
     {
         Assert.True(MitreCatalog.TryGet(id, out var technique));
@@ -39,7 +50,7 @@ public class MitreCatalogTests
     [Fact]
     public void All_ContainsExactlyTheX1Techniques()
     {
-        var expected = X1Techniques.Select(row => (string)row[0]).Order(StringComparer.Ordinal);
+        var expected = X1Techniques.Concat(AddedTechniques).Select(row => (string)row[0]).Order(StringComparer.Ordinal);
         var actual = MitreCatalog.All.Select(t => t.Id).Order(StringComparer.Ordinal);
         Assert.Equal(expected, actual);
     }

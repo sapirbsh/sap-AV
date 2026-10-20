@@ -10,6 +10,8 @@ public static class MitreTechniqueIds
     public const string ScheduledTask = "T1053.005";
     public const string DoubleFileExtension = "T1036.007";
     public const string SoftwarePacking = "T1027.002";
+    public const string BinaryPadding = "T1027.001";
+    public const string RightToLeftOverride = "T1036.002";
     public const string MaliciousFile = "T1204.002";
     public const string SpearphishingAttachment = "T1566.001";
     public const string CommandAndScriptingInterpreter = "T1059";
