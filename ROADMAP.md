@@ -324,6 +324,8 @@ Every alert carries exactly one primary technique ID (more allowed as secondary)
 | Scheduled task | T1053.005 |
 | Double extension | T1036.007 |
 | High entropy / packed | T1027.002 |
+| Oversized executable padded to dodge the scan size limit (A5) | T1027.001 |
+| Right-to-left override character in the file name (A5) | T1036.002 |
 | Malicious file from blocklist / YARA / VT (no rule-specific ID) | T1204.002 |
 | Office → script interpreter (Phase 2) | T1566.001 + T1059.x |
 | Ransomware canary (Phase 2) | T1486 |
