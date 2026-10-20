@@ -86,6 +86,36 @@ internal static class NativeFile
         return handle;
     }
 
+    /// <summary>
+    /// The file's identity from the handle (<c>GetFileInformationByHandleEx(FileIdInfo)</c>: volume serial number
+    /// and 128-bit file ID, valid on NTFS and ReFS). Two handles with the same identity refer to the same file;
+    /// alternate data streams share their file's identity. False if the file system doesn't report one.
+    /// </summary>
+    internal static unsafe bool TryGetFileId(SafeFileHandle handle, out (ulong Volume, UInt128 FileId) id)
+    {
+        FileIdInfo info;
+        if (!GetFileInformationByHandleEx(handle, 18 /* FileIdInfo */, &info, (uint)sizeof(FileIdInfo)))
+        {
+            id = default;
+            return false;
+        }
+
+        id = (info.VolumeSerialNumber, new UInt128(info.FileIdHigh, info.FileIdLow));
+        return true;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber;
+        public ulong FileIdLow;  // FILE_ID_128 bytes 0-7 (little-endian)
+        public ulong FileIdHigh; // bytes 8-15
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern unsafe bool GetFileInformationByHandleEx(SafeFileHandle hFile, int fileInformationClass, void* info, uint bufferSize);
+
     /// <summary><c>GetFileType</c>: 1 = disk, 2 = character device, 3 = pipe, 0 = unknown/error.</summary>
     internal static uint GetFileType(SafeFileHandle handle) => GetFileTypeNative(handle);
 

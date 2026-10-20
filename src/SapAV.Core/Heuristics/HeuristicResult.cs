@@ -1,4 +1,5 @@
 using SapAV.Core.Models;
+using SapAV.Core.Motw;
 using SapAV.Core.Signatures;
 
 namespace SapAV.Core.Heuristics;
@@ -26,6 +27,9 @@ public enum HeuristicKind
 
     /// <summary>A PE file with a signature that doesn't verify (tampered, untrusted, expired, ...).</summary>
     BrokenSignature,
+
+    /// <summary>An executable downloaded from the Internet or Restricted zone (Mark-of-the-Web, A6).</summary>
+    InternetOrigin,
 }
 
 /// <summary>One heuristic that fired, with its score contribution.</summary>
@@ -37,7 +41,8 @@ public sealed record HeuristicFinding(HeuristicKind Kind, int Score, string Reas
 
 /// <summary>Facts from earlier pipeline steps that heuristics use.</summary>
 /// <param name="Signature">The Authenticode result (A3), or null if it wasn't checked.</param>
-public sealed record HeuristicContext(SignatureCheckResult? Signature = null)
+/// <param name="MarkOfTheWeb">The Mark-of-the-Web (A6), or null if there is none or it wasn't read.</param>
+public sealed record HeuristicContext(SignatureCheckResult? Signature = null, MarkOfTheWeb? MarkOfTheWeb = null)
 {
     public static HeuristicContext None { get; } = new();
 

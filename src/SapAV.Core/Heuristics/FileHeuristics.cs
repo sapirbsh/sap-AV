@@ -32,10 +32,11 @@ public interface IFileHeuristics
 /// <item><term>Broken Authenticode signature</term><description><see cref="BrokenSignatureScore"/>, T1204.002</description></item>
 /// <item><term>Unsigned PE</term><description><see cref="UnsignedScore"/>, T1204.002</description></item>
 /// <item><term>Executable/script in Temp, Downloads or AppData</term><description><see cref="RiskyFolderScore"/>, T1204.002</description></item>
+/// <item><term>Executable/script with an Internet/Restricted-zone Mark-of-the-Web</term><description><see cref="InternetOriginScore"/>, T1204.002</description></item>
 /// </list>
 /// <para>
 /// To keep false positives low, a file with a <b>trusted</b> signature (Microsoft or OtherTrusted) gets no
-/// points for the weak signals (entropy, folder); only the masquerading and padding rules count for it.
+/// points for the weak signals (entropy, folder, internet origin); only the masquerading and padding rules count for it.
 /// Entropy is measured over the PE <b>section data only</b>, not the overlay, so ordinary installers whose
 /// compressed payload sits in the overlay aren't flagged. Non-PE files get no entropy rule (archives,
 /// media and Office files are high-entropy by nature).
@@ -58,6 +59,7 @@ public sealed class FileHeuristics : IFileHeuristics
     public const int BrokenSignatureScore = 30;
     public const int UnsignedScore = 15;
     public const int RiskyFolderScore = 15;
+    public const int InternetOriginScore = 15;
 
     /// <summary>Section-data entropy (bits/byte) at or above which a PE counts as packed or encrypted.</summary>
     public const double HighEntropyBitsPerByte = 7.2;
@@ -166,6 +168,13 @@ public sealed class FileHeuristics : IFileHeuristics
         {
             findings.Add(new(HeuristicKind.RiskyFolderExecutable, RiskyFolderScore,
                 $"executable in a {folder} folder", MitreTechniqueIds.MaliciousFile));
+        }
+
+        if (isExecutable && !trusted && context.MarkOfTheWeb is { IsFromInternet: true } mark)
+        {
+            findings.Add(new(HeuristicKind.InternetOrigin, InternetOriginScore,
+                mark.HostUrl is { } url ? $"executable downloaded from the internet ({url})" : "executable downloaded from the internet",
+                MitreTechniqueIds.MaliciousFile));
         }
     }
 
