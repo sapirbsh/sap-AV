@@ -6,12 +6,12 @@ Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.C
 ### Workflow
 - **Every step:** the owning agent writes and runs its own tests. The step is done, and committed as `<step>: …`, when its
   tests pass with 0 build warnings. There is no separate tester/reviewer pass per step.
-- **End of each section (A, B, C, D, E, F):** one **tester** pass and one **reviewer** pass over the whole section, then fix
+- **End of each section (A, B, C, D, E, F, G):** one **tester** pass and one **reviewer** pass over the whole section, then fix
   until clean (committed as `<section>: section review fixes`).
 - **Review fixes:** Critical and High findings are fixed. Medium/Low findings are recorded under the step they belong to
   (as "Carried over from the … review") instead of running extra review rounds.
 - **Batches:** small related steps are built together by one agent, with one commit per step where practical:
-  A4–A7 · B1+B3 · C2+C3 · C5+C6 · D1+D2 · E1–E4 · E5+E6 · F2–F5. Steps with an immediate review are never batched past their review.
+  A4–A7 · B1+B3 · C2+C3 · C5+C6 · D1+D2 · E1–E4 · E5+E6 · F2–F5 · G3a+G3b · G4a+G4b. Steps with an immediate review are never batched past their review.
 - **Exception — immediate review:** steps that run privileged code as SYSTEM, touch quarantine, write or remove Registry
   entries, delete files, or touch the pipe get their own **reviewer** pass right after the step, before the next step starts:
   - **B:** B1 (Event Log source registration), B2 (quarantine), B4 (pipe server)
@@ -20,6 +20,8 @@ Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.C
   - **E:** E5 (Defender access as SYSTEM), E8/E10 (ETW sessions as SYSTEM), E11 (Remove threat: kill/Registry/Defender writes),
     E12 (Delete permanently, reboot-time actions)
   - **F:** F1 (pipe client), F3 (Explorer context-menu Registry writes)
+  - **G:** G1b (honeytokens planted as SYSTEM, ACLs), G2a (process + network telemetry), G2b (incident store),
+    G2c (story-wide Remove threat), G3c (Explorer verb Registry writes)
 - Tests that depend on certificates, files or software that exist on the dev PC but not everywhere must **skip cleanly**
   (reported as Skipped, with a reason) so the suite also passes on a clean machine and on GitHub Actions `windows-latest`.
 - Work continues from step to step without waiting for approval. It stops only for a **Critical** security finding or a
@@ -37,7 +39,11 @@ Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.C
 | 4 | Mark-of-the-Web | 1 | detection-dev | engine-dev (queue priority), ui-designer (show source URL) |
 | 5 | Real-time persistence monitoring | 1 | engine-dev | detection-dev (judge target exe), ui-designer (alert + "block & remove") |
 | 11 | Cracked-software threat pack (infostealers, miners, Defender tampering, script persistence, browser hijack, PUP/HackTool, "Remove threat") | 1 | detection-dev (rules, categories) | engine-dev (collectors, monitors, remediation), ui-designer (category display, Remove threat, delete permanently) |
-| 6 | Process monitoring + suspicious parent-child chains | 2 | engine-dev | detection-dev (chain rules), ui-designer |
+| G1 | Honeytokens (deception trap for infostealers) | 1 | detection-dev + engine-dev | — |
+| G2 | Attack Story (EDR-style incident timeline) | 1 | engine-dev (telemetry, correlation) | ui-designer (timeline), detection-dev (chain rules) |
+| G3 | Pre-Flight check ("check before you run") | 1 | detection-dev | ui-designer (drag-and-drop, Explorer verb) |
+| G4 | Exposure Report ("what was stolen?") | 1 | detection-dev | ui-designer (report + recovery checklist) |
+| 6 | Process monitoring + suspicious parent-child chains | **moved to Phase 1** (E8 + G2a) | engine-dev | detection-dev (chain rules), ui-designer |
 | 7 | Ransomware canary files | 2 | engine-dev | ui-designer |
 | 8 | USB auto-scan | 2 | engine-dev | ui-designer |
 | 9 | Hosts file monitoring | 2 | engine-dev | detection-dev (judge changes) |
@@ -269,7 +275,26 @@ and **never change the real Defender configuration** (Defender access goes throu
 | F6 | ui-designer | "Remove threat" flow: planned-changes list, confirmation, result, and undo from the remediation history. Defender-tampering and browser-hijack findings view | View-model tests with a fake pipe |
 | F7 | ui-designer | Quarantine screen: restore, "Delete permanently" with double confirmation, and pending reboot actions (with cancel). Reports the user's idle state to the engine for E9 | View-model tests; the second confirmation can't be skipped |
 | F8 | ui-designer | UI polish pass: dashboard, animations, empty/error states, consistent purple/graphite theme | Reviewer sign-off |
-| F9 | reviewer | **Phase 1 security review:** a full security review of the whole codebase (privilege boundaries, the pipe, path handling, quarantine/remediation/deletion, Registry and Defender writes, VirusTotal key handling, dependencies). Critical/High fixed before Phase 1 is called done | Review report with no open Critical/High |
+**G. Signature features (detection-dev, engine-dev, ui-designer)**
+
+The four features that make sap-AV "think like a SOC analyst". They build on E (process events E8, file-read monitor E10,
+Remove threat E11) and F (UI). G1 and G2 steps get their own reviewer pass (SYSTEM, ACLs, telemetry), and so do the
+Registry-writing G3c and the deleting G2c.
+
+| Step | Owner | Deliverable | Done when (tests) |
+|------|-------|-------------|-------------------|
+| G1a | detection-dev | **Honeytoken design:** decoy set (fake browser-profile folder with decoy `Login Data` / `Cookies` / `Local State`, Exodus/Electrum-style wallet folder, Discord `Local Storage\leveldb` token file, `passwords.txt`). Values are generated per machine and obviously fake (reserved test domains such as `example.com`, invalid card/wallet checksums), never derived from real data. Allowlist of expected readers (sap-AV itself, Defender `MsMpEng.exe`, Windows Search, known backup agents) by signer + path. A read by anyone else → Malicious infostealer, T1555.003 (browser stores) / T1552.001 (token/password files) | Generation is deterministic per seed and never contains real-looking secrets; allowlist + rule tests on synthetic read events |
+| G1b | engine-dev | **Honeytoken planting + trap (immediate review):** the SYSTEM service plants decoys, then: hidden + `NOT_CONTENT_INDEXED`; owned by SYSTEM, with the user allowed to *read* (a stealer running as the user must be able to open them) but not write/delete; excluded from sap-AV's own scans; recreated if deleted or changed. Locations avoid OneDrive/cloud-synced folders, and real browser data is never modified (no edits to real profiles or `Local State`). Read detection via the E10 ETW file-read monitor (primary); file SACL auditing only as an option (see Decisions). Setting: on/off (off removes all decoys) | Plant → read by a test process → alert; read by an allowlisted reader → no alert; delete → recreated; turning it off removes every decoy; the real profile folder is byte-identical before/after (test on a fake profile tree) |
+| G2a | engine-dev + detection-dev | **Telemetry prerequisites (immediate review):** process monitoring moves from Phase 2 #6 into Phase 1. engine-dev: per-process network connections (ETW TCP/IP events, or `GetExtendedTcpTable` polling with owning PID as a fallback) joined with the E8 process start/stop stream. detection-dev: the suspicious parent-child chain rules (Office/Outlook → powershell/cmd/wscript/cscript/mshta, T1566.001 + T1059.x) | Fake feed tests; one integration test where a harmless child process opens a loopback connection and both show up with the right PID/parent |
+| G2b | engine-dev | **Attack Story correlation (immediate review):** groups events into one incident per root cause: download (MOTW URL) → process start (parent/child) → persistence created → Defender tampering → honeytoken/credential access → network connections. Each step has a MITRE ID and a plain-language sentence. Incident store in `%ProgramData%\sap-AV\` (SQLite); export as JSON and as a readable report (HTML) | Synthetic event sequences produce the expected single story; unrelated events stay out; JSON round-trip; report contains every step in order |
+| G2c | engine-dev | **Story-wide "Remove threat" (immediate review):** extends E11 to every process, file and persistence entry in the story, using one remediation record with grouped undo and the same confirm-first rules | Remove → undo round-trip on a synthetic story (HKCU test keys, temp files, fake processes); partial failure reported, earlier steps stay undoable |
+| G2d | ui-designer | Attack Story timeline view: ordered steps, MITRE tags, plain-language text, export buttons, "Remove threat" for the whole story | View-model tests with a fake pipe |
+| G3a | detection-dev | **Pre-Flight static analyzer.** NEVER executes the file and never extracts archives to disk. It covers signature (A3), VirusTotal hash (D2), entropy/packer (A5), PE imports → capabilities via `System.Reflection.PortableExecutable` (anti-debug T1622, injection T1055, keylogging T1056.001, credential access T1555, Defender tampering T1562.001), embedded URLs/IPs/domains (strings scan), and archive listing (zip via `System.IO.Compression`, names/sizes only, with path-traversal names flagged and size/ratio/entry-count limits against zip bombs) | Synthetic PE/zip fixtures built at test time; each capability with a positive + negative case; zip-bomb and `..\` entry tests; no process is ever started |
+| G3b | detection-dev | **Risk score 0–100** from the G3a findings, with plain-language reasons and MITRE IDs; documented weights | Score ordering tests (clean signed < unsigned packed < unsigned packed + injection imports) |
+| G3c | ui-designer | Pre-Flight UI: drag-and-drop onto the window + Explorer verb "Check before you run" (with F3's registry verb, immediate review); report view with score, reasons, MITRE | View-model tests; verb register/unregister under HKCU |
+| G4a | detection-dev | **Exposure inventory:** after an infostealer verdict or a honeytoken read, list what was *likely* exposed by checking which stores exist on the machine (browser profiles with saved-password/cookie files, Discord, Steam, crypto wallets). Presence only: real databases are never opened or read. Recovery checklist data in `data/` with each service's official security page URL (verified, with source) | Inventory on a fake profile tree; wording always says "likely exposed"; every checklist URL is https and on the service's own domain |
+| G4b | ui-designer | Exposure Report + guided recovery checklist: change passwords **from another device**, revoke all sessions, enable 2FA, move crypto funds; links open the official pages | View-model tests; the checklist order and the "another device" warning are always shown |
+| G5 | reviewer | **Phase 1 security review:** a full security review of the whole codebase (privilege boundaries, the pipe, path handling, quarantine/remediation/deletion, Registry and Defender writes, honeytoken ACLs, telemetry, VirusTotal key handling, dependencies). Critical/High fixed before Phase 1 is called done | Review report with no open Critical/High |
 
 ---
 
@@ -277,7 +302,7 @@ and **never change the real Defender configuration** (Defender access goes throu
 
 | # | Feature | Owner | Notes |
 |---|---------|-------|-------|
-| 6 | Process monitoring + suspicious parent-child chains | detection-dev (chain rules), engine-dev | The process event source is built in Phase 1 (E8); this adds the chain rules. e.g. Word/Excel/Outlook → powershell/cmd/wscript/cscript/mshta. MITRE T1059.x / T1566.001 |
+| 6 | ~~Process monitoring + suspicious parent-child chains~~ **moved to Phase 1** | detection-dev (chain rules), engine-dev | Now Phase 1: the event source is E8, and the chain rules + network telemetry are G2a (prerequisite for the Attack Story). e.g. Word/Excel/Outlook → powershell/cmd/wscript/cscript/mshta. MITRE T1059.x / T1566.001 |
 | 7 | Ransomware canary files | engine-dev | Hidden decoy files in user folders; any modification → high-severity alert. MITRE T1486 |
 | 8 | USB auto-scan | engine-dev | Detect volume arrival, Custom Scan of the drive, autorun.inf check. MITRE T1091 |
 | 9 | Hosts file monitoring | engine-dev, detection-dev | Scan-time hosts checks are in Phase 1 (E6); this adds real-time watching. Watch `drivers\etc\hosts`, diff, flag redirects of security/banking domains. MITRE T1565.001 |
@@ -314,6 +339,10 @@ Every alert carries exactly one primary technique ID (more allowed as secondary)
 | Threat pack: `mshta` / `rundll32` from user folders | T1218.005 / T1218.011 |
 | Threat pack: proxy / PAC hijack | T1557 (closest fit: Adversary-in-the-Middle) |
 | Threat pack: random-named AppData executable, PUP / HackTool | T1204.002 |
+| Honeytoken read: decoy browser credential/cookie store | T1555.003 |
+| Honeytoken read: decoy token / `passwords.txt` / wallet file | T1552.001 |
+| Pre-Flight capabilities: anti-debug / injection / keylogging / credential access / Defender tampering | T1622 / T1055 / T1056.001 / T1555 / T1562.001 |
+| Attack Story: outbound connection by a story process | T1071 (Application Layer Protocol) |
 
 YARA rules may override with their own `mitre` meta value.
 
@@ -342,6 +371,11 @@ Open (decide before the step that needs it):
   - `System.Diagnostics.PerformanceCounter`, for CPU/GPU counters (E9).
 - **YARA-Forge licensing:** the repo is public. Vendored rules must keep their per-rule licenses, and any rule whose license
   doesn't allow redistribution is left out (or downloaded by the update script instead of committed). Decide at E2.
+- **Honeytoken read detection (G1b):** the primary method is ETW file-read events (E10, needs TraceEvent). File SACL auditing
+  would also need the system-wide "Audit File System" policy turned on (`auditpol`), which changes the machine's security
+  policy and fills the Security log. Offer it only as an opt-in setting, or drop it. Decide at G1b.
+- **Archive formats for Pre-Flight (G3a):** zip is built in. rar/7z listing needs a new package (e.g. SharpCompress).
+  Decide at G3a; zip only until then.
 - **Locked files on another volume:** a reboot-time move can't cross volumes. The options are a per-volume quarantine folder,
   or a reboot-time delete after an extra confirmation. Decide at E12.
 

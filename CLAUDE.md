@@ -1,5 +1,9 @@
 # Project: sap-AV — Real-Time Antivirus for Windows
 
+**Product identity:** "sap-AV - the antivirus that thinks like a SOC analyst: it traps thieves, tells the full attack story,
+and tells you what to do next." (Signature features: ROADMAP section G — Honeytokens, Attack Story, Pre-Flight check,
+Exposure Report.)
+
 sap-AV is a learning / portfolio project: a real-time antivirus for Windows 10/11 with a modern, good-looking GUI.
 The code is public on GitHub. Product name in the UI: "sap-AV".
 
@@ -53,6 +57,12 @@ Full plan, owners, and build order: see `ROADMAP.md`. Summary:
   - a PUP / HackTool category
   - user-confirmed "Remove threat", "Delete permanently" and reboot-time actions for locked files
   It is included in Quick and Full Scan.
+- Phase 1, section G — signature features:
+  - Honeytokens: decoy credential/wallet/token files that trap infostealers.
+  - Attack Story: an EDR-style incident timeline with story-wide "Remove threat".
+  - Pre-Flight check: static "check before you run" report with a 0–100 risk score.
+  - Exposure Report: what was likely stolen, plus a guided recovery checklist.
+  Process monitoring (parent-child chains + network connections) moved from Phase 2 into Phase 1 as the prerequisite.
 - Phase 2: process parent-child monitoring, ransomware canary files, USB auto-scan, hosts file monitoring, scheduled scans.
 - Cross-cutting: every alert has a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
 
@@ -98,6 +108,12 @@ verdict + reason + MITRE + Event Log path.
 - The only permanent deletion is "Delete permanently" on the quarantine screen, with double confirmation. Locked files get a
   reboot-time action: prefer a reboot-time move into quarantine, and delete at reboot only for "Delete permanently".
 - PUP / HackTool findings are never quarantined automatically.
+- Honeytokens: NEVER modify the user's real browser databases, profiles or app data. Decoys are separate files with
+  generated, obviously fake values (never derived from real data), kept out of cloud-synced folders, and readable by the
+  user but writable only by SYSTEM. Turning the feature off removes every decoy.
+- Pre-Flight NEVER executes the analyzed file and never extracts archives to disk (list entries only, with zip-bomb limits).
+- Exposure Report says "likely exposed", never claims certainty. It checks which stores exist, but never opens or reads
+  real credential databases. Recovery links go only to each service's official security page.
 - Every alert gets a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
 - Performance matters: scanning must not freeze the PC. Use a queue, async I/O, background (low) CPU/IO priority for scan threads,
   and skip huge files by size limit.
@@ -120,12 +136,16 @@ verdict + reason + MITRE + Event Log path.
 - engine-dev: file monitoring, scan queue and scan modes (Quick / Full / Custom, scan cache, priority), persistence collectors
   and real-time persistence monitoring, quarantine and "block & remove", Event Log, Windows Service, pipes; threat pack:
   Defender/proxy/hosts collectors, ETW process and file-read events, CPU/GPU monitors, "Remove threat", delete permanently,
-  reboot-time actions
+  reboot-time actions; signature features: honeytoken planting/trap (G1b), process + network telemetry (G2a), Attack Story
+  correlation + incident store (G2b), story-wide Remove threat (G2c)
 - detection-dev: hashing, hash DB, Authenticode, YARA, heuristics, Mark-of-the-Web, VirusTotal client + cache + rate limiter,
   persistence-entry judgement, MITRE mapping; threat pack: PUP/HackTool category, YARA-Forge rules, infostealer/miner/
-  Defender/script-persistence/browser-hijack rules
+  Defender/script-persistence/browser-hijack rules; signature features: honeytoken design (G1a), parent-child chain rules
+  (G2a), Pre-Flight static analyzer + risk score (G3), exposure inventory + recovery checklist data (G4a)
 - ui-designer: WPF GUI and visual design, scan and results screens, settings, alerts, Explorer context menu; threat pack:
-  PUP/HackTool display, "Remove threat" flow and undo, quarantine "Delete permanently", pending reboot actions, idle-state reporting
+  PUP/HackTool display, "Remove threat" flow and undo, quarantine "Delete permanently", pending reboot actions, idle-state reporting;
+  signature features: Attack Story timeline (G2d), Pre-Flight drag-and-drop + "Check before you run" verb (G3c),
+  Exposure Report + recovery checklist (G4b)
 - tester: section-level test pass (gaps, portability, flakiness) — model: sonnet
 - reviewer: read-only code review (bugs, performance, security), per section and for privileged steps — model: opus
 - Models: detection-dev, engine-dev, reviewer = opus; tester, ui-designer = sonnet (set in `.claude/agents/*.md`)
@@ -133,7 +153,7 @@ verdict + reason + MITRE + Event Log path.
 Workflow (details in ROADMAP.md "Workflow"):
 - The main session plans and delegates each step to its owning agent. That agent writes and runs its own tests;
   the step is committed when they pass with 0 warnings.
-- At the end of each section (A–F): one tester pass + one reviewer pass over the whole section, then fix until clean.
+- At the end of each section (A–G): one tester pass + one reviewer pass over the whole section, then fix until clean.
 - Immediate reviewer pass right after any step that runs privileged code as SYSTEM, touches quarantine, writes/removes
   Registry entries, deletes files, or touches the pipe (the list is in ROADMAP.md).
 - Review fixes: fix Critical and High findings. Medium/Low findings are listed in ROADMAP.md under the step they belong to,

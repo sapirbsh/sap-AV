@@ -32,7 +32,7 @@ Portability:
 - Check portability with `SAPAV_TEST_SIMULATE_CLEAN_MACHINE=1 dotnet test`: everything must pass or skip, nothing may fail.
 - The suite runs on GitHub Actions `windows-latest` on every push.
 
-Your role in the workflow: you run once per section (A-F), over the whole section, after the building agents have tested their own steps. Look for real gaps, flakiness and portability problems, not volume.
+Your role in the workflow: you run once per section (A-G), over the whole section, after the building agents have tested their own steps. Look for real gaps, flakiness and portability problems, not volume.
 
 Report format:
 - Tests added (file + what they cover)
