@@ -36,32 +36,51 @@ public static partial class MitreTechniqueIdFormat
     public static bool TryNormalize(string? raw, out IReadOnlyList<string> ids)
     {
         var result = new List<string>();
-        if (!string.IsNullOrEmpty(raw))
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var token in Tokenize(raw))
         {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            int start = 0;
-            for (int i = 0; i <= raw.Length; i++)
+            var upper = token.ToUpperInvariant();
+            if (IsValid(upper) && seen.Add(upper))
             {
-                if (i < raw.Length && !IsSeparator(raw[i]))
-                {
-                    continue;
-                }
-
-                if (i > start)
-                {
-                    var token = raw[start..i].ToUpperInvariant();
-                    if (IsValid(token) && seen.Add(token))
-                    {
-                        result.Add(token);
-                    }
-                }
-
-                start = i + 1;
+                result.Add(upper);
             }
         }
 
         ids = result.AsReadOnly();
         return result.Count > 0;
+    }
+
+    /// <summary>
+    /// The tokens of <paramref name="raw"/> that <see cref="TryNormalize"/> drops because they are not valid IDs
+    /// even after upper-casing (e.g. <c>"001"</c> in <c>"T1059,001"</c>), in their original form and order.
+    /// Duplicates of a valid ID are not listed: dropping them keeps the meaning. Never throws.
+    /// </summary>
+    public static IReadOnlyList<string> InvalidTokens(string? raw) =>
+        Tokenize(raw).Where(token => !IsValid(token.ToUpperInvariant())).ToArray();
+
+    /// <summary>Splits on commas, semicolons and whitespace; empty tokens are skipped.</summary>
+    private static IEnumerable<string> Tokenize(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            yield break;
+        }
+
+        int start = 0;
+        for (int i = 0; i <= raw.Length; i++)
+        {
+            if (i < raw.Length && !IsSeparator(raw[i]))
+            {
+                continue;
+            }
+
+            if (i > start)
+            {
+                yield return raw[start..i];
+            }
+
+            start = i + 1;
+        }
     }
 
     /// <summary>

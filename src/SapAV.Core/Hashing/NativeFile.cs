@@ -59,6 +59,13 @@ internal static class NativeFile
     internal static SafeFileHandle OpenForSignatureCheck(string fullPath, out int win32Error) =>
         Open(fullPath, SignatureCheckFlags, out win32Error);
 
+    /// <summary>
+    /// Same flags as <see cref="OpenForSignatureCheck"/> (a synchronous handle with every security-relevant
+    /// flag), for the YARA scanner: it memory-maps the file from this handle, so libyara never re-opens the path.
+    /// </summary>
+    internal static SafeFileHandle OpenForMemoryMap(string fullPath, out int win32Error) =>
+        Open(fullPath, SignatureCheckFlags, out win32Error);
+
     private static SafeFileHandle Open(string fullPath, uint flags, out int win32Error)
     {
         var handle = CreateFileW(
