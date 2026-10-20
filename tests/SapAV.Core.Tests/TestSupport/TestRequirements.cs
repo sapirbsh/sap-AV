@@ -51,6 +51,12 @@ public enum Requires
 
     /// <summary>At least one certificate of <see cref="MicrosoftCodeSigningCertificates"/> is in a local store.</summary>
     AnyKnownCertificateInStore,
+
+    /// <summary>
+    /// Opt-in (<c>SAPAV_TEST_EICAR_ON_DISK=1</c>): the EICAR test file can be written to %TEMP% and read back,
+    /// i.e. no real antivirus removes or blocks it. Off by default because a real antivirus alerts on it.
+    /// </summary>
+    EicarFileOnDisk,
 }
 
 /// <summary>Probes each <see cref="Requires"/> once per test process (lazily, at discovery time).</summary>
@@ -91,7 +97,11 @@ internal static class TestRequirements
                 .Any(k => CertificateStores.Find(k.Sha1) is not null)
             ? null
             : "none of the known Microsoft certificates is in a local certificate store"),
+        [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
     };
+
+    /// <summary>Set to 1 to run the tests that write the EICAR test file to disk.</summary>
+    public const string EicarOnDiskVariable = "SAPAV_TEST_EICAR_ON_DISK";
 
     public static bool SimulateCleanMachine
     {
@@ -259,6 +269,33 @@ internal static class TestRequirements
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return $"admin share not reachable (needs elevation / file sharing): {ex.Message}";
+        }
+        finally
+        {
+            DeleteProbeDir(dir);
+        }
+    }
+
+    private static string? ProbeEicarOnDisk()
+    {
+        if (Environment.GetEnvironmentVariable(EicarOnDiskVariable)?.Trim() != "1")
+        {
+            return $"opt-in: set {EicarOnDiskVariable}=1 to write the EICAR test file to %TEMP% (a real antivirus may alert)";
+        }
+
+        var dir = ProbeDir();
+        try
+        {
+            var path = Path.Combine(dir, "probe.txt");
+            File.WriteAllBytes(path, Eicar.Bytes());
+            Thread.Sleep(1000); // give a real-time scanner the chance to act
+            return File.ReadAllBytes(path).AsSpan().SequenceEqual(Eicar.Bytes())
+                ? null
+                : "the EICAR test file was changed on disk (by an antivirus?)";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"an antivirus blocked or removed the EICAR test file: {ex.Message}";
         }
         finally
         {
