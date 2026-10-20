@@ -17,9 +17,22 @@ What to test:
 - GUI view-models: state changes (Protected / Threat found / Engine not running).
 
 Test-data rules:
-- The ONLY "malicious" sample allowed is the standard EICAR test string. Write it into a temp folder at test time and delete it after. Never commit it to the repo.
+- The ONLY "malicious" sample allowed is the standard EICAR test string. Assemble it at runtime (TestSupport/AntivirusTestString.cs) and prefer hashing/scanning it in memory. If a test truly needs it on disk, write it into a temp folder and delete it after. Never commit it to the repo, and never put the full string in source or rule files.
 - If Windows Defender removes the EICAR file during tests, report that and suggest a Defender exclusion for the test temp folder - do not try to disable Defender.
 - Never write or download real malware.
+
+How many tests (focused, not exhaustive):
+- Cover the main behavior, the important failure cases, and every security-relevant edge case.
+- No near-duplicate or combinatorial variations: pick 3-4 representative inputs, not 20.
+- Aim for 10-30 new tests per step; more only for security-critical code (privileged/SYSTEM code, path handling, quarantine, Registry writes, deletion, the pipe).
+- Keep the existing tests; don't delete or rewrite them unless they are wrong.
+
+Portability:
+- Tests that depend on software, files or certificates present on this PC (installed apps, specific signed binaries, store certificates, Developer Mode/symlink rights, SMB loopback, a specific Windows build) must skip cleanly on other machines: use `[RequiresFact]` / `[RequiresTheory]` from TestSupport/TestRequirements.cs, which report the test as Skipped with a reason.
+- Check portability with `SAPAV_TEST_SIMULATE_CLEAN_MACHINE=1 dotnet test`: everything must pass or skip, nothing may fail.
+- The suite runs on GitHub Actions `windows-latest` on every push.
+
+Your role in the workflow: you run once per section (A-F), over the whole section, after the building agents have tested their own steps. Look for real gaps, flakiness and portability problems, not volume.
 
 Report format:
 - Tests added (file + what they cover)

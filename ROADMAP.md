@@ -8,8 +8,12 @@ Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.C
   tests pass with 0 build warnings. There is no separate tester/reviewer pass per step.
 - **End of each section (A, B, C, D, E, F):** one **tester** pass and one **reviewer** pass over the whole section, then fix
   until clean (committed as `<section>: section review fixes`).
+- **Review fixes:** Critical and High findings are fixed. Medium/Low findings are recorded under the step they belong to
+  (as "Carried over from the … review") instead of running extra review rounds.
+- **Batches:** small related steps are built together by one agent, with one commit per step where practical:
+  A4–A7 · B1+B3 · C2+C3 · C5+C6 · D1+D2 · E1–E4 · E5+E6 · F2–F5. Steps with an immediate review are never batched past their review.
 - **Exception — immediate review:** steps that run privileged code as SYSTEM, touch quarantine, write or remove Registry
-  entries, or touch the pipe get their own **reviewer** pass right after the step, before the next step starts:
+  entries, delete files, or touch the pipe get their own **reviewer** pass right after the step, before the next step starts:
   - **B:** B1 (Event Log source registration), B2 (quarantine), B4 (pipe server)
   - **C:** C1 (pipe-supplied scan paths, `ScanPathPolicy`)
   - **D:** D3 (`%ProgramData%\sap-AV` ACL, API key), D5 (Block & remove: Registry/task/service changes)
@@ -266,6 +270,7 @@ and **never change the real Defender configuration** (Defender access goes throu
 | F6 | ui-designer | "Remove threat" flow: planned-changes list, confirmation, result, and undo from the remediation history. Defender-tampering and browser-hijack findings view | View-model tests with a fake pipe |
 | F7 | ui-designer | Quarantine screen: restore, "Delete permanently" with double confirmation, and pending reboot actions (with cancel). Reports the user's idle state to the engine for E9 | View-model tests; the second confirmation can't be skipped |
 | F8 | ui-designer | UI polish pass: dashboard, animations, empty/error states, consistent purple/graphite theme | Reviewer sign-off |
+| F9 | reviewer | **Phase 1 security review:** a full security review of the whole codebase (privilege boundaries, the pipe, path handling, quarantine/remediation/deletion, Registry and Defender writes, VirusTotal key handling, dependencies). Critical/High fixed before Phase 1 is called done | Review report with no open Critical/High |
 
 ---
 

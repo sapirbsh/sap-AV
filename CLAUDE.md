@@ -8,8 +8,8 @@ The code is public on GitHub. Product name in the UI: "sap-AV".
 - Full palette and design rules: see `.claude/agents/ui-designer.md`.
 
 ## Tech stack
-- Language: C# on .NET 10 (LTS) — target framework net10.0-windows for SapAV.App; Core, Engine and tests are net10.0 today
-  and switch to net10.0-windows at ROADMAP step A3 (approved — Windows-only APIs: Authenticode, Registry, ADS, Event Log)
+- Language: C# on .NET 10 (LTS) — every project (App, Core, Engine, tests) targets net10.0-windows
+  (since A3; Windows-only APIs: Authenticode, Registry, ADS, Event Log)
 - SDK pinned by `global.json` (10.0.103, rollForward latestFeature), so builds never pick up an older installed SDK
 - GUI: WPF + the WPF-UI library (NuGet: `WPF-UI`) for a modern Fluent look, customized to the sap-AV dark gray + purple theme
 - Engine: .NET Worker Service that runs as a Windows Service
@@ -101,7 +101,13 @@ verdict + reason + MITRE + Event Log path.
 - Every alert gets a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
 - Performance matters: scanning must not freeze the PC. Use a queue, async I/O, background (low) CPU/IO priority for scan threads,
   and skip huge files by size limit.
-- Every feature gets tests before it's considered done.
+- Every feature gets tests before it's considered done. Tests are focused, not exhaustive:
+  - cover the main behavior, the important failure cases, and every security-relevant edge case;
+  - no near-duplicate or combinatorial variations (3-4 representative inputs, not 20);
+  - aim for 10-30 new tests per step; more only for security-critical code;
+  - tests that depend on software or certificates on this PC must skip cleanly elsewhere (`[RequiresFact]`/`[RequiresTheory]`;
+    check with `SAPAV_TEST_SIMULATE_CLEAN_MACHINE=1 dotnet test`);
+  - keep the existing tests.
 - Small, focused commits with clear messages.
 
 ## Commands
@@ -129,7 +135,15 @@ Workflow (details in ROADMAP.md "Workflow"):
   the step is committed when they pass with 0 warnings.
 - At the end of each section (A–F): one tester pass + one reviewer pass over the whole section, then fix until clean.
 - Immediate reviewer pass right after any step that runs privileged code as SYSTEM, touches quarantine, writes/removes
-  Registry entries, or touches the pipe (the list is in ROADMAP.md).
+  Registry entries, deletes files, or touches the pipe (the list is in ROADMAP.md).
+- Review fixes: fix Critical and High findings. Medium/Low findings are listed in ROADMAP.md under the step they belong to,
+  instead of extra review rounds.
+- Small related steps are built in one batch by one agent (e.g. A4–A7), with one commit per step where practical.
 - Machine-dependent tests (certificates, installed software, Developer Mode, SMB loopback) must skip cleanly, so the
-  suite passes on a clean machine and GitHub Actions `windows-latest`.
-- Keep going from step to step without waiting. Stop only for a Critical security finding or a decision the user must make.
+  suite passes on a clean machine and GitHub Actions `windows-latest` (CI runs `dotnet build` + `dotnet test` on every push).
+
+Autonomy:
+- Continue from step to step without waiting for the user.
+- Stop only for: a Critical security finding that can't be fixed safely, a decision that needs the user (new package,
+  licensing, deviation from an approved rule), or a failing build that can't be fixed after 3 attempts.
+- After each section, write a short summary to `PROGRESS.md`: what was built, what's left, open issues.
