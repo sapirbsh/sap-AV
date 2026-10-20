@@ -12,7 +12,6 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
   by thumbprint; WHQL / Store / Trusted Signing → OtherTrusted. All projects on `net10.0-windows`.
   Machine-dependent tests skip cleanly (`SAPAV_TEST_SIMULATE_CLEAN_MACHINE=1`).
 
-**Left in section A:** A4–A7 (YARA, heuristics, Mark-of-the-Web, FileScanner), then the section tester + reviewer pass,
-then A8 (minimal scan window).
+**Left in section A:** A4–A7 (YARA, heuristics, Mark-of-the-Web, FileScanner), then the section tester + reviewer pass, then straight on to section B (all UI work stays in section F).
 
 **Open issues:** see "Carried over" notes in `ROADMAP.md` (A5, A7, B1, B3, B4, C1, C5, C6, D1, D3).
