@@ -217,6 +217,40 @@ Each step is small enough for one agent session and one or a few commits.
 - **YARA engine (decided):** switch from libyara 4.1.1 (2021, via dnYara.NativePack) to **YARA-X**, using the official prebuilt C API (`yara-x-capi`, latest release for `x86_64-pc-windows-msvc`). The A4 layer is rewritten on the YARA-X C API with the same interface for FileScanner. It keeps: scanning our own hardened handle / mapped view, per-file rule compilation, safe rule swapping, the scan timeout, and mitre warnings. The downloaded DLL is pinned by version and verified by SHA-256 (both recorded here once known). **Fallback:** if the YARA-X integration does not work within section A's fixes, keep libyara 4.1.1 with only allowlisted modules, record this as an open item, and continue to section B.
 - **YARA modules:** only the modules our rules need (e.g. `pe`, `math`, `hash`) may run. libyara only runs a module when a rule imports it, so `YaraRuleSet` enforces an `import` allowlist at load time: a rule file importing anything else (`cuckoo`, `magic`, `dotnet`, `elf`, `macho`, `dex`, `console`, …) is rejected and reported in `FileErrors`. If we build libyara ourselves, unused modules are also compiled out.
 
+**Carried over from the section A review (Medium/Low, by target step).** The High findings H1–H3 are fixed in
+section A: single-handle pipeline, crash-safe YARA content access, YARA import allowlist.
+- **A5 (follow-up, before E3):**
+  - (M2) PE detection is easy to dodge. More than 96 sections, `e_lfanew` > 4072, or a section table past the first 4 KiB → no PE
+    → the unsigned/entropy/folder rules are skipped. Treat MZ or any executable extension as executable, read headers up to
+    `SizeOfHeaders` (cap 64 KiB), raise the section cap to 65535, and count "malformed PE" as a signal.
+  - (M3) Entropy read amplification: overlapping sections can make one file cost GBs of reads. Merge ranges and cap the
+    sampled bytes.
+  - (M7) `.7z.exe` / `.zip.exe` self-extractors score 60 on the double-extension rule even when trusted-signed. Archive
+    decoys don't count for trusted-signed files.
+  - (L1) Bidi masquerading also needs U+202B, U+202D and U+2066–2069, not just U+202E.
+- **A7:** (L6) `HeuristicResult.ContentInspected == false` is ignored; add a note to the report.
+- **B1 / X2:** (L2) MOTW URL sanitizing: strip U+2028/2029; treat `\` as the end of the authority (`https://evil\@good`);
+  strip query strings (presigned tokens) before writing to the Event Log / SIEM.
+- **B3:**
+  - (M4) Exceptions escape `FileScanner.ScanAsync`: wrap each step, map to NotScanned(Error), and treat it as a cancel only
+    when our own token is cancelled.
+  - (M5) Zero loaded rules, or a non-empty `FileErrors`, still scans as Clean: the engine alerts/degrades. Rule files are
+    opened by path, which is acceptable only from D3's protected folder.
+  - (M6) Each file was opened 5–6 times and read 3–4 times; H1 fixes the opens. Compute section entropy in the same pass
+    where possible.
+  - (L5) Files that defeat rule atoms pin a worker for the full YARA timeout: add a per-job time budget.
+- **B5:**
+  - (H2 residual) Until B5 lands, a native crash inside YARA-X, or an in-page error on a mapped view, is a service crash.
+  - (L7) Some signature handlers (MSI, scripts) may open `pcwszFilePath` themselves instead of `hFile`: test inside the
+    worker. MOTW in the worker needs the stream handle from the broker (H1's handle-relative open).
+- **C6:** (M6) Full Scan relies on H1's single-handle pipeline for I/O cost.
+- **D1 (and A2):** (M1) Byte-range-lock evasion: a dropper keeping an exclusive lock on its payload makes hashing fail
+  (Locked → NotScanned) while image loading ignores the lock. On `ERROR_LOCK_VIOLATION` (33), hash from a mapped view of
+  the same handle.
+- **D2:** (M4) Online-lookup failures and HttpClient timeouts become a note, never a scan failure or a fake cancel.
+- **D3:** (M5) Rule and blocklist files load only from the ACL'd `%ProgramData%\sap-AV` folder.
+- **E2:** (L5) Lint rule atom quality, since slow rules turn into timeouts.
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |
