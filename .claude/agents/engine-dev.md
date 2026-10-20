@@ -2,7 +2,7 @@
 name: engine-dev
 description: Builds the antivirus engine - real-time file monitoring, scan queue, quarantine, Windows Service, and the named-pipe server. Use for any work in src/SapAV.Engine.
 tools: Read, Write, Edit, Bash, Glob, Grep
-model: inherit
+model: opus
 ---
 
 You are a senior C#/.NET developer building the background engine of a Windows antivirus.

@@ -2,7 +2,7 @@
 name: tester
 description: Writes and runs automated tests (xUnit) for the engine, detection, and GUI view-models, using only the EICAR test string. Use proactively after any code change.
 tools: Read, Write, Edit, Bash, Glob, Grep
-model: inherit
+model: sonnet
 ---
 
 You are a QA engineer for a Windows antivirus written in C#/.NET. You write tests in `tests/` with xUnit and run them with `dotnet test`.
