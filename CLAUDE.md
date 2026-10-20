@@ -115,6 +115,11 @@ verdict + reason + MITRE + Event Log path.
 - Exposure Report says "likely exposed", never claims certainty. It checks which stores exist, but never opens or reads
   real credential databases. Recovery links go only to each service's official security page.
 - Every alert gets a MITRE ATT&CK technique ID and is written to the Windows Event Log (source "sap-AV").
+- Privilege separation (from ROADMAP B5): the SYSTEM engine never parses file contents. Hashing, YARA, heuristics,
+  Authenticode, MOTW and Pre-Flight parsing run in a low-privilege scan worker (AppContainer or restricted token at Low
+  integrity, no network, Job Object limits). The engine only opens files with the hardened open and brokers read-only
+  handles. Worker results are untrusted input. A worker crash or exploit must never give SYSTEM.
+- YARA: only allowlisted modules may be imported by rules (e.g. `pe`, `math`, `hash`); keep libyara on a maintained version.
 - Performance matters: scanning must not freeze the PC. Use a queue, async I/O, background (low) CPU/IO priority for scan threads,
   and skip huge files by size limit.
 - Every feature gets tests before it's considered done. Tests are focused, not exhaustive:
