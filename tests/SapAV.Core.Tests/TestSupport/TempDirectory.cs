@@ -22,16 +22,28 @@ internal sealed class TempDirectory : IDisposable
 
     public void Dispose()
     {
-        try
+        // A few short retries: removing a junction (e.g. to the pipe namespace) or a file another process
+        // (indexer, Defender) still has open leaves it delete-pending for a moment, so the folder isn't empty yet.
+        for (int attempt = 0; attempt < 5; attempt++)
         {
-            Directory.Delete(Path, recursive: true);
-        }
-        catch (IOException)
-        {
-            // Best effort: never fail a test because cleanup raced with another process.
-        }
-        catch (UnauthorizedAccessException)
-        {
+            try
+            {
+                if (Directory.Exists(Path))
+                {
+                    Directory.Delete(Path, recursive: true);
+                }
+
+                return;
+            }
+            catch (IOException)
+            {
+                // Best effort: never fail a test because cleanup raced with another process.
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            Thread.Sleep(20 * (attempt + 1));
         }
     }
 }

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using SapAV.Core.Hashing;
@@ -21,7 +20,6 @@ namespace SapAV.Core.Tests.Hashing;
 /// nothing written to the pipe, (c) the pipe server can't act as the hasher's identity.
 /// A direct device path is never opened at all.
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -31,21 +29,11 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Helpers ---
 
-    private bool TryCreateSymlink(string link, string target)
-    {
-        try
-        {
-            File.CreateSymbolicLink(link, target);
-            return true;
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            output.WriteLine($"SKIPPED (no assertions): cannot create symlinks here: {ex.Message}");
-            return false;
-        }
-    }
+    // Tests using these are gated by [RequiresFact(Requires.Symlinks / Requires.Junctions)], so a failure
+    // to create a link here is a real failure, not a skip.
+    private static void CreateSymlink(string link, string target) => File.CreateSymbolicLink(link, target);
 
-    private bool TryCreateJunction(string link, string targetDir)
+    private static void CreateJunction(string link, string targetDir)
     {
         var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{targetDir}\"")
         {
@@ -55,27 +43,19 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
             RedirectStandardError = true,
         };
         using var p = Process.Start(psi)!;
+        string err = p.StandardError.ReadToEnd();
         p.WaitForExit(10_000);
-        if (p.ExitCode != 0 || !Directory.Exists(link))
-        {
-            output.WriteLine($"SKIPPED (no assertions): mklink /J failed: {p.StandardError.ReadToEnd()}");
-            return false;
-        }
-
-        return true;
+        Assert.True(p.ExitCode == 0 && Directory.Exists(link), $"mklink /J failed: {err}");
     }
 
     /// <summary>Creates link0 -> link1 -> ... -> link(n-1) -> finalTarget. Returns link0.</summary>
-    private string? TryCreateChain(int links, string finalTarget, string prefix = "hop")
+    private string CreateChain(int links, string finalTarget, string prefix = "hop")
     {
         for (int i = links - 1; i >= 0; i--)
         {
             var link = _dir.File($"{prefix}{i}.bin");
             var target = i == links - 1 ? finalTarget : $"{prefix}{i + 1}.bin"; // relative hops
-            if (!TryCreateSymlink(link, target))
-            {
-                return null;
-            }
+            CreateSymlink(link, target);
         }
 
         return _dir.File($"{prefix}0.bin");
@@ -179,7 +159,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Assert.NotEqual(WindowsIdentity.GetCurrent().Name, identity);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task HasherOpenThroughSymlink_IsNonDiskHandle_AndSendsNothing()
     {
         // The hasher's own open, held open on purpose, through a symlink to the pipe: it is seen as a
@@ -188,10 +168,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         // HashingFlags_GiveThePipeServerOnlyAnonymousImpersonation + HashingFlags_AreExplicit.
         await using var probe = new PipeProbe();
         var link = _dir.File("to-pipe-imp.bin");
-        if (!TryCreateSymlink(link, probe.Path))
-        {
-            return;
-        }
+        CreateSymlink(link, probe.Path);
 
         using var handle = NativeFile.OpenForHashing(Path.GetFullPath(link), out int error);
         Assert.False(handle.IsInvalid, $"Win32 error {error}");
@@ -230,48 +207,37 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Links to pipes: (a) NotRegularFile, (b) no I/O ---
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToPipe_IsRejected_WithoutIo()
     {
         await using var probe = new PipeProbe();
         var link = _dir.File("to-pipe.bin");
-        if (!TryCreateSymlink(link, probe.Path))
-        {
-            return;
-        }
+        CreateSymlink(link, probe.Path);
 
         await AssertPipeRejectedWithoutIo(probe, link);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task ChainOf16LinksToPipe_IsRejected_WithoutIo()
     {
         await using var probe = new PipeProbe();
-        var head = TryCreateChain(16, probe.Path);
-        if (head is null)
-        {
-            return;
-        }
+        var head = CreateChain(16, probe.Path);
 
         await AssertPipeRejectedWithoutIo(probe, head);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task ChainOf17LinksToPipe_IsRejected_WithoutIo()
     {
         // No hop limit of our own any more: Windows follows the chain (up to 63 reparse points) and the
         // file-type check rejects the pipe before any read.
         await using var probe = new PipeProbe();
-        var head = TryCreateChain(17, probe.Path);
-        if (head is null)
-        {
-            return;
-        }
+        var head = CreateChain(17, probe.Path);
 
         await AssertPipeRejectedWithoutIo(probe, head);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task RelativeHopsAcrossDirectories_ToPipe_AreRejected_WithoutIo()
     {
         // a\l1 -> ..\b\l2 ; b\l2 -> l3 (must resolve in b, not a) ; b\l3 -> pipe
@@ -279,56 +245,42 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Directory.CreateDirectory(_dir.File("a"));
         Directory.CreateDirectory(_dir.File("b"));
         File.WriteAllBytes(_dir.File(@"a\l3"), Data(10)); // decoy: wrong resolution would hash this
-        if (!TryCreateSymlink(_dir.File(@"b\l3"), probe.Path)
-            || !TryCreateSymlink(_dir.File(@"b\l2"), "l3")
-            || !TryCreateSymlink(_dir.File(@"a\l1"), @"..\b\l2"))
-        {
-            return;
-        }
+        CreateSymlink(_dir.File(@"b\l3"), probe.Path);
+        CreateSymlink(_dir.File(@"b\l2"), "l3");
+        CreateSymlink(_dir.File(@"a\l1"), @"..\b\l2");
 
         await AssertPipeRejectedWithoutIo(probe, _dir.File(@"a\l1"));
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks, Requires.Junctions)]
     public async Task SymlinkToPipe_InsideAJunctionedFolder_IsRejected_WithoutIo()
     {
         await using var probe = new PipeProbe();
         var real = _dir.File("real");
         Directory.CreateDirectory(real);
-        if (!TryCreateSymlink(Path.Combine(real, "p.bin"), probe.Path)
-            || !TryCreateJunction(_dir.File("junc"), real))
-        {
-            return;
-        }
+        CreateSymlink(Path.Combine(real, "p.bin"), probe.Path);
+        CreateJunction(_dir.File("junc"), real);
 
         await AssertPipeRejectedWithoutIo(probe, _dir.File(@"junc\p.bin"));
     }
 
-    [Fact]
+    [RequiresFact(Requires.PipeNamespaceJunction)]
     public async Task FileUnderAJunctionThatPointsAtThePipeNamespace_IsRejected_WithoutIo()
     {
         // C:\...\j -> \??\pipe\ ; hash C:\...\j\<name>. A string walk never sees this; the open check does.
         // mklink /J refuses non-volume targets, so the reparse point is written directly.
         await using var probe = new PipeProbe();
         var junc = _dir.File("j");
-        if (RawJunction.TryCreate(junc, @"\??\pipe\") is { } why)
-        {
-            output.WriteLine($"SKIPPED (no assertions): junction to the pipe namespace not possible: {why}");
-            return;
-        }
+        Assert.Null(RawJunction.TryCreate(junc, @"\??\pipe\")); // guaranteed by Requires.PipeNamespaceJunction
 
         await AssertPipeRejectedWithoutIo(probe, Path.Combine(junc, probe.Name));
     }
 
-    [Fact]
+    [RequiresFact(Requires.PipeNamespaceJunction)]
     public async Task JunctionToPipeNamespace_SeenFromTheJunctionItself_IsNotHashed()
     {
         var junc = _dir.File("j2");
-        if (RawJunction.TryCreate(junc, @"\??\pipe\") is { } why)
-        {
-            output.WriteLine($"SKIPPED (no assertions): {why}");
-            return;
-        }
+        Assert.Null(RawJunction.TryCreate(junc, @"\??\pipe\")); // guaranteed by Requires.PipeNamespaceJunction
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(junc));
         output.WriteLine($"path taken: {result.FailureReason}: {result.ErrorMessage}");
@@ -339,15 +291,13 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Loops and long chains ---
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkLoop_TwoLinks_FailsCleanly_WithoutHanging()
     {
         var a = _dir.File("a.bin");
         var b = _dir.File("b.bin");
-        if (!TryCreateSymlink(a, "b.bin") || !TryCreateSymlink(b, "a.bin"))
-        {
-            return;
-        }
+        CreateSymlink(a, "b.bin");
+        CreateSymlink(b, "a.bin");
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(a));
 
@@ -357,14 +307,11 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         output.WriteLine($"loop -> {result.FailureReason}: {result.ErrorMessage}");
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToItself_FailsCleanly_WithoutHanging()
     {
         var self = _dir.File("self.bin");
-        if (!TryCreateSymlink(self, "self.bin"))
-        {
-            return;
-        }
+        CreateSymlink(self, "self.bin");
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(self));
 
@@ -372,16 +319,12 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Assert.Equal(ScanStatus.Error, result.Status);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task ChainOf20LinksToRegularFile_IsHashed()
     {
         var data = Data(321);
         var target = _dir.WriteFile("final.bin", data);
-        var head = TryCreateChain(20, target);
-        if (head is null)
-        {
-            return;
-        }
+        var head = CreateChain(20, target);
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(head));
 
@@ -389,14 +332,11 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Assert.Equal(Sha(data), result.Sha256);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task DanglingSymlink_IsNotFound()
     {
         var link = _dir.File("dangling.bin");
-        if (!TryCreateSymlink(link, _dir.File("missing.bin")))
-        {
-            return;
-        }
+        CreateSymlink(link, _dir.File("missing.bin"));
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(link));
 
@@ -405,17 +345,14 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Relative targets ---
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task RelativeSymlinkTarget_WithParentSegment_IsHashed()
     {
         var data = Data(77);
         _dir.WriteFile("up.bin", data);
         Directory.CreateDirectory(_dir.File("sub"));
         var link = _dir.File(@"sub\rel.bin");
-        if (!TryCreateSymlink(link, @"..\up.bin"))
-        {
-            return;
-        }
+        CreateSymlink(link, @"..\up.bin");
 
         var result = await new Sha256Hasher().HashFileAsync(link);
 
@@ -425,16 +362,13 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Junctions and directory links ---
 
-    [Fact]
+    [RequiresFact(Requires.Junctions)]
     public async Task Junction_ToAnotherFolder_IsDirectory()
     {
         var real = _dir.File("elsewhere");
         Directory.CreateDirectory(real);
         var junc = _dir.File("junction");
-        if (!TryCreateJunction(junc, real))
-        {
-            return;
-        }
+        CreateJunction(junc, real);
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(junc));
 
@@ -442,7 +376,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Assert.False(result.IsHashed);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Junctions)]
     public async Task FileThroughAJunction_IsHashed()
     {
         var real = _dir.File("elsewhere");
@@ -450,10 +384,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         var data = Data(500);
         File.WriteAllBytes(Path.Combine(real, "f.bin"), data);
         var junc = _dir.File("junction");
-        if (!TryCreateJunction(junc, real))
-        {
-            return;
-        }
+        CreateJunction(junc, real);
 
         var result = await new Sha256Hasher().HashFileAsync(Path.Combine(junc, "f.bin"));
 
@@ -461,37 +392,26 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         Assert.Equal(Sha(data), result.Sha256);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task DirectorySymlink_IsDirectory()
     {
         var real = _dir.File("realdir");
         Directory.CreateDirectory(real);
         var link = _dir.File("dirlink");
-        try
-        {
-            Directory.CreateSymbolicLink(link, real);
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            output.WriteLine($"SKIPPED (no assertions): {ex.Message}");
-            return;
-        }
+        Directory.CreateSymbolicLink(link, real);
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(link));
 
         Assert.Equal(HashFailureReason.Directory, result.FailureReason);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task FileSymlinkPointingAtADirectory_IsDirectory()
     {
         var real = _dir.File("realdir");
         Directory.CreateDirectory(real);
         var link = _dir.File("file-flavored-link");
-        if (!TryCreateSymlink(link, real))
-        {
-            return;
-        }
+        CreateSymlink(link, real);
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(link));
 
@@ -501,7 +421,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
     // --- Metadata comes from the target, not the link ---
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToRegularFile_MetadataIsFromTheTarget()
     {
         var data = Data(1234);
@@ -513,10 +433,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         var link = _dir.File("link.bin");
         try
         {
-            if (!TryCreateSymlink(link, target))
-            {
-                return;
-            }
+            CreateSymlink(link, target);
 
             var result = await new Sha256Hasher().HashFileAsync(link);
 
@@ -535,7 +452,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         }
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToOfflineFile_IsSkippedOffline()
     {
         var target = _dir.WriteFile("offline-target.bin", Data(40));
@@ -543,10 +460,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
         File.SetAttributes(target, FileAttributes.Offline);
         try
         {
-            if (!TryCreateSymlink(link, target))
-            {
-                return;
-            }
+            CreateSymlink(link, target);
 
             var result = await new Sha256Hasher().HashFileAsync(link);
 

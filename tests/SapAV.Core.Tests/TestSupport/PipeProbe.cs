@@ -1,6 +1,5 @@
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
@@ -11,7 +10,6 @@ namespace SapAV.Core.Tests.TestSupport;
 /// <see cref="NamedPipeServerStream.IsConnected"/> only turns true after WaitForConnection completes,
 /// so checking it without waiting can't see a client.
 /// </summary>
-[SupportedOSPlatform("windows")]
 internal sealed class PipeProbe : IAsyncDisposable
 {
     private readonly NamedPipeServerStream _server;
@@ -151,6 +149,12 @@ internal sealed class PipeProbe : IAsyncDisposable
         {
             return null;
         }
+
+        // Load System.Security.Principal.Windows (and JIT this exact call) as ourselves BEFORE impersonating.
+        // Otherwise, if this is the process's first WindowsIdentity use, the assembly load runs under the
+        // client's (e.g. ANONYMOUS) token, fails with an empty FileNotFoundException that is swallowed below,
+        // and the runtime caches that failure: every later WindowsIdentity use in the test run then throws.
+        _ = WindowsIdentity.GetCurrent(TokenAccessLevels.Query).Name;
 
         string? name = null;
         try

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using SapAV.Core.Signatures;
 
 namespace SapAV.Core.Models;
 
@@ -24,6 +25,13 @@ namespace SapAV.Core.Models;
 /// (bad SHA-256, detections on a non-Scanned result, ...) throws <see cref="ArgumentException"/>
 /// (or a subclass). A <c>"Verdict"</c> property in incoming JSON is ignored.
 /// </para>
+/// <para>
+/// Optional signature information (A3): <see cref="SignatureStatus"/> records why a Clean result is clean
+/// (e.g. Microsoft-signed) and <see cref="Signer"/> carries the trusted signer's name for logs and the Event
+/// Log payload (X2). Both are <c>null</c> when the signature wasn't checked, and always <c>null</c> on a
+/// non-Scanned result. <see cref="Signer"/> is only allowed with Microsoft or OtherTrusted, because the
+/// name in a broken signature is an unverified claim. Older JSON without these properties still reads.
+/// </para>
 /// </remarks>
 public sealed record ScanResult
 {
@@ -32,25 +40,36 @@ public sealed record ScanResult
     private readonly IReadOnlyList<Detection> _detections = [];
     private readonly Verdict? _verdict;
     private readonly string? _sha256;
+    private readonly SignatureStatus? _signatureStatus;
+    private readonly string? _signer;
 
     public ScanResult(
         ScanItem item,
         IReadOnlyList<Detection> detections,
         DateTimeOffset timestamp,
         string? sha256 = null,
-        ScanStatus status = ScanStatus.Scanned)
+        ScanStatus status = ScanStatus.Scanned,
+        SignatureStatus? signatureStatus = null,
+        string? signer = null)
     {
-        // Status first: the Detections setter checks against it.
+        // Status first: the Detections and signature setters check against it. Signer after its status.
         Status = status;
         Item = item;
         Detections = detections;
         Timestamp = timestamp;
         Sha256 = sha256;
+        SignatureStatus = signatureStatus;
+        Signer = signer;
     }
 
     /// <summary>Creates a scanned result with no detections (verdict Clean).</summary>
-    public static ScanResult Clean(ScanItem item, DateTimeOffset timestamp, string? sha256 = null) =>
-        new(item, [], timestamp, sha256);
+    public static ScanResult Clean(
+        ScanItem item,
+        DateTimeOffset timestamp,
+        string? sha256 = null,
+        SignatureStatus? signatureStatus = null,
+        string? signer = null) =>
+        new(item, [], timestamp, sha256, ScanStatus.Scanned, signatureStatus, signer);
 
     /// <summary>Creates a result for a file that could not be scanned (verdict <c>null</c>).</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="status"/> is Scanned or undefined.</exception>
@@ -170,6 +189,71 @@ public sealed record ScanResult
     [JsonRequired]
     public DateTimeOffset Timestamp { get; init; }
 
+    /// <summary>
+    /// Authenticode outcome (Microsoft / OtherTrusted / UnsignedOrInvalid), or <c>null</c> if it wasn't checked.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not a defined <see cref="Signatures.SignatureStatus"/>.</exception>
+    /// <exception cref="ArgumentException">Set on a non-Scanned result, or not trusted while <see cref="Signer"/> is set.</exception>
+    public SignatureStatus? SignatureStatus
+    {
+        get => _signatureStatus;
+        init
+        {
+            if (value is { } status && !Enum.IsDefined(status))
+            {
+                throw new ArgumentOutOfRangeException(nameof(SignatureStatus), value, "Undefined signature status.");
+            }
+
+            if (value is not null && _status != ScanStatus.Scanned)
+            {
+                throw new ArgumentException(
+                    $"A result with status {_status} cannot have signature information.", nameof(SignatureStatus));
+            }
+
+            if (_signer is not null && !IsTrustedStatus(value))
+            {
+                throw new ArgumentException("A signer name requires a Microsoft or OtherTrusted signature.", nameof(SignatureStatus));
+            }
+
+            _signatureStatus = value;
+        }
+    }
+
+    /// <summary>
+    /// Name (certificate CN) of the trusted signer, e.g. "Microsoft Windows". Only with a Microsoft or
+    /// OtherTrusted <see cref="SignatureStatus"/>; otherwise <c>null</c>.
+    /// </summary>
+    /// <exception cref="ArgumentException">Blank, set on a non-Scanned result, or without a trusted <see cref="SignatureStatus"/>.</exception>
+    public string? Signer
+    {
+        get => _signer;
+        init
+        {
+            if (value is null)
+            {
+                _signer = null;
+                return;
+            }
+
+            ArgumentException.ThrowIfNullOrWhiteSpace(value, nameof(Signer));
+            if (_status != ScanStatus.Scanned)
+            {
+                throw new ArgumentException(
+                    $"A result with status {_status} cannot have signature information.", nameof(Signer));
+            }
+
+            if (!IsTrustedStatus(_signatureStatus))
+            {
+                throw new ArgumentException("A signer name requires a Microsoft or OtherTrusted signature.", nameof(Signer));
+            }
+
+            _signer = value;
+        }
+    }
+
+    private static bool IsTrustedStatus(SignatureStatus? status) =>
+        status is Signatures.SignatureStatus.Microsoft or Signatures.SignatureStatus.OtherTrusted;
+
     /// <summary>Value equality, comparing <see cref="Detections"/> element by element (order matters).</summary>
     public bool Equals(ScanResult? other) =>
         other is not null
@@ -178,6 +262,8 @@ public sealed record ScanResult
                 && _item.Equals(other._item)
                 && Timestamp.Equals(other.Timestamp)
                 && string.Equals(_sha256, other._sha256, StringComparison.Ordinal)
+                && _signatureStatus == other._signatureStatus
+                && string.Equals(_signer, other._signer, StringComparison.Ordinal)
                 && _detections.SequenceEqual(other._detections)));
 
     public override int GetHashCode()
@@ -187,6 +273,8 @@ public sealed record ScanResult
         hash.Add(_item);
         hash.Add(Timestamp);
         hash.Add(_sha256, StringComparer.Ordinal);
+        hash.Add(_signatureStatus);
+        hash.Add(_signer, StringComparer.Ordinal);
         foreach (var detection in _detections)
         {
             hash.Add(detection);

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Hashing;
 using SapAV.Core.Tests.TestSupport;
@@ -22,7 +21,6 @@ public sealed class HandleCountCollection
 /// away before <see cref="Process.HandleCount"/> is read.
 /// </summary>
 [Collection(HandleCountCollection.Name)]
-[SupportedOSPlatform("windows")]
 public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDisposable
 {
     private const int Iterations = 10_000;
@@ -101,19 +99,8 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
         Assert.False(h.IsInvalid, $"exclusive open failed (Win32 error {Marshal.GetLastPInvokeError()}): a handle is still open");
     }
 
-    private bool TryCreateSymlink(string link, string target)
-    {
-        try
-        {
-            File.CreateSymbolicLink(link, target);
-            return true;
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            output.WriteLine($"SKIPPED (no assertions): cannot create symlinks here: {ex.Message}");
-            return false;
-        }
-    }
+    /// <summary>Creates a file symlink. Callers are gated by [RequiresFact(Requires.Symlinks)], so failure is a real failure.</summary>
+    private static void CreateSymlink(string link, string target) => File.CreateSymbolicLink(link, target);
 
     // --- Directory ---
 
@@ -170,17 +157,13 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
 
     // --- NotRegularFile via GetFileType: a junction to a non-disk device opens, then is rejected ---
 
-    [Fact]
+    [RequiresFact(Requires.PipeNamespaceJunction)]
     public async Task NotRegularFile_AfterOpen_10kTimes_HandleCountStaysFlat()
     {
         // Junction to the root of the named-pipe file system: reusable, unlike a single pipe instance.
         // (A reparse point to \??\NUL is refused by Windows with ERROR_INVALID_REPARSE_DATA.)
         var junc = _dir.File("j");
-        if (RawJunction.TryCreate(junc, @"\??\pipe\") is { } why)
-        {
-            output.WriteLine($"SKIPPED (no assertions): {why}");
-            return;
-        }
+        Assert.Null(RawJunction.TryCreate(junc, @"\??\pipe\")); // guaranteed by Requires.PipeNamespaceJunction
 
         var first = await new Sha256Hasher().HashFileAsync(junc);
         output.WriteLine($"first: {first.FailureReason}: {first.ErrorMessage}");
@@ -189,16 +172,13 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
         await AssertNoHandleGrowth(junc, HashFailureReason.NotRegularFile);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToNulDevice_FailsCleanly_AsIoError()
     {
         // File.CreateSymbolicLink(link, @"\\.\NUL") stores reparse data Windows rejects (ERROR_INVALID_REPARSE_DATA,
         // 4392). Pins that this is a clean IoError from the file path (the only file-path IoError producer here).
         var link = _dir.File("to-nul.bin");
-        if (!TryCreateSymlink(link, @"\\.\NUL"))
-        {
-            return;
-        }
+        CreateSymlink(link, @"\\.\NUL");
 
         var result = await new Sha256Hasher().HashFileAsync(link);
         output.WriteLine($"{result.FailureReason}: {result.ErrorMessage}");
@@ -208,17 +188,14 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
             $"{result.FailureReason}: {result.ErrorMessage}");
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task NotRegularFile_ThroughSymlinkToPipe_ReleasesThePipe()
     {
         // The pipe has one instance: if the hasher's handle stayed open, the server would never see the
         // client disconnect (a read would block instead of returning end-of-pipe).
         await using var probe = new PipeProbe();
         var link = _dir.File("to-pipe.bin");
-        if (!TryCreateSymlink(link, probe.Path))
-        {
-            return;
-        }
+        CreateSymlink(link, probe.Path);
 
         var result = await new Sha256Hasher().HashFileAsync(link);
         Assert.Equal(HashFailureReason.NotRegularFile, result.FailureReason);

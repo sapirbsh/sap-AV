@@ -141,11 +141,6 @@ public sealed class Sha256HasherFileTests : IDisposable
     [Fact]
     public async Task FileWithReadDenied_IsAccessDenied()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return; // ACLs as used here are Windows-only; the product is Windows-only.
-        }
-
         var path = _dir.WriteFile("denied.bin", RandomBytes(10));
         var file = new FileInfo(path);
         var user = WindowsIdentity.GetCurrent().User!;

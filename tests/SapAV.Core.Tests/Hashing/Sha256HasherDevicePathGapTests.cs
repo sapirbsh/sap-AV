@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using SapAV.Core.Hashing;
@@ -13,7 +12,6 @@ namespace SapAV.Core.Tests.Hashing;
 /// UNC paths that reach a local pipe over SMB loopback, drive letters aliased to a device, and Windows 11
 /// legacy names inside a folder (<c>dir\CON</c> is an ordinary file, <c>dir\NUL</c> still is not).
 /// </summary>
-[SupportedOSPlatform("windows")]
 public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -135,7 +133,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
 
     // --- \\?\UNC\ and plain UNC ---
 
-    [Fact]
+    [RequiresFact(Requires.AdminShare)]
     public async Task LongUncForm_ToALocalAdminShare_IsAllowedAndHashed()
     {
         // \\?\UNC\server\share\file is treated as a regular file path (allowed), like \\server\share\file.
@@ -147,12 +145,6 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
         {
             var result = await WithTimeout(new Sha256Hasher().HashFileAsync(candidate));
             output.WriteLine($"{candidate} -> {result.FailureReason}: {result.ErrorMessage}");
-            if (result.FailureReason is HashFailureReason.AccessDenied or HashFailureReason.NotFound)
-            {
-                output.WriteLine("SKIPPED (no assertions): admin share not reachable here (needs elevation / sharing).");
-                return;
-            }
-
             Assert.True(result.IsHashed, $"{candidate}: {result.FailureReason}: {result.ErrorMessage}");
             Assert.Equal(Sha(data), result.Sha256);
         }
@@ -190,7 +182,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
         }
     }
 
-    [Theory]
+    [RequiresTheory(Requires.SmbLoopbackPipe)]
     [InlineData(@"\\localhost\pipe\")]
     [InlineData(@"\\?\UNC\localhost\pipe\")]
     public async Task UncPathToALocalPipe_WithHashingFlags_CannotBeImpersonated(string prefix)
@@ -198,18 +190,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
         // Same as HashingFlags_GiveThePipeServerOnlyAnonymousImpersonation, but over SMB loopback, where the
         // impersonation level travels in the SMB CREATE request.
         await using var probe = new PipeProbe(acceptRemoteClients: true);
-        Microsoft.Win32.SafeHandles.SafeFileHandle handle;
-        try
-        {
-            handle = PipeProbe.OpenClient(prefix + probe.Name, NativeFile.HashingFlags);
-        }
-        catch (IOException ex)
-        {
-            output.WriteLine($"SKIPPED (no assertions): SMB loopback to the pipe not possible: {ex.Message}");
-            return;
-        }
-
-        using (handle)
+        using (var handle = PipeProbe.OpenClient(prefix + probe.Name, NativeFile.HashingFlags))
         {
             await using var client = new FileStream(handle, FileAccess.ReadWrite, 0, isAsync: true);
             await client.WriteAsync(new byte[] { 1 }).AsTask().WaitAsync(Timeout);
@@ -231,7 +212,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
         var letter = FreeDriveLetter();
         if (letter is null)
         {
-            output.WriteLine("SKIPPED (no assertions): no free drive letter.");
+            output.WriteLine("SKIPPED at runtime (no assertions; not checkable at discovery): no free drive letter right now.");
             return;
         }
 
@@ -239,7 +220,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
         const string target = @"\Device\NamedPipe";
         if (!DefineDosDeviceW(RawTargetPath, letter, target))
         {
-            output.WriteLine($"SKIPPED (no assertions): DefineDosDevice failed: {Marshal.GetLastPInvokeError()}");
+            output.WriteLine($"SKIPPED at runtime (no assertions; not checkable at discovery): DefineDosDevice failed, Win32 error {Marshal.GetLastPInvokeError()}");
             return;
         }
 
@@ -264,7 +245,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
 
     // --- Windows 11: legacy device names inside a folder ---
 
-    [Theory]
+    [RequiresTheory(Requires.Windows11)]
     [InlineData("CON")]
     [InlineData("con")]
     [InlineData("COM1")]
@@ -274,12 +255,7 @@ public sealed class Sha256HasherDevicePathGapTests(ITestOutputHelper output) : I
     [InlineData("nul.txt")]
     public async Task LegacyNameInsideAFolder_OnWindows11_IsAnOrdinaryFile_AndIsHashed(string name)
     {
-        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
-        {
-            output.WriteLine("SKIPPED (no assertions): before Windows 11 these names map to devices in any folder.");
-            return;
-        }
-
+        // Before Windows 11 these names map to devices in any folder (see the requirement).
         var data = Data(42);
         var path = _dir.File(name);
         File.WriteAllBytes(@"\\?\" + path, data); // the \\?\ form creates the file whatever the name

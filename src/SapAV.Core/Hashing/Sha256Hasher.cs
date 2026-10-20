@@ -28,7 +28,7 @@ namespace SapAV.Core.Hashing;
 /// <item>Re-reads last-write time and size from the handle; if either changed, or the bytes read don't
 /// match the size, reports ChangedDuringHashing so a half-written file can't be cached as Clean.</item>
 /// </list>
-/// Content exactly at the limit is hashed; content over it is not. File hashing is Windows-only.
+/// Content exactly at the limit is hashed; content over it is not.
 /// </remarks>
 public sealed class Sha256Hasher : IFileHasher
 {
@@ -74,16 +74,10 @@ public sealed class Sha256Hasher : IFileHasher
     internal Func<long, Task>? BeforeReadHook { get; init; }
 
     /// <inheritdoc/>
-    /// <exception cref="PlatformNotSupportedException">Not running on Windows.</exception>
     public async Task<HashResult> HashFileAsync(string path, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         cancellationToken.ThrowIfCancellationRequested();
-
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("File hashing uses Win32 APIs and runs on Windows only.");
-        }
 
         if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
         {

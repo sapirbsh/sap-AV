@@ -34,13 +34,32 @@ internal static class NativeFile
         FileFlagOverlapped | FileFlagSequentialScan | FileFlagBackupSemantics | FileFlagOpenNoRecall
         | SecuritySqosPresent | SecurityAnonymous;
 
+    /// <summary>
+    /// The flags <see cref="OpenForSignatureCheck"/> passes to <c>CreateFileW</c>: exactly
+    /// <see cref="HashingFlags"/> without <c>FILE_FLAG_OVERLAPPED</c>. WinVerifyTrust's SIPs and
+    /// <c>CryptCATAdminCalcHashFromFileHandle2</c> read the handle with synchronous <c>ReadFile</c> calls
+    /// (no OVERLAPPED), which is not valid on an overlapped handle. Every security-relevant flag (backup
+    /// semantics, no recall, anonymous SQOS) is kept.
+    /// </summary>
+    internal const uint SignatureCheckFlags = HashingFlags & ~FileFlagOverlapped;
+
     internal const uint FileTypeDisk = 0x0001;
 
     /// <summary>
     /// Opens <paramref name="fullPath"/> for reading with shared Read/Write/Delete and <see cref="HashingFlags"/>.
     /// On failure returns an invalid handle (already disposed) and the Win32 error code.
     /// </summary>
-    internal static SafeFileHandle OpenForHashing(string fullPath, out int win32Error)
+    internal static SafeFileHandle OpenForHashing(string fullPath, out int win32Error) =>
+        Open(fullPath, HashingFlags, out win32Error);
+
+    /// <summary>
+    /// Same as <see cref="OpenForHashing"/> but with <see cref="SignatureCheckFlags"/> (a synchronous handle),
+    /// for the Authenticode checker.
+    /// </summary>
+    internal static SafeFileHandle OpenForSignatureCheck(string fullPath, out int win32Error) =>
+        Open(fullPath, SignatureCheckFlags, out win32Error);
+
+    private static SafeFileHandle Open(string fullPath, uint flags, out int win32Error)
     {
         var handle = CreateFileW(
             fullPath,
@@ -48,7 +67,7 @@ internal static class NativeFile
             FileShareRead | FileShareWrite | FileShareDelete,
             IntPtr.Zero,
             OpenExisting,
-            HashingFlags,
+            flags,
             IntPtr.Zero);
 
         win32Error = handle.IsInvalid ? Marshal.GetLastPInvokeError() : 0;
@@ -62,6 +81,13 @@ internal static class NativeFile
 
     /// <summary><c>GetFileType</c>: 1 = disk, 2 = character device, 3 = pipe, 0 = unknown/error.</summary>
     internal static uint GetFileType(SafeFileHandle handle) => GetFileTypeNative(handle);
+
+    /// <summary>Moves a synchronous handle's file pointer back to the start (<c>SetFilePointerEx</c>).</summary>
+    internal static bool Rewind(SafeFileHandle handle) => SetFilePointerEx(handle, 0, IntPtr.Zero, 0 /* FILE_BEGIN */);
+
+    [DllImport("kernel32.dll", EntryPoint = "SetFilePointerEx", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFilePointerEx(SafeFileHandle hFile, long liDistanceToMove, IntPtr lpNewFilePointer, uint dwMoveMethod);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern SafeFileHandle CreateFileW(

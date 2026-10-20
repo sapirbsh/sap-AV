@@ -1,9 +1,7 @@
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using SapAV.Core.Hashing;
 using SapAV.Core.Models;
 using SapAV.Core.Tests.TestSupport;
-using Xunit.Abstractions;
 
 namespace SapAV.Core.Tests.Hashing;
 
@@ -11,27 +9,13 @@ namespace SapAV.Core.Tests.Hashing;
 /// Non-regular targets (devices, pipes, symlinks to pipes, directories), offline/cloud files, handle
 /// metadata, and detection of files that change while being hashed.
 /// </summary>
-[SupportedOSPlatform("windows")]
-public sealed class Sha256HasherSpecialTargetTests(ITestOutputHelper output) : IDisposable
+public sealed class Sha256HasherSpecialTargetTests : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     private readonly TempDirectory _dir = new();
 
-    /// <summary>Creates a file symlink, or returns false (and logs) if this machine doesn't allow it.</summary>
-    private bool TryCreateSymlink(string link, string target)
-    {
-        try
-        {
-            File.CreateSymbolicLink(link, target);
-            return true;
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            // Needs Developer Mode or the SeCreateSymbolicLink privilege (e.g. an elevated prompt).
-            output.WriteLine($"SKIPPED (no assertions): cannot create symlinks here: {ex.Message}");
-            return false;
-        }
-    }
+    /// <summary>Creates a file symlink. Callers are gated by [RequiresFact(Requires.Symlinks)], so failure is a real failure.</summary>
+    private static void CreateSymlink(string link, string target) => File.CreateSymbolicLink(link, target);
 
     public void Dispose() => _dir.Dispose();
 
@@ -153,17 +137,14 @@ public sealed class Sha256HasherSpecialTargetTests(ITestOutputHelper output) : I
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(data)), result.Sha256);
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToNamedPipe_IsNotRegularFile_WithNothingWritten()
     {
         // Through a link the pipe may be opened (anonymously); the guarantee is rejection before any I/O.
         // Fuller coverage (chains, junctions, impersonation) is in Sha256HasherLinkTests.
         await using var probe = new PipeProbe();
         var link = _dir.File("looks-like-a-file.bin");
-        if (!TryCreateSymlink(link, probe.Path))
-        {
-            return;
-        }
+        CreateSymlink(link, probe.Path);
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(link));
 
@@ -173,16 +154,14 @@ public sealed class Sha256HasherSpecialTargetTests(ITestOutputHelper output) : I
         Assert.Equal(0, await probe.BytesWrittenByClientAsync());
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkChainToNamedPipe_IsNotRegularFile_WithNothingWritten()
     {
         await using var probe = new PipeProbe();
         var inner = _dir.File("inner.bin");
         var outer = _dir.File("outer.bin");
-        if (!TryCreateSymlink(inner, probe.Path) || !TryCreateSymlink(outer, "inner.bin")) // relative hop
-        {
-            return;
-        }
+        CreateSymlink(inner, probe.Path);
+        CreateSymlink(outer, "inner.bin"); // relative hop
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(outer));
 
@@ -190,16 +169,13 @@ public sealed class Sha256HasherSpecialTargetTests(ITestOutputHelper output) : I
         Assert.Equal(0, await probe.BytesWrittenByClientAsync());
     }
 
-    [Fact]
+    [RequiresFact(Requires.Symlinks)]
     public async Task SymlinkToRegularFile_IsHashedAsTarget()
     {
         var data = RandomBytes(100);
         var target = _dir.WriteFile("target.bin", data);
         var link = _dir.File("link.bin");
-        if (!TryCreateSymlink(link, target))
-        {
-            return;
-        }
+        CreateSymlink(link, target);
 
         var result = await new Sha256Hasher().HashFileAsync(link);
 
