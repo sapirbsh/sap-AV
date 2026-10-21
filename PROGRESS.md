@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | Next |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 being built |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -52,7 +52,21 @@ Tests: 1008 passed, 1 skipped (opt-in on-disk EICAR test). With `SAPAV_TEST_SIMU
   failure is the `cmd.exe` Microsoft-signature test if the runner uses an unlisted Microsoft CA.
 - Heuristic thresholds were tested on synthetic PE files only; tune them on real software (A5 follow-up).
 
+## Section B — Engine infrastructure (in progress)
+
+**Order:** B1 → B2 → **B5** → B3 → B4. B5 (the scan-worker sandbox) comes before B3, because B3's scan jobs hand files to
+the worker. B1, B2, B4 and B5 each get their own reviewer pass right after they're built; the section tester + reviewer
+pass comes at the end.
+
+| Step | What | Status |
+|---|---|---|
+| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | Being built (not committed yet) |
+| B2 | Reversible quarantine | Not started |
+| B5 | Privilege separation: all file parsing in a low-privilege scan worker | Not started |
+| B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
+
 ## What's left
 
-- **B:** Event Log (B1), quarantine (B2), scan jobs (B3), pipe (B4), **privilege separation (B5)**.
+- **B:** finish B1–B5 as above, then the section B tester + reviewer pass.
 - Then C → D → E → F → G, ending with the Phase 1 security review (G5).
