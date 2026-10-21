@@ -61,7 +61,7 @@ internal static class NativeFile
 
     /// <summary>
     /// Same flags as <see cref="OpenForSignatureCheck"/> (a synchronous handle with every security-relevant
-    /// flag), for the YARA scanner: it memory-maps the file from this handle, so libyara never re-opens the path.
+    /// flag), for the YARA scanner: it memory-maps the file from this handle, so YARA-X never opens the path itself.
     /// </summary>
     internal static SafeFileHandle OpenForMemoryMap(string fullPath, out int win32Error) =>
         Open(fullPath, SignatureCheckFlags, out win32Error);
@@ -103,6 +103,50 @@ internal static class NativeFile
         id = (info.VolumeSerialNumber, new UInt128(info.FileIdHigh, info.FileIdLow));
         return true;
     }
+
+    /// <summary>
+    /// True only if the open file is on a local volume of drive type DRIVE_FIXED: the remote-protocol query
+    /// (<c>GetFileInformationByHandleEx(FileRemoteProtocolInfo)</c>) must fail, which it does for local files,
+    /// and the volume's root (from <c>GetFinalPathNameByHandleW(VOLUME_NAME_GUID)</c>) must report DRIVE_FIXED.
+    /// Removable media, network shares, RAM disks, CD-ROMs and anything that can't be determined return false.
+    /// </summary>
+    internal static unsafe bool IsOnLocalFixedVolume(SafeFileHandle handle)
+    {
+        byte* remoteInfo = stackalloc byte[512];
+        if (GetFileInformationByHandleEx(handle, 13 /* FileRemoteProtocolInfo */, remoteInfo, 512))
+        {
+            return false; // the file system reported a remote protocol (SMB, ...)
+        }
+
+        char* path = stackalloc char[1024];
+        uint length = GetFinalPathNameByHandleW(handle, path, 1024, 1 /* VOLUME_NAME_GUID */);
+        if (length == 0 || length >= 1024)
+        {
+            return false;
+        }
+
+        var full = new ReadOnlySpan<char>(path, (int)length);
+        const string Prefix = @"\\?\Volume{";
+        if (!full.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        int rootEnd = full.IndexOf('}');
+        if (rootEnd < 0 || rootEnd + 1 >= full.Length || full[rootEnd + 1] != '\\')
+        {
+            return false;
+        }
+
+        string root = new string(full[..(rootEnd + 2)]); // "\\?\Volume{guid}\"
+        return GetDriveTypeW(root) == 3 /* DRIVE_FIXED */;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern unsafe uint GetFinalPathNameByHandleW(SafeFileHandle hFile, char* path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint GetDriveTypeW(string rootPathName);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FileIdInfo

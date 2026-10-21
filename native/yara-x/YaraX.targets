@@ -1,0 +1,50 @@
+<Project>
+  <!--
+    YARA-X native engine (yara_x_capi.dll), pinned. Imported by SapAV.Core.
+
+    On build: if the pinned release asset isn't in the git-ignored cache (native/yara-x/<version>/), it is downloaded
+    once from GitHub. The zip's SHA-256 is checked on every build; on a mismatch the zip is deleted and the build
+    fails. The DLL is extracted, its own SHA-256 is checked too, and it is copied to the output of SapAV.Core and of
+    every project that references it (tests, Engine, App).
+
+    To upgrade: change the version and both hashes (see NOTICE.md for where they come from).
+  -->
+  <PropertyGroup>
+    <YaraXVersion>1.22.0</YaraXVersion>
+    <YaraXAssetName>yara-x-capi-v$(YaraXVersion)-x86_64-pc-windows-msvc.zip</YaraXAssetName>
+    <YaraXAssetUrl>https://github.com/VirusTotal/yara-x/releases/download/v$(YaraXVersion)/$(YaraXAssetName)</YaraXAssetUrl>
+    <YaraXAssetSha256>40317f65781e3a17bffe31f9837143a51c1c28ce5061eac2b90695fbb30e1664</YaraXAssetSha256>
+    <YaraXDllSha256>bb5c112bf479d1b1706fbecf85275d3806321ee2912dea4f36750289d0294848</YaraXDllSha256>
+    <YaraXCacheDir Condition="'$(YaraXCacheDir)' == ''">$(MSBuildThisFileDirectory)$(YaraXVersion)\</YaraXCacheDir>
+    <YaraXZipPath>$(YaraXCacheDir)$(YaraXAssetName)</YaraXZipPath>
+    <YaraXDllPath>$(YaraXCacheDir)yara_x_capi.dll</YaraXDllPath>
+  </PropertyGroup>
+
+  <Target Name="YaraXEnsureNative" BeforeTargets="AssignTargetPaths">
+    <DownloadFile Condition="!Exists('$(YaraXZipPath)')"
+                  SourceUrl="$(YaraXAssetUrl)"
+                  DestinationFolder="$(YaraXCacheDir)"
+                  DestinationFileName="$(YaraXAssetName)"
+                  Retries="3" />
+
+    <GetFileHash Files="$(YaraXZipPath)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="_YaraXZipHash" />
+    </GetFileHash>
+    <Delete Condition="'$(_YaraXZipHash)' != '$(YaraXAssetSha256)'" Files="$(YaraXZipPath);$(YaraXDllPath)" />
+    <Error Condition="'$(_YaraXZipHash)' != '$(YaraXAssetSha256)'" Code="SAPAV001"
+           Text="YARA-X asset hash mismatch for $(YaraXAssetName): expected $(YaraXAssetSha256), got $(_YaraXZipHash). The file was deleted; build again to re-download it." />
+
+    <Unzip Condition="!Exists('$(YaraXDllPath)')" SourceFiles="$(YaraXZipPath)" DestinationFolder="$(YaraXCacheDir)" Include="yara_x_capi.dll" />
+
+    <GetFileHash Files="$(YaraXDllPath)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="_YaraXDllHash" />
+    </GetFileHash>
+    <Delete Condition="'$(_YaraXDllHash)' != '$(YaraXDllSha256)'" Files="$(YaraXDllPath)" />
+    <Error Condition="'$(_YaraXDllHash)' != '$(YaraXDllSha256)'" Code="SAPAV002"
+           Text="yara_x_capi.dll hash mismatch: expected $(YaraXDllSha256), got $(_YaraXDllHash). The file was deleted; build again to re-extract it." />
+
+    <ItemGroup>
+      <None Include="$(YaraXDllPath)" Link="yara_x_capi.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    </ItemGroup>
+  </Target>
+</Project>

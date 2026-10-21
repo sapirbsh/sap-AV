@@ -9,13 +9,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="dnYara" Version="2.1.0" />
-    <PackageReference Include="dnYara.NativePack" Version="2.1.0.3" />
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- Test seams (e.g. Sha256Hasher.BeforeReadHook) are internal. -->
     <InternalsVisibleTo Include="SapAV.Core.Tests" />
   </ItemGroup>
+
+  <!-- YARA-X engine: pinned native DLL, downloaded once, hash-verified, copied to the output. -->
+  <Import Project="..\..\native\yara-x\YaraX.targets" />
 
 </Project>

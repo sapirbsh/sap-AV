@@ -23,3 +23,6 @@ quarantine/
 # Claude Code personal settings
 .claude/settings.local.json
 sap-AV/
+
+# YARA-X native cache (downloaded and hash-checked by native/yara-x/YaraX.targets)
+native/yara-x/*/

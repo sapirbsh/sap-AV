@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using SapAV.Core.Mitre;
 using SapAV.Core.Models;
@@ -70,9 +71,11 @@ public sealed class YaraRuleSetTests : IDisposable
     }
 
     [Fact]
-    public void NativeLibyara_IsCopiedToTheOutput()
+    public void NativeYaraX_IsCopiedToTheOutput_WithThePinnedHash()
     {
-        Assert.True(File.Exists(Path.Combine(AppContext.BaseDirectory, "libyara.dll")), "libyara.dll missing from the test output");
+        var dll = Path.Combine(AppContext.BaseDirectory, "yara_x_capi.dll");
+        Assert.True(File.Exists(dll), "yara_x_capi.dll missing from the test output");
+        Assert.Equal(YaraXPins.DllSha256, Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(dll))));
     }
 
     // --- Loading a directory ---
@@ -116,17 +119,19 @@ public sealed class YaraRuleSetTests : IDisposable
     public void Include_IsDisabled()
     {
         File.WriteAllText(_dir.File("target.yara"), "rule Included { condition: true }");
-        using var rules = YaraRuleSet.FromSource("inc.yar", $"include \"{_dir.File("target.yara").Replace("\\", "\\\\")}\"");
+        // Forward slashes: YARA-X rejects "\\" escapes in the include path before it gets to the include itself.
+        using var rules = YaraRuleSet.FromSource("inc.yar", $"include \"{_dir.File("target.yara").Replace('\\', '/')}\"");
 
         var error = Assert.Single(rules.FileErrors);
         Assert.Contains(error.Errors, e => e.Contains("include", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(error.Errors, e => e.Contains("escape", StringComparison.OrdinalIgnoreCase));
         Assert.Empty(rules.Rules);
     }
 
     [Fact]
     public void Utf8TextStrings_AndBom_AreHandled()
     {
-        // ANSI marshalling (dnYara's AddRuleString) would mangle the non-ASCII text.
+        // Rule text is passed as UTF-8; any ANSI marshalling would mangle the non-ASCII text.
         File.WriteAllBytes(_dir.File("utf8.yar"),
             [0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("rule Utf8 { strings: $s = \"שלום-漢字\" condition: $s }")]);
         using var rules = YaraRuleSet.LoadDirectory(_dir.Path);
@@ -259,17 +264,53 @@ public sealed class YaraRuleSetTests : IDisposable
             "rule Slow { strings: $a = { 00 } condition: for all i in (1..#a) : (@a[i] >= 0) }");
 
         Assert.Empty(rules.FileErrors);
-        var warning = Assert.Single(rules.Warnings, w => w.Kind == YaraWarningKind.Compiler);
-        Assert.Equal("slow.yar", warning.File);
+        var warnings = rules.Warnings.Where(w => w.Kind == YaraWarningKind.Compiler).ToArray();
+        Assert.NotEmpty(warnings); // YARA-X: "potentially slow loop" and "slow pattern"
+        Assert.All(warnings, w => Assert.Equal("slow.yar", w.File));
+        Assert.Contains(warnings, w => w.Message.Contains("slow", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public void PrivateRules_AreNotListedOrReported()
+    public void PrivateRules_AreNeverReported()
     {
         using var rules = YaraRuleSet.FromSource("p.yar",
             "private rule Helper { condition: true } rule Uses { condition: Helper }");
 
-        Assert.Equal(["Uses"], rules.Rules.Select(r => r.Identifier));
+        // The YARA-X C API lists private rules too (it doesn't expose the flag), but they never match.
+        Assert.Contains("Uses", rules.Rules.Select(r => r.Identifier));
         Assert.Equal(["Uses"], ScanBytes(rules, [1]).Matches.Select(m => m.Identifier));
+    }
+
+    // --- Module import allowlist ---
+
+    [Theory]
+    [InlineData("import \"pe\" rule R { condition: pe.is_pe or true }")]
+    [InlineData("import \"math\" import \"hash\" rule R { condition: math.entropy(0, filesize) >= 0 and hash.md5(0, 0) != \"\" }")]
+    [InlineData("// import \"console\"\n/* import \"cuckoo\" */ rule R { strings: $s = \"import \\\"console\\\"\" condition: $s or true }")]
+    public void AllowedImports_AndImportsOnlyInCommentsOrStrings_Load(string text)
+    {
+        using var rules = YaraRuleSet.FromSource("ok.yar", text);
+
+        Assert.Empty(rules.FileErrors);
+        Assert.Equal(["ok.yar"], rules.LoadedFiles);
+    }
+
+    [Theory]
+    [InlineData("console")]
+    [InlineData("dotnet")]
+    [InlineData("cuckoo")]
+    public void DisallowedImport_IsRejected_AndReported_OthersStillLoad(string module)
+    {
+        using var rules = YaraRuleSet.FromSources(
+        [
+            new YaraRuleSource("bad.yar", $"import \"{module}\" rule Bad {{ condition: true }}"),
+            new YaraRuleSource("good.yar", YaraTestRules.MarkerRule("Good_Rule")),
+        ]);
+
+        var error = Assert.Single(rules.FileErrors);
+        Assert.Equal("bad.yar", error.File);
+        Assert.Contains(error.Errors, e => e.Contains($"\"{module}\"") && e.Contains("not allowed"));
+        Assert.Equal(["good.yar"], rules.LoadedFiles);
+        Assert.Equal(["hash", "math", "pe"], YaraRuleSet.AllowedModules.Order(StringComparer.Ordinal));
     }
 }

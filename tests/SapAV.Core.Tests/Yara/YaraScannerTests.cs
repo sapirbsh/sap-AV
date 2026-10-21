@@ -89,7 +89,7 @@ public sealed class YaraScannerTests : IDisposable
         Assert.Equal(YaraFailureReason.TooLarge, result.FailureReason);
         Assert.Equal(ScanStatus.SkippedTooLarge, result.Status);
         Assert.Equal(bytes.Length, result.Length);
-        Assert.False(reached, "an oversized file must not reach libyara");
+        Assert.False(reached, "an oversized file must not reach the engine");
         Assert.Equal(Sha256Hasher.DefaultMaxSizeBytes, new YaraScanner(_rules).MaxSizeBytes);
     }
 
@@ -242,18 +242,64 @@ public sealed class YaraScannerTests : IDisposable
         Assert.Equal(ScanStatus.Error, result.Status);
     }
 
+    // --- Crash safety: map only on local fixed volumes, otherwise read into a buffer ---
+
+    [Fact]
+    public void LocalFile_IsMapped_ExactlyWhenOnALocalFixedVolume()
+    {
+        var path = _dir.WriteFile("local.txt", YaraTestRules.MarkerBytes());
+        bool? mapped = null;
+        var scanner = new YaraScanner(_rules) { ScanModeHook = m => mapped = m };
+
+        Assert.Single(scanner.ScanFile(path).Matches);
+
+        using var handle = File.OpenHandle(path);
+        Assert.Equal(NativeFile.IsOnLocalFixedVolume(handle), mapped);
+    }
+
+    [Fact]
+    public void BufferedPath_FindsTheSameMatches_AndHasItsOwnLowerCap()
+    {
+        var bytes = YaraTestRules.MarkerBytes();
+        var path = _dir.WriteFile("removable.txt", bytes);
+        bool? mapped = null;
+
+        var buffered = new YaraScanner(_rules) { ForceBufferedRead = true, ScanModeHook = m => mapped = m };
+        Assert.Single(buffered.ScanFile(path).Matches);
+        Assert.False(mapped);
+
+        var capped = new YaraScanner(_rules, maxBufferedSizeBytes: bytes.Length - 1) { ForceBufferedRead = true };
+        var result = capped.ScanFile(path);
+        Assert.Equal(YaraFailureReason.TooLarge, result.FailureReason);
+        Assert.Contains("not on a local fixed disk", result.ErrorMessage);
+        Assert.Equal(YaraScanner.DefaultMaxBufferedSizeBytes, new YaraScanner(_rules).MaxBufferedSizeBytes);
+    }
+
+    [RequiresFact(Requires.AdminShare)]
+    public void NetworkFile_IsNeverMapped()
+    {
+        var path = _dir.WriteFile("share.txt", YaraTestRules.MarkerBytes());
+        var unc = $@"\\localhost\{path[0]}$" + path[2..];
+        bool? mapped = null;
+
+        var result = new YaraScanner(_rules) { ScanModeHook = m => mapped = m }.ScanFile(unc);
+
+        Assert.Single(result.Matches);
+        Assert.False(mapped);
+    }
+
     // --- Timeout ---
 
     [Fact]
     public void SlowRule_TimesOut_AsNotScanned()
     {
-        // A nested loop over every byte pair: billions of steps on 64 KiB, far beyond the 1-second budget.
+        // A SHA-256 of 4 KiB at every offset of 1 MiB: about 4 GB hashed, far beyond the 1-second budget.
         using var slow = YaraRuleSet.FromSource("slow.yar",
-            "rule Slow { condition: for all i in (0..filesize) : (for all j in (0..filesize) : (uint8(i) == uint8(j))) }");
+            "import \"hash\" rule Slow { condition: for any i in (0..filesize) : (hash.sha256(i, 4096) == \"x\") }");
         var scanner = new YaraScanner(slow, timeout: TimeSpan.FromMilliseconds(10));
-        Assert.Equal(1, scanner.TimeoutSeconds); // libyara's unit is whole seconds
+        Assert.Equal(1, scanner.TimeoutSeconds); // the engine's unit is whole seconds
 
-        var result = WithWatchdog(() => scanner.ScanMemory(new byte[64 * 1024]));
+        var result = WithWatchdog(() => scanner.ScanMemory(new byte[1024 * 1024]));
 
         Assert.Equal(YaraFailureReason.Timeout, result.FailureReason);
         Assert.Equal(ScanStatus.Error, result.Status);
@@ -327,7 +373,7 @@ public sealed class YaraScannerTests : IDisposable
 
         Assert.True(result.IsScanned, result.ErrorMessage);
         Assert.Single(result.Matches);
-        Assert.False(releasedDuringScan, "native rules were freed while libyara was using them");
+        Assert.False(releasedDuringScan, "native rules were freed while the engine was using them");
         Assert.True(rules.IsNativeReleased);
     }
 

@@ -58,6 +58,6 @@ public enum YaraFailureReason
     /// </summary>
     RulesDisposed,
 
-    /// <summary>libyara reported an error (out of memory, too many matches, ...). Status Error.</summary>
+    /// <summary>The YARA engine reported an error (e.g. out of memory). Status Error.</summary>
     EngineError,
 }

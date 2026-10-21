@@ -1,25 +1,34 @@
 using System.Collections.Frozen;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using SapAV.Core.Mitre;
 using SapAV.Core.Models;
 
 namespace SapAV.Core.Yara;
 
 /// <summary>
-/// A compiled, immutable set of YARA rules. Thread-safe: any number of threads can scan with one instance
-/// at the same time. Owns native memory, so dispose it when it is no longer used.
+/// A compiled, immutable set of YARA rules (YARA-X engine). Thread-safe: any number of threads can scan with
+/// one instance at the same time (each scan gets its own YARA-X scanner). Owns native memory: dispose it.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Loading.</b> <see cref="LoadDirectory"/> reads every <c>*.yar</c> file under the directory, recursively
 /// (so E2's <c>third-party/</c> subfolder is included), in ordinal path order, skipping hidden/system files
 /// and reparse points (a junction can't pull in rules from elsewhere). Each file is first compiled on its own;
-/// a file that can't be read or doesn't compile is skipped and listed in <see cref="FileErrors"/>, and never
-/// breaks the rest. The files that compiled are then compiled together into one rule set, each in its own
-/// YARA namespace (its relative path), so rule names may repeat across files. <c>include</c> is disabled.
+/// a file that can't be read, doesn't compile, or imports a module outside <see cref="AllowedModules"/> is
+/// skipped and listed in <see cref="FileErrors"/>, and never breaks the rest. The files that passed are then
+/// compiled together, each in its own namespace (its relative path), so rule names may repeat across files.
+/// <c>include</c> is disabled (<c>YRX_DISABLE_INCLUDES</c>); rules have no other file access.
+/// </para>
+/// <para>
+/// <b>Module allowlist.</b> The imports are taken from the <i>compiled</i> rules (<c>yrx_rules_iter_imports</c>),
+/// never from the text, so an <c>import</c> inside a comment or string can't fool it, and every real import is
+/// seen. A file importing any other module (e.g. <c>console</c>, <c>cuckoo</c>, <c>magic</c>, <c>dotnet</c>) is rejected.
 /// </para>
 /// <para>
 /// <b>Meta.</b> Each rule's <c>verdict</c> / <c>mitre</c> / <c>description</c> meta is read once at load
@@ -31,11 +40,11 @@ namespace SapAV.Core.Yara;
 /// <para>
 /// <b>Reloading.</b> Load a new instance, swap the reference (e.g. <see cref="YaraScanner.SwapRules"/>), then
 /// dispose the old one. Disposing while scans are running is safe: the native rules are freed only after
-/// the last running scan finishes; scans that start after disposal return
+/// the last running scan finishes (and its scanner is destroyed); scans that start after disposal return
 /// <see cref="YaraFailureReason.RulesDisposed"/>.
 /// </para>
 /// </remarks>
-public sealed unsafe class YaraRuleSet : IDisposable
+public sealed unsafe partial class YaraRuleSet : IDisposable
 {
     /// <summary>The rules folder, relative to the application's data root.</summary>
     public const string DefaultRelativeDirectory = @"data\rules";
@@ -46,15 +55,22 @@ public sealed unsafe class YaraRuleSet : IDisposable
     /// <summary>Default maximum size of one rule file: 16 MiB.</summary>
     public const long DefaultMaxRuleFileBytes = 16L * 1024 * 1024;
 
-    private const string FingerprintVersion = "sapav-yara-rules-v1\n";
+    /// <summary>
+    /// Modules rules may import. <c>pe</c> (PE structure), <c>math</c> (entropy etc.) and <c>hash</c> are pure
+    /// functions of the scanned bytes. Everything else is refused: <c>console</c> writes output, and parsers we
+    /// don't need (dotnet, elf, macho, lnk, ...) only add attack surface.
+    /// </summary>
+    public static readonly FrozenSet<string> AllowedModules = new[] { "pe", "math", "hash" }.ToFrozenSet(StringComparer.Ordinal);
+
+    private const string FingerprintVersion = "sapav-yarax-rules-v1\n";
 
     private readonly RulesHandle _handle;
-    private readonly FrozenDictionary<IntPtr, YaraRuleInfo> _rulesByPointer;
+    private readonly FrozenDictionary<(string Namespace, string Identifier), (int Index, YaraRuleInfo Info)> _rulesByName;
     private int _disposed;
 
     private YaraRuleSet(
         RulesHandle handle,
-        FrozenDictionary<IntPtr, YaraRuleInfo> rulesByPointer,
+        FrozenDictionary<(string, string), (int, YaraRuleInfo)> rulesByName,
         IReadOnlyList<YaraRuleInfo> rules,
         IReadOnlyList<string> loadedFiles,
         IReadOnlyList<YaraRuleFileError> fileErrors,
@@ -62,7 +78,7 @@ public sealed unsafe class YaraRuleSet : IDisposable
         string fingerprint)
     {
         _handle = handle;
-        _rulesByPointer = rulesByPointer;
+        _rulesByName = rulesByName;
         Rules = rules;
         LoadedFiles = loadedFiles;
         FileErrors = fileErrors;
@@ -70,7 +86,7 @@ public sealed unsafe class YaraRuleSet : IDisposable
         Fingerprint = fingerprint;
     }
 
-    /// <summary>All non-private rules, in compile order.</summary>
+    /// <summary>All rules the engine reports, in compile order.</summary>
     public IReadOnlyList<YaraRuleInfo> Rules { get; }
 
     /// <summary>Rule files (relative paths / source names) that compiled and are part of this set.</summary>
@@ -83,23 +99,27 @@ public sealed unsafe class YaraRuleSet : IDisposable
     public IReadOnlyList<YaraRuleWarning> Warnings { get; }
 
     /// <summary>
-    /// Lowercase hex SHA-256 over the sorted list of loaded files (relative path + SHA-256 of the content).
-    /// It changes exactly when the compiled rules can change (a file added, removed, edited, or starting or
-    /// stopping to compile), so the scan cache (C5) can tell whether a re-scan is needed.
+    /// Lowercase hex SHA-256 over the engine generation and the sorted list of loaded files (relative path +
+    /// SHA-256 of the content). It changes exactly when the compiled rules can change (a file added, removed,
+    /// edited, starting or stopping to compile, or a different engine), so the scan cache (C5) can tell whether
+    /// a re-scan is needed.
     /// </summary>
     public string Fingerprint { get; }
 
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
-    /// <summary>Test seam: runs inside a scan, after the rules are referenced and right before libyara runs.</summary>
+    /// <summary>Test seam: runs inside a scan, after the rules are referenced and right before YARA-X runs.</summary>
     internal Action? BeforeNativeScanHook { get; set; }
 
     /// <summary>True once the native rules have actually been freed (after disposal and the last running scan).</summary>
     internal bool IsNativeReleased => _handle.Released;
 
     /// <summary>Loads and compiles every <c>*.yar</c> file under <paramref name="directory"/> (recursive).</summary>
+    /// <remarks>Rule problems never throw; they are reported in <see cref="FileErrors"/>.</remarks>
     /// <exception cref="DirectoryNotFoundException">The directory doesn't exist.</exception>
-    /// <exception cref="DllNotFoundException">libyara.dll is missing.</exception>
+    /// <exception cref="DllNotFoundException">yara_x_capi.dll is missing.</exception>
+    /// <exception cref="InvalidOperationException">The YARA-X engine itself failed (it could not create a
+    /// compiler or scanner-independent object, e.g. out of memory). Not caused by rule content.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     public static YaraRuleSet LoadDirectory(
         string directory, CancellationToken cancellationToken = default, long maxRuleFileBytes = DefaultMaxRuleFileBytes)
@@ -155,6 +175,7 @@ public sealed unsafe class YaraRuleSet : IDisposable
 
     /// <summary>Compiles rule text from memory (tests, generated rules). Same rules as <see cref="LoadDirectory"/>.</summary>
     /// <exception cref="ArgumentException">A name is blank or used twice (case-insensitive).</exception>
+    /// <exception cref="InvalidOperationException">The YARA-X engine itself failed (see <see cref="LoadDirectory"/>).</exception>
     public static YaraRuleSet FromSources(IEnumerable<YaraRuleSource> sources, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sources);
@@ -196,8 +217,8 @@ public sealed unsafe class YaraRuleSet : IDisposable
     }
 
     /// <summary>
-    /// Scans <paramref name="length"/> bytes at <paramref name="data"/>. Never throws for libyara errors;
-    /// returns <see cref="YaraFailureReason.RulesDisposed"/> if this set was disposed before the scan started.
+    /// Scans <paramref name="length"/> bytes at <paramref name="data"/> with a scanner of its own. Never throws
+    /// for engine errors; returns <see cref="YaraFailureReason.RulesDisposed"/> if this set was disposed first.
     /// </summary>
     internal YaraScanResult ScanMemory(byte* data, long length, int timeoutSeconds)
     {
@@ -216,24 +237,30 @@ public sealed unsafe class YaraRuleSet : IDisposable
             return YaraScanResult.NotScanned(YaraFailureReason.RulesDisposed, "The rule set was disposed.", length);
         }
 
+        IntPtr scanner = IntPtr.Zero;
         try
         {
             BeforeNativeScanHook?.Invoke();
 
-            byte empty = 0;
-            var state = new ScanState(_rulesByPointer);
+            if (YaraXNative.yrx_scanner_create(_handle.DangerousGetHandle(), out scanner) != YaraXNative.Success)
+            {
+                return YaraScanResult.NotScanned(YaraFailureReason.EngineError,
+                    $"yrx_scanner_create failed: {YaraXNative.LastError()}", length, Fingerprint);
+            }
+
+            YaraXNative.yrx_scanner_fast_scan(scanner, true);
+            if (timeoutSeconds > 0)
+            {
+                YaraXNative.yrx_scanner_set_timeout(scanner, (ulong)timeoutSeconds);
+            }
+
+            var state = new ScanState(_rulesByName);
             var stateHandle = GCHandle.Alloc(state);
-            int error;
+            int result;
             try
             {
-                error = LibYara.yr_rules_scan_mem(
-                    _handle.DangerousGetHandle(),
-                    data is null || length == 0 ? &empty : data,
-                    (nuint)length,
-                    LibYara.ScanFlagsFastMode | LibYara.ScanFlagsReportRulesMatching,
-                    &OnScanCallback,
-                    GCHandle.ToIntPtr(stateHandle),
-                    timeoutSeconds);
+                YaraXNative.yrx_scanner_on_matching_rule(scanner, &OnMatchingRule, GCHandle.ToIntPtr(stateHandle));
+                result = YaraXNative.yrx_scanner_scan(scanner, length == 0 ? null : data, (nuint)length);
             }
             finally
             {
@@ -246,20 +273,23 @@ public sealed unsafe class YaraRuleSet : IDisposable
                     $"Scan callback failed: {failure.GetType().Name}: {failure.Message}", length, Fingerprint);
             }
 
-            return error switch
+            return result switch
             {
-                LibYara.ErrorSuccess => YaraScanResult.Scanned(state.Matches.AsReadOnly(), length, Fingerprint),
-                LibYara.ErrorScanTimeout => YaraScanResult.NotScanned(YaraFailureReason.Timeout,
+                YaraXNative.Success => YaraScanResult.Scanned(
+                    state.Matches.OrderBy(m => m.Index).Select(m => m.Info).ToArray(), length, Fingerprint),
+                YaraXNative.ScanTimeout => YaraScanResult.NotScanned(YaraFailureReason.Timeout,
                     $"YARA scan timed out after {timeoutSeconds} s.", length, Fingerprint),
-                LibYara.ErrorCouldNotMapFile => YaraScanResult.NotScanned(YaraFailureReason.IoError,
-                    "Memory could not be read during the YARA scan (e.g. a page of the mapped file failed to load).",
-                    length, Fingerprint),
                 _ => YaraScanResult.NotScanned(YaraFailureReason.EngineError,
-                    $"yr_rules_scan_mem failed (YARA error {error}).", length, Fingerprint),
+                    $"yrx_scanner_scan failed ({result}): {YaraXNative.LastError()}", length, Fingerprint),
             };
         }
         finally
         {
+            if (scanner != IntPtr.Zero)
+            {
+                YaraXNative.yrx_scanner_destroy(scanner); // always before the rules can be released
+            }
+
             if (added)
             {
                 _handle.DangerousRelease();
@@ -271,181 +301,251 @@ public sealed unsafe class YaraRuleSet : IDisposable
 
     private static YaraRuleSet Build(List<PreparedSource> sources, List<YaraRuleFileError> errors, CancellationToken cancellationToken)
     {
-        LibYara.EnsureInitialized();
+        YaraXNative.EnsureAvailable();
 
-        // Pass 1: each source on its own, so one broken file can't take the others down.
+        // Pass 1: each source on its own (syntax, semantics, module allowlist), so one bad file can't take the others down.
         var valid = new List<PreparedSource>();
         foreach (var source in sources)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var log = new CompilerLog();
-            IntPtr rules = Compile([source], log, out _);
-            if (rules == IntPtr.Zero)
+            var problems = CompileAlone(source);
+            if (problems.Count > 0)
             {
-                errors.Add(new YaraRuleFileError(source.Name, log.ErrorsOr("The YARA compiler rejected the file.")));
-                continue;
+                errors.Add(new YaraRuleFileError(source.Name, problems));
             }
-
-            LibYara.yr_rules_destroy(rules);
-            valid.Add(source);
+            else
+            {
+                valid.Add(source);
+            }
         }
 
-        // Pass 2: everything that compiled, together (one scan per file instead of one per rule file).
-        // Namespaces keep the files independent, so this should always succeed; if it doesn't, the
-        // offending file is dropped and the rest compiled again.
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var log = new CompilerLog { RecordWarnings = true, Sources = valid };
-            IntPtr rules = Compile(valid, log, out int failedIndex);
-            if (rules != IntPtr.Zero)
-            {
-                return Create(new RulesHandle(rules), valid, errors, log.Warnings);
-            }
-
-            if (failedIndex < 0)
-            {
-                throw new InvalidOperationException(
-                    "The YARA compiler failed to produce rules: " + string.Join("; ", log.ErrorsOr("unknown error")));
-            }
-
-            errors.Add(new YaraRuleFileError(valid[failedIndex].Name,
-                log.ErrorsOr("The file did not compile together with the other rule files.")));
-            valid.RemoveAt(failedIndex);
-        }
-    }
-
-    /// <summary>Compiles <paramref name="sources"/> into one YR_RULES; returns zero (and the failing index) on error.</summary>
-    private static IntPtr Compile(IReadOnlyList<PreparedSource> sources, CompilerLog log, out int failedIndex)
-    {
-        failedIndex = -1;
-        int error = LibYara.yr_compiler_create(out IntPtr compiler);
-        if (error != LibYara.ErrorSuccess)
-        {
-            log.Errors.Add($"yr_compiler_create failed (YARA error {error}).");
-            return IntPtr.Zero;
-        }
-
-        var logHandle = GCHandle.Alloc(log);
+        // Pass 2: everything that passed, together, one namespace per file. A source that still fails here is
+        // dropped and reported; YARA-X keeps compiling the others, and build always produces a rule set.
+        cancellationToken.ThrowIfCancellationRequested();
+        var warnings = new List<YaraRuleWarning>();
+        var loaded = new List<PreparedSource>();
+        IntPtr compiler = CreateCompiler();
+        IntPtr rules;
         try
         {
-            LibYara.yr_compiler_set_callback(compiler, &OnCompilerMessage, GCHandle.ToIntPtr(logHandle));
-            LibYara.yr_compiler_set_include_callback(compiler, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-
-            for (int i = 0; i < sources.Count; i++)
+            foreach (var source in valid)
             {
-                log.CurrentIndex = i;
-                fixed (byte* text = sources[i].Utf8Text)
-                fixed (byte* ns = sources[i].Utf8Namespace)
+                if (AddSource(compiler, source) is { Count: > 0 } late)
                 {
-                    if (LibYara.yr_compiler_add_string(compiler, text, ns) > 0)
-                    {
-                        failedIndex = i; // the compiler can't be used after an error
-                        return IntPtr.Zero;
-                    }
+                    errors.Add(new YaraRuleFileError(source.Name, late));
+                }
+                else
+                {
+                    loaded.Add(source);
                 }
             }
 
-            error = LibYara.yr_compiler_get_rules(compiler, out IntPtr rules);
-            if (error != LibYara.ErrorSuccess || rules == IntPtr.Zero)
-            {
-                log.Errors.Add($"yr_compiler_get_rules failed (YARA error {error}).");
-                return IntPtr.Zero;
-            }
-
-            return rules;
+            CollectCompilerWarnings(compiler, loaded, warnings);
+            rules = YaraXNative.yrx_compiler_build(compiler);
         }
         finally
         {
-            LibYara.yr_compiler_destroy(compiler);
-            logHandle.Free();
+            YaraXNative.yrx_compiler_destroy(compiler);
         }
-    }
 
-    private static YaraRuleSet Create(
-        RulesHandle handle, List<PreparedSource> loaded, List<YaraRuleFileError> errors, List<YaraRuleWarning> warnings)
-    {
-        var byPointer = new Dictionary<IntPtr, YaraRuleInfo>();
-        var rules = new List<YaraRuleInfo>();
+        if (rules == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"yrx_compiler_build failed: {YaraXNative.LastError()}");
+        }
+
+        var handle = new RulesHandle(rules);
         try
         {
-            var yrRules = (LibYara.YrRules*)handle.DangerousGetHandle();
-            for (var rule = yrRules->RulesTable; (rule->Flags & LibYara.RuleFlagsNull) == 0; rule++)
+            // Defence in depth: the combined set must import nothing outside the allowlist either.
+            if (DisallowedImports(rules) is { Count: > 0 } bad)
             {
-                if ((rule->Flags & LibYara.RuleFlagsPrivate) != 0)
-                {
-                    continue; // private rules are never reported
-                }
-
-                var info = ReadRule(rule, warnings);
-                byPointer[(IntPtr)rule] = info;
-                rules.Add(info);
+                throw new InvalidOperationException($"Combined rules import disallowed modules: {string.Join(", ", bad)}");
             }
+
+            return Create(handle, loaded, errors, warnings);
         }
         catch
         {
             handle.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Compiles one source alone; returns its problems (empty if it is fine).</summary>
+    private static IReadOnlyList<string> CompileAlone(PreparedSource source)
+    {
+        IntPtr compiler = CreateCompiler();
+        IntPtr rules = IntPtr.Zero;
+        try
+        {
+            if (AddSource(compiler, source) is { Count: > 0 } problems)
+            {
+                return problems;
+            }
+
+            rules = YaraXNative.yrx_compiler_build(compiler);
+            if (rules == IntPtr.Zero)
+            {
+                return [$"yrx_compiler_build failed: {YaraXNative.LastError()}"];
+            }
+
+            var bad = DisallowedImports(rules);
+            return bad.Count == 0
+                ? []
+                : bad.Select(m => $"imports module \"{m}\", which is not allowed (allowed: {string.Join(", ", AllowedModules.Order())})").ToArray();
+        }
+        finally
+        {
+            if (rules != IntPtr.Zero)
+            {
+                YaraXNative.yrx_rules_destroy(rules);
+            }
+
+            YaraXNative.yrx_compiler_destroy(compiler);
+        }
+    }
+
+    private static IntPtr CreateCompiler()
+    {
+        if (YaraXNative.yrx_compiler_create(YaraXNative.DisableIncludes, out IntPtr compiler) != YaraXNative.Success || compiler == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"yrx_compiler_create failed: {YaraXNative.LastError()}");
+        }
+
+        return compiler;
+    }
+
+    /// <summary>Adds <paramref name="source"/> in its own namespace; returns the errors it caused (empty on success).</summary>
+    private static IReadOnlyList<string> AddSource(IntPtr compiler, PreparedSource source)
+    {
+        int result;
+        fixed (byte* ns = source.Utf8Namespace)
+        fixed (byte* text = source.Utf8Text)
+        {
+            if (YaraXNative.yrx_compiler_new_namespace(compiler, ns) != YaraXNative.Success)
+            {
+                return [$"Could not create namespace: {YaraXNative.LastError()}"];
+            }
+
+            result = YaraXNative.yrx_compiler_add_source_with_origin(compiler, text, ns);
+        }
+
+        if (result == YaraXNative.Success)
+        {
+            return [];
+        }
+
+        string fallback = YaraXNative.LastError();
+        if (YaraXNative.yrx_compiler_errors_json(compiler, out var buffer) != YaraXNative.Success)
+        {
+            return [fallback];
+        }
+
+        var messages = ParseReports(YaraXNative.TakeBuffer(buffer))
+            .Where(r => r.Origin is null || r.Origin == source.Name)
+            .Select(r => r.Line is { } line ? $"line {line}: {r.Title}" : r.Title)
+            .ToArray();
+        return messages.Length > 0 ? messages : [fallback];
+    }
+
+    private static void CollectCompilerWarnings(IntPtr compiler, List<PreparedSource> loaded, List<YaraRuleWarning> warnings)
+    {
+        if (YaraXNative.yrx_compiler_warnings_json(compiler, out var buffer) != YaraXNative.Success)
+        {
+            return;
+        }
+
+        var names = loaded.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var report in ParseReports(YaraXNative.TakeBuffer(buffer)))
+        {
+            string file = report.Origin is { } o && names.Contains(o) ? o : "";
+            string where = report.Line is { } line ? $"line {line}: " : "";
+            warnings.Add(new YaraRuleWarning(file, null, YaraWarningKind.Compiler, null,
+                $"YARA compiler warning in {(file.Length > 0 ? file : "rules")}: {where}{report.Title} ({report.Code})"));
+        }
+    }
+
+    private static List<string> DisallowedImports(IntPtr rules)
+    {
+        var imports = new List<string>();
+        var handle = GCHandle.Alloc(imports);
+        try
+        {
+            YaraXNative.yrx_rules_iter_imports(rules, &OnImport, GCHandle.ToIntPtr(handle));
+        }
+        finally
+        {
+            handle.Free();
+        }
+
+        return imports.Where(m => !AllowedModules.Contains(m)).Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    private static YaraRuleSet Create(
+        RulesHandle handle, List<PreparedSource> loaded, List<YaraRuleFileError> errors, List<YaraRuleWarning> warnings)
+    {
+        var collected = new RuleCollector(warnings);
+        var gch = GCHandle.Alloc(collected);
+        try
+        {
+            YaraXNative.yrx_rules_iter(handle.DangerousGetHandle(), &OnRule, GCHandle.ToIntPtr(gch));
+        }
+        finally
+        {
+            gch.Free();
+        }
+
+        if (collected.Failure is { } failure)
+        {
+            throw new InvalidOperationException("Reading the compiled rules failed.", failure);
+        }
+
+        var byName = new Dictionary<(string, string), (int, YaraRuleInfo)>();
+        for (int i = 0; i < collected.Rules.Count; i++)
+        {
+            var info = collected.Rules[i];
+            byName[(info.File, info.Identifier)] = (i, info);
+        }
 
         return new YaraRuleSet(
             handle,
-            byPointer.ToFrozenDictionary(),
-            rules.AsReadOnly(),
+            byName.ToFrozenDictionary(),
+            collected.Rules.AsReadOnly(),
             loaded.Select(s => s.Name).ToArray(),
             errors.OrderBy(e => e.File, StringComparer.Ordinal).ToArray(),
             warnings.AsReadOnly(),
             ComputeFingerprint(loaded));
     }
 
-    private static YaraRuleInfo ReadRule(LibYara.YrRule* rule, List<YaraRuleWarning> warnings)
+    private static YaraRuleInfo ReadRule(IntPtr rule, List<YaraRuleWarning> warnings)
     {
-        string identifier = LibYara.Utf8(rule->Identifier) ?? "(unnamed)";
-        string file = rule->Namespace is null ? "" : LibYara.Utf8(rule->Namespace->Name) ?? "";
+        YaraXNative.yrx_rule_identifier(rule, out byte* id, out nuint idLength);
+        YaraXNative.yrx_rule_namespace(rule, out byte* ns, out nuint nsLength);
+        string identifier = YaraXNative.Utf8(id, idLength);
+        string file = YaraXNative.Utf8(ns, nsLength);
 
         var tags = new List<string>();
-        // Tags: consecutive NUL-terminated strings, ended by an empty one.
-        for (byte* tag = rule->Tags; tag is not null && *tag != 0;)
+        var tagsHandle = GCHandle.Alloc(tags);
+        var meta = new Dictionary<string, MetaValue>(StringComparer.OrdinalIgnoreCase);
+        var metaHandle = GCHandle.Alloc(meta);
+        try
         {
-            var bytes = MemoryMarshal.CreateReadOnlySpanFromNullTerminated(tag);
-            tags.Add(Encoding.UTF8.GetString(bytes));
-            tag += bytes.Length + 1;
+            YaraXNative.yrx_rule_iter_tags(rule, &OnTag, GCHandle.ToIntPtr(tagsHandle));
+            YaraXNative.yrx_rule_iter_metadata(rule, &OnMetadata, GCHandle.ToIntPtr(metaHandle));
         }
-
-        MetaValue? mitre = null, verdict = null, description = null;
-        if (rule->Metas is not null)
+        finally
         {
-            for (var meta = rule->Metas; ; meta++)
-            {
-                var name = LibYara.Utf8(meta->Identifier);
-                var value = new MetaValue(meta->Type, meta->Type == LibYara.MetaTypeString ? LibYara.Utf8(meta->String) : null, meta->Integer);
-                if (string.Equals(name, "mitre", StringComparison.OrdinalIgnoreCase))
-                {
-                    mitre ??= value;
-                }
-                else if (string.Equals(name, "verdict", StringComparison.OrdinalIgnoreCase))
-                {
-                    verdict ??= value;
-                }
-                else if (string.Equals(name, "description", StringComparison.OrdinalIgnoreCase))
-                {
-                    description ??= value;
-                }
-
-                if ((meta->Flags & LibYara.MetaFlagsLastInRule) != 0)
-                {
-                    break;
-                }
-            }
+            tagsHandle.Free();
+            metaHandle.Free();
         }
 
         return new YaraRuleInfo(
             file,
             identifier,
             tags.AsReadOnly(),
-            InterpretVerdict(file, identifier, verdict, warnings),
-            InterpretMitre(file, identifier, mitre, warnings),
-            description?.Text);
+            InterpretVerdict(file, identifier, meta.TryGetValue("verdict", out var v) ? v : null, warnings),
+            InterpretMitre(file, identifier, meta.TryGetValue("mitre", out var m) ? m : null, warnings),
+            meta.TryGetValue("description", out var d) ? d.Text : null);
     }
 
     internal static MitreTechniqueSelection InterpretMitre(string file, string rule, MetaValue? meta, List<YaraRuleWarning> warnings)
@@ -502,6 +602,54 @@ public sealed unsafe class YaraRuleSet : IDisposable
         }
     }
 
+    // --- Compiler reports (JSON) ---
+
+    internal readonly record struct CompilerReport(string Code, string Title, string? Origin, int? Line);
+
+    // "--> origin:line:column" in the report text; the origin is greedy because it may contain ':' only before line:col.
+    [GeneratedRegex(@"-->\s*(?<origin>.+?):(?<line>\d+):(?<col>\d+)\s*$", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex LocationRegex();
+
+    internal static List<CompilerReport> ParseReports(string json)
+    {
+        var reports = new List<CompilerReport>();
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return reports;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return reports;
+            }
+
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                string code = item.TryGetProperty("code", out var c) ? c.GetString() ?? "" : "";
+                string title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                string text = item.TryGetProperty("text", out var x) ? x.GetString() ?? "" : "";
+                string? origin = null;
+                int? line = null;
+                if (LocationRegex().Match(text) is { Success: true } match)
+                {
+                    origin = match.Groups["origin"].Value;
+                    line = int.Parse(match.Groups["line"].Value, CultureInfo.InvariantCulture);
+                }
+
+                reports.Add(new CompilerReport(code, title.Length > 0 ? title : text, origin, line));
+            }
+        }
+        catch (JsonException)
+        {
+            reports.Add(new CompilerReport("", json.Length > 500 ? json[..500] : json, null, null));
+        }
+
+        return reports;
+    }
+
     private static string ComputeFingerprint(IEnumerable<PreparedSource> loaded)
     {
         var sb = new StringBuilder(FingerprintVersion);
@@ -526,87 +674,133 @@ public sealed unsafe class YaraRuleSet : IDisposable
         return buffer;
     }
 
-    // --- Native callbacks ---
+    // --- Native callbacks: never let an exception cross into native code ---
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static int OnScanCallback(IntPtr context, int message, IntPtr messageData, IntPtr userData)
+    private static void OnMatchingRule(IntPtr rule, IntPtr userData)
     {
         ScanState? state = null;
         try
         {
             state = (ScanState)GCHandle.FromIntPtr(userData).Target!;
-            if (message == LibYara.CallbackMsgRuleMatching && state.RulesByPointer.TryGetValue(messageData, out var info))
+            YaraXNative.yrx_rule_identifier(rule, out byte* id, out nuint idLength);
+            YaraXNative.yrx_rule_namespace(rule, out byte* ns, out nuint nsLength);
+            var key = (YaraXNative.Utf8(ns, nsLength), YaraXNative.Utf8(id, idLength));
+            if (state.RulesByName.TryGetValue(key, out var entry))
             {
-                state.Matches.Add(info);
+                state.Matches.Add(entry);
             }
-
-            return LibYara.CallbackContinue;
         }
         catch (Exception ex)
         {
-            // Never let an exception cross into native code.
             if (state is not null)
             {
                 state.CallbackFailure = ex;
             }
-
-            return LibYara.CallbackError;
         }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnCompilerMessage(int errorLevel, byte* fileName, int lineNumber, LibYara.YrRule* rule, byte* message, IntPtr userData)
+    private static void OnRule(IntPtr rule, IntPtr userData)
+    {
+        RuleCollector? collector = null;
+        try
+        {
+            collector = (RuleCollector)GCHandle.FromIntPtr(userData).Target!;
+            collector.Rules.Add(ReadRule(rule, collector.Warnings));
+        }
+        catch (Exception ex)
+        {
+            if (collector is not null)
+            {
+                collector.Failure ??= ex;
+            }
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnImport(byte* moduleName, IntPtr userData)
     {
         try
         {
-            var log = (CompilerLog)GCHandle.FromIntPtr(userData).Target!;
-            string text = $"line {lineNumber}: {LibYara.Utf8(message)}";
-            if (errorLevel == LibYara.CompilerErrorLevelError)
-            {
-                log.Errors.Add(text);
-            }
-            else if (log.RecordWarnings && log.Sources is { } sources && log.CurrentIndex >= 0 && log.CurrentIndex < sources.Count)
-            {
-                string? ruleName = rule is null ? null : LibYara.Utf8(rule->Identifier);
-                string file = sources[log.CurrentIndex].Name;
-                log.Warnings.Add(new YaraRuleWarning(file, ruleName, YaraWarningKind.Compiler, null,
-                    $"YARA compiler warning in {file}{(ruleName is null ? "" : $", rule {ruleName}")}: {text}"));
-            }
+            ((List<string>)GCHandle.FromIntPtr(userData).Target!).Add(YaraXNative.Utf8(moduleName) ?? "");
         }
         catch
         {
-            // Never let an exception cross into native code; a lost message is better than a crash.
+            // A lost name would make the check unsafe, but an exception can't cross into native code; the
+            // list then simply lacks it. (Only OutOfMemory could get here.)
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnTag(byte* tag, IntPtr userData)
+    {
+        try
+        {
+            ((List<string>)GCHandle.FromIntPtr(userData).Target!).Add(YaraXNative.Utf8(tag) ?? "");
+        }
+        catch
+        {
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnMetadata(YaraXNative.YrxMetadata* metadata, IntPtr userData)
+    {
+        try
+        {
+            var meta = (Dictionary<string, MetaValue>)GCHandle.FromIntPtr(userData).Target!;
+            string name = YaraXNative.Utf8(metadata->Identifier) ?? "";
+            var value = metadata->ValueType switch
+            {
+                YaraXNative.MetaString => new MetaValue(MetaKind.String, YaraXNative.Utf8(metadata->String), 0),
+                YaraXNative.MetaI64 => new MetaValue(MetaKind.Integer, null, metadata->I64),
+                YaraXNative.MetaBoolean => new MetaValue(MetaKind.Boolean, null, metadata->Boolean != 0 ? 1 : 0),
+                YaraXNative.MetaF64 => new MetaValue(MetaKind.Float, null, 0, metadata->F64),
+                _ => new MetaValue(MetaKind.Bytes, null, (long)metadata->BytesLength),
+            };
+            meta.TryAdd(name, value); // first one wins, like before
+        }
+        catch
+        {
         }
     }
 
     // --- Helper types ---
 
-    internal readonly record struct MetaValue(int Type, string? Text, long Integer)
+    internal enum MetaKind
     {
-        public string Display => Type switch
+        String,
+        Integer,
+        Boolean,
+        Float,
+        Bytes,
+    }
+
+    internal readonly record struct MetaValue(MetaKind Kind, string? Text, long Integer, double Float = 0)
+    {
+        public string Display => Kind switch
         {
-            LibYara.MetaTypeString => $"\"{Text}\"",
-            LibYara.MetaTypeBoolean => Integer != 0 ? "true" : "false",
-            _ => Integer.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            MetaKind.String => $"\"{Text}\"",
+            MetaKind.Boolean => Integer != 0 ? "true" : "false",
+            MetaKind.Float => Float.ToString(CultureInfo.InvariantCulture),
+            MetaKind.Bytes => $"({Integer} bytes)",
+            _ => Integer.ToString(CultureInfo.InvariantCulture),
         };
     }
 
-    private sealed class ScanState(FrozenDictionary<IntPtr, YaraRuleInfo> rulesByPointer)
+    private sealed class ScanState(FrozenDictionary<(string, string), (int, YaraRuleInfo)> rulesByName)
     {
-        public FrozenDictionary<IntPtr, YaraRuleInfo> RulesByPointer { get; } = rulesByPointer;
-        public List<YaraRuleInfo> Matches { get; } = [];
+        public FrozenDictionary<(string, string), (int Index, YaraRuleInfo Info)> RulesByName { get; } = rulesByName;
+        public List<(int Index, YaraRuleInfo Info)> Matches { get; } = [];
         public Exception? CallbackFailure { get; set; }
     }
 
-    private sealed class CompilerLog
+    private sealed class RuleCollector(List<YaraRuleWarning> warnings)
     {
-        public List<string> Errors { get; } = [];
-        public List<YaraRuleWarning> Warnings { get; } = [];
-        public bool RecordWarnings { get; init; }
-        public IReadOnlyList<PreparedSource>? Sources { get; init; }
-        public int CurrentIndex { get; set; } = -1;
-
-        public IReadOnlyList<string> ErrorsOr(string fallback) => Errors.Count > 0 ? Errors.ToArray() : [fallback];
+        public List<YaraRuleInfo> Rules { get; } = [];
+        public List<YaraRuleWarning> Warnings { get; } = warnings;
+        public Exception? Failure { get; set; }
     }
 
     private sealed class PreparedSource
@@ -615,7 +809,7 @@ public sealed unsafe class YaraRuleSet : IDisposable
         {
             Name = name;
             Utf8Text = utf8Text;
-            Utf8Namespace = NulTerminated(Encoding.UTF8.GetBytes(name));
+            Utf8Namespace = YaraXNative.ToUtf8z(name);
             ContentSha256 = contentSha256;
         }
 
@@ -629,7 +823,7 @@ public sealed unsafe class YaraRuleSet : IDisposable
             ReadOnlySpan<byte> text = content;
             if (text.StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]))
             {
-                text = text[3..]; // UTF-8 BOM: libyara's lexer would see it as a syntax error
+                text = text[3..]; // UTF-8 BOM
             }
 
             if (text.Contains((byte)0))
@@ -639,20 +833,22 @@ public sealed unsafe class YaraRuleSet : IDisposable
                 return false;
             }
 
-            source = new PreparedSource(name, NulTerminated(text), Convert.ToHexStringLower(SHA256.HashData(text)));
+            if (!System.Text.Unicode.Utf8.IsValid(text))
+            {
+                source = null!;
+                error = "The file is not valid UTF-8.";
+                return false;
+            }
+
+            var z = new byte[text.Length + 1];
+            text.CopyTo(z);
+            source = new PreparedSource(name, z, Convert.ToHexStringLower(SHA256.HashData(text)));
             error = string.Empty;
             return true;
         }
-
-        private static byte[] NulTerminated(ReadOnlySpan<byte> bytes)
-        {
-            var result = new byte[bytes.Length + 1];
-            bytes.CopyTo(result);
-            return result;
-        }
     }
 
-    /// <summary>Owns the native YR_RULES; reference counting keeps it alive while scans run.</summary>
+    /// <summary>Owns the native YRX_RULES; reference counting keeps it alive while scans run.</summary>
     private sealed class RulesHandle : SafeHandle
     {
         public RulesHandle(IntPtr rules)
@@ -665,7 +861,8 @@ public sealed unsafe class YaraRuleSet : IDisposable
         protected override bool ReleaseHandle()
         {
             Released = true;
-            return LibYara.yr_rules_destroy(handle) == LibYara.ErrorSuccess;
+            YaraXNative.yrx_rules_destroy(handle);
+            return true;
         }
     }
 }

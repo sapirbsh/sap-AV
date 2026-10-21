@@ -1,7 +1,4 @@
 <Project>
-  <PropertyGroup>
-    <!-- dnYara.NativePack ships the native libyara.dll under lib/, so MSBuild warns it has no
-         managed metadata. The DLL is still copied to output where it's needed at runtime. -->
-    <NoWarn>$(NoWarn);MSB3246</NoWarn>
-  </PropertyGroup>
+  <!-- Shared MSBuild settings for every project. (The MSB3246 suppression for dnYara.NativePack's native
+       libyara.dll is gone: YARA-X's DLL is copied as a plain file by native/yara-x/YaraX.targets.) -->
 </Project>
