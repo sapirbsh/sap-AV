@@ -7,14 +7,15 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 being built |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 built, its review is next |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests: 1008 passed, 1 skipped (opt-in on-disk EICAR test). With `SAPAV_TEST_SIMULATE_CLEAN_MACHINE=1`: 947 passed, 55 skipped,
+Tests (after B1): Core 1043 passed + 1 skipped (opt-in on-disk EICAR), Engine 22 passed + 1 skipped (real Event Log test, needs an
+elevated run). Simulated clean machine (after B1): Core 982 passed, 55 skipped,
 0 failed. Build: 0 warnings (Debug and Release).
 
 ## Section A — Detection engine (done)
@@ -60,11 +61,21 @@ pass comes at the end.
 
 | Step | What | Status |
 |---|---|---|
-| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | Being built (not committed yet) |
+| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Built** (`6b0e586`). Immediate review not done yet: it was stopped at end of day; rerun first next session |
 | B2 | Reversible quarantine | Not started |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | Not started |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
+
+## Next session — start here (stopped 2026-10-21)
+
+1. **Rerun B1's immediate review** (it was stopped at end of day, with no findings yet). Fix any Critical/High, and record
+   Medium/Low in ROADMAP.md.
+2. Then **B2** (reversible quarantine, with an immediate review), then **B5** (scan-worker sandbox, full review), then B3, then B4.
+3. To do once by hand: run `dotnet test` from an **elevated** terminal, so the real Event Log test (skipped so far) actually runs.
+4. Check the GitHub **Actions** tab: CI results haven't been confirmed from here.
+
+The working tree is clean, and everything is committed and pushed.
 
 ## What's left
 
