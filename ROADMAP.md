@@ -392,7 +392,20 @@ YARA rules may override with their own `mitre` meta value.
 - Every alert is written to the Application log with source **"sap-AV"**, registered by the service installer (needs admin; the service runs as LocalSystem).
 - Structured payload (JSON in the message, stable field names) for SIEM collection: timestamp, alert type, verdict, file path,
   SHA-256, signer, MITRE ID, reason(s), MOTW URL, action taken.
-- Fixed event IDs per alert type (documented here once defined in B1).
+- Fixed event IDs per alert type (defined in B1, `src/SapAV.Engine/Alerts/AlertEventCatalog.cs`):
+
+  | Event ID | Alert type | Entry type | Meaning |
+  |---|---|---|---|
+  | 1001 | MaliciousFile | Error | File with a Malicious verdict |
+  | 1002 | SuspiciousFile | Warning | File with a Suspicious verdict |
+  | 1003 | PotentiallyUnwantedFile | Warning | PUP / hack tool (section E) |
+  | 3001 | QuarantineRestored | Information | User restored an item from quarantine (B2) |
+
+  Reserved ranges: 1000–1999 file detections · 2000–2999 system-change detections (persistence, Defender tampering,
+  honeytokens, process chains) · 3000–3999 user/remediation actions · 9000–9999 engine health. The engine's own ILogger
+  output uses a different source, so these IDs only ever mean alerts.
+- The source is registered only by `SapAV.Engine --install-eventlog-source` (elevated, from the installer path). Normal
+  startup never registers it. If it's missing, alerts are skipped with one warning and re-checked every 5 minutes.
 
 ---
 
