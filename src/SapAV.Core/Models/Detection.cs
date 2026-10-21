@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using SapAV.Core.Mitre;
+using SapAV.Core.Text;
 
 namespace SapAV.Core.Models;
 
@@ -55,14 +56,31 @@ public sealed record Detection
         }
     }
 
+    /// <summary>Longest <see cref="Reason"/> kept, in characters (longer ones are cut and end with an ellipsis).</summary>
+    public const int MaxReasonLength = 1024;
+
     /// <summary>Human-readable explanation, e.g. "SHA-256 found in local blocklist".</summary>
+    /// <remarks>
+    /// Sanitised on every assignment (constructor, <c>with</c>, JSON) with <see cref="SafeText.SingleLine"/>:
+    /// one trimmed line, line breaks and controls become spaces, bidi controls become U+FFFD, capped at
+    /// <see cref="MaxReasonLength"/>. Reasons embed untrusted text (file names, YARA rule names), and they go to
+    /// the Event Log, SIEMs and the pipe. Sanitising here rather than rejecting keeps a scan from failing just
+    /// because a file name contains an odd character.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The value is null, or empty / whitespace after sanitising.</exception>
     public string Reason
     {
         get => _reason;
         init
         {
-            ArgumentException.ThrowIfNullOrWhiteSpace(value, nameof(Reason));
-            _reason = value;
+            ArgumentNullException.ThrowIfNull(value, nameof(Reason));
+            var sanitized = SafeText.SingleLine(value, MaxReasonLength);
+            if (sanitized.Length == 0)
+            {
+                throw new ArgumentException("The reason must not be empty or only whitespace/control characters.", nameof(Reason));
+            }
+
+            _reason = sanitized;
         }
     }
 

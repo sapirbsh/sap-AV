@@ -75,6 +75,42 @@ public class DetectionTests
             () => new Detection(Verdict.Malicious, reason!, "T1204.002", DetectionSource.Blocklist));
     }
 
+    // --- Reason sanitising (B1: Event Log / SIEM safety) ---
+
+    [Fact]
+    public void Reason_LineBreaksAndBidiControls_AreSanitised_InConstructorWithAndJson()
+    {
+        const string raw = "YARA rule X matched (a.yar)\r\n2026-10-21 sap-AV: file is Clean\u202E";
+        const string expected = "YARA rule X matched (a.yar)  2026-10-21 sap-AV: file is Clean\uFFFD";
+        var detection = new Detection(Verdict.Malicious, raw, "T1204.002", DetectionSource.Yara);
+        var json = System.Text.Json.JsonSerializer.Serialize(detection with { Reason = "placeholder" })
+            .Replace("placeholder", "line1\\nline2", StringComparison.Ordinal);
+
+        Assert.Equal(expected, detection.Reason);
+        Assert.Equal(expected, (detection with { Reason = raw }).Reason);
+        Assert.Equal("line1 line2", System.Text.Json.JsonSerializer.Deserialize<Detection>(json)!.Reason);
+    }
+
+    [Fact]
+    public void Reason_VeryLong_IsCappedWithEllipsis()
+    {
+        var detection = new Detection(Verdict.Suspicious, "Heuristic score 90: " + new string('x', 100_000), "T1036.007", DetectionSource.Heuristic);
+
+        Assert.Equal(Detection.MaxReasonLength, detection.Reason.Length);
+        Assert.EndsWith("\u2026", detection.Reason);
+        Assert.StartsWith("Heuristic score 90: xxx", detection.Reason);
+    }
+
+    [Theory]
+    [InlineData("\r\n\t")]
+    [InlineData("\u2028\u0085 ")]
+    public void Reason_OnlyLineBreaksOrControls_IsRejected(string reason)
+    {
+        var ex = Assert.Throws<ArgumentException>(
+            () => new Detection(Verdict.Malicious, reason, "T1204.002", DetectionSource.Blocklist));
+        Assert.Equal(nameof(Detection.Reason), ex.ParamName);
+    }
+
     [Theory]
     [InlineData(Verdict.Clean)]
     [InlineData((Verdict)42)]

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using SapAV.Core.Hashing;
+using SapAV.Core.Text;
 
 namespace SapAV.Core.Motw;
 
@@ -123,6 +124,16 @@ public sealed record MarkOfTheWeb
         return Encoding.UTF8.GetString(content);
     }
 
+    /// <summary>
+    /// The display form: control characters, U+2028/U+2029 and bidi controls removed, user info redacted, capped
+    /// at <see cref="MaxUrlLength"/>; null if nothing is left. Idempotent.
+    /// </summary>
+    /// <remarks>
+    /// The authority ends at the first <c>/</c>, <c>\</c>, <c>?</c> or <c>#</c>, as in browsers (WHATWG URL): for
+    /// http(s) a backslash is a path separator, so in <c>https://evil\@good/</c> the host is <c>evil</c> and the
+    /// <c>@</c> is in the path. Looking for <c>@</c> past the backslash would redact the real host and leave
+    /// <c>https://***@good/</c>, which reads like a download from <c>good</c>.
+    /// </remarks>
     internal static string? SanitizeUrl(string value)
     {
         var sb = new StringBuilder(Math.Min(value.Length, MaxUrlLength));
@@ -133,7 +144,7 @@ public sealed record MarkOfTheWeb
                 break;
             }
 
-            if (!char.IsControl(c) && c is not ('‎' or '‏' or (>= '‪' and <= '‮') or (>= '⁦' and <= '⁩')))
+            if (!SafeText.IsLineBreakOrControl(c) && !SafeText.IsBidiControl(c))
             {
                 sb.Append(c);
             }
@@ -150,13 +161,15 @@ public sealed record MarkOfTheWeb
         if (scheme > 0)
         {
             int authorityStart = scheme + 3;
-            int authorityEnd = url.IndexOfAny(['/', '?', '#'], authorityStart);
+            int authorityEnd = url.IndexOfAny(['/', '\\', '?', '#'], authorityStart);
             if (authorityEnd < 0)
             {
                 authorityEnd = url.Length;
             }
 
-            int at = url.LastIndexOf('@', authorityEnd - 1, authorityEnd - authorityStart);
+            int at = authorityEnd > authorityStart
+                ? url.LastIndexOf('@', authorityEnd - 1, authorityEnd - authorityStart)
+                : -1;
             if (at >= authorityStart)
             {
                 url = string.Concat(url.AsSpan(0, authorityStart), "***", url.AsSpan(at));
@@ -164,6 +177,27 @@ public sealed record MarkOfTheWeb
         }
 
         return url;
+    }
+
+    /// <summary>
+    /// The form written to the Event Log / SIEM (ROADMAP X2): the display form (same rules as <see cref="HostUrl"/>)
+    /// without the query string and fragment, which often carry presigned download tokens or session IDs.
+    /// Null for null, or when nothing is left. Idempotent, so it is safe on an already sanitised URL.
+    /// </summary>
+    public static string? SanitizeUrlForLog(string? url)
+    {
+        if (url is null || SanitizeUrl(url) is not { } display)
+        {
+            return null;
+        }
+
+        int cut = display.IndexOfAny(['?', '#']);
+        return cut switch
+        {
+            < 0 => display,
+            0 => null,
+            _ => display[..cut],
+        };
     }
 }
 

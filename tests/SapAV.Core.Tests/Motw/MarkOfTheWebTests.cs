@@ -72,11 +72,30 @@ public sealed class MarkOfTheWebTests : IDisposable
     [InlineData("https://host.test/a@b.exe", "https://host.test/a@b.exe")] // '@' in the path is not user info
     [InlineData("https://host.test/\u0007x\u202Eexe.pdf", "https://host.test/xexe.pdf")]
     [InlineData("\u0001\u0002", null)]
+    [InlineData("https://host.test/a\u2028b\u2029.exe", "https://host.test/ab.exe")]
+    [InlineData(@"https://evil.test\@good.test/x.exe", @"https://evil.test\@good.test/x.exe")] // '\' ends the authority
+    [InlineData(@"https://u:p@evil.test\x.exe", @"https://***@evil.test\x.exe")]
     public void Urls_AreSanitized(string raw, string? expected)
     {
         var mark = MarkOfTheWeb.Parse(Encoding.UTF8.GetBytes($"[ZoneTransfer]\nZoneId=3\nHostUrl={raw}\n"));
 
         Assert.Equal(expected, mark.HostUrl);
+    }
+
+    [Theory]
+    [InlineData("https://cdn.test/setup.exe?X-Amz-Signature=abc&token=s3cr3t", "https://cdn.test/setup.exe")]
+    [InlineData("https://cdn.test/setup.exe#access_token=s3cr3t", "https://cdn.test/setup.exe")]
+    [InlineData("https://user:pw@cdn.test/a.exe?sig=1", "https://***@cdn.test/a.exe")]
+    [InlineData(@"https://evil.test\@good.test/a.exe?sig=1", @"https://evil.test\@good.test/a.exe")]
+    [InlineData("https://cdn.test/a\u2028.exe", "https://cdn.test/a.exe")]
+    [InlineData("?only-a-query", null)]
+    [InlineData(null, null)]
+    public void SanitizeUrlForLog_StripsQueryAndFragment_KeepsRedaction(string? raw, string? expected)
+    {
+        var once = MarkOfTheWeb.SanitizeUrlForLog(raw);
+
+        Assert.Equal(expected, once);
+        Assert.Equal(once, MarkOfTheWeb.SanitizeUrlForLog(once)); // idempotent
     }
 
     [Fact]
