@@ -19,7 +19,7 @@ The code is public on GitHub. Product name in the UI: "sap-AV".
 - Engine: .NET Worker Service that runs as a Windows Service
 - Engine <-> GUI communication: Named Pipes (JSON messages)
 - Hashing: `System.Security.Cryptography.SHA256`
-- YARA: `dnYara` + `dnYara.NativePack` (bundles native libyara.dll)
+- YARA: YARA-X v1.22.0 via its official C API (`yara_x_capi.dll`, x86_64-pc-windows-msvc). Not a NuGet package: `native/yara-x/YaraX.targets` downloads the pinned release zip at build time, verifies its SHA-256 and the DLL's SHA-256, and fails the build on mismatch (version + hashes in `native/yara-x/NOTICE.md`). Rules may import only `pe`, `math`, `hash`.
 - Signature check: Authenticode via `WinVerifyTrust` (P/Invoke), including catalog-signed files
 - Online lookup: VirusTotal API v3 (hash lookup only)
 - Local caches (VirusTotal results, scan cache): SQLite via `Microsoft.Data.Sqlite` (approved; added at step C5 / D2)
@@ -35,7 +35,8 @@ The code is public on GitHub. Product name in the UI: "sap-AV".
 SapAV.sln
 ROADMAP.md           Feature plan, owners, and build order
 global.json          Pins the .NET SDK version
-Directory.Build.props  Shared MSBuild settings (suppresses MSB3246 from dnYara.NativePack's native DLL)
+Directory.Build.props  Shared MSBuild settings (currently empty)
+native/yara-x/        YARA-X build target, LICENSE and NOTICE (the DLL itself is downloaded and hash-checked, never committed)
 src/
   SapAV.Core/        Shared models, scan logic, hash DB, YARA, heuristics (no UI, no service code)
   SapAV.Engine/      Windows Service: FileSystemWatcher, scan queue, quarantine, pipe server
