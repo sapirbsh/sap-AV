@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Blocklist;
 using SapAV.Core.Hashing;
 using SapAV.Core.Heuristics;
@@ -38,7 +39,8 @@ public sealed class FileScannerTests : IDisposable
     private FileScanner Scanner(IOnlineHashLookup? online = null) =>
         new(_hasher, () => _blocklist, _verifier, _yara, _motw, _heuristics, online ?? _online, new FixedTime(Now));
 
-    private static ScanItem Item(string path = @"C:\scan\file.exe") => new(path, ScanTrigger.CustomScan);
+    // A real (harmless, 10-byte) file: the scanner opens it once; the fake steps then decide what each step reports.
+    private ScanItem Item() => new(_dir.WriteFile("file.exe", new byte[10]), ScanTrigger.CustomScan);
 
     private static async Task<HashBlocklist> BlocklistOf(string sha256) =>
         await HashBlocklist.LoadAsync(new StringReader(sha256));
@@ -259,12 +261,12 @@ public sealed class FileScannerTests : IDisposable
 
         var eicarBlocklist = await BlocklistOf(Eicar.KnownSha256);
         var withBlocklist = new FileScanner(hasher, () => eicarBlocklist, _verifier, yara, _motw, _heuristics);
-        var report = await withBlocklist.ScanAsync(Item(@"C:\scan\eicar.com"));
+        var report = await withBlocklist.ScanAsync(Item());
         Assert.Equal(Verdict.Malicious, report.Result.Verdict);
         Assert.Equal(Eicar.KnownSha256, report.Result.Sha256);
 
         var yaraOnly = new FileScanner(hasher, () => HashBlocklist.Empty, _verifier, yara, _motw, _heuristics);
-        var viaYara = await yaraOnly.ScanAsync(Item(@"C:\scan\eicar.com"));
+        var viaYara = await yaraOnly.ScanAsync(Item());
         Assert.Equal(Verdict.Malicious, viaYara.Result.Verdict);
         Assert.Contains("EICAR_Test_File", Assert.Single(viaYara.Result.Detections).Reason);
     }
@@ -320,6 +322,9 @@ public sealed class FileScannerTests : IDisposable
             return Task.FromResult(Next);
         }
 
+        public Task<HashResult> HashHandleAsync(SafeFileHandle handle, CancellationToken cancellationToken = default) =>
+            HashFileAsync("", cancellationToken);
+
         public Task<HashResult> HashStreamAsync(Stream stream, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
@@ -333,6 +338,9 @@ public sealed class FileScannerTests : IDisposable
             Calls++;
             return Next;
         }
+
+        public SignatureCheckResult Verify(SafeFileHandle handle, string displayPath, CancellationToken cancellationToken = default) =>
+            Verify(displayPath, cancellationToken);
     }
 
     private sealed class FakeYara : IYaraScanner
@@ -357,6 +365,8 @@ public sealed class FileScannerTests : IDisposable
             return YaraScanResult.Scanned(matches, ScannedLength, new string('f', 64));
         }
 
+        public YaraScanResult ScanHandle(SafeFileHandle handle, CancellationToken cancellationToken = default) => ScanFile("", cancellationToken);
+
         public YaraScanResult ScanMemory(ReadOnlySpan<byte> data, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
@@ -365,6 +375,7 @@ public sealed class FileScannerTests : IDisposable
     {
         public long MaxSizeBytes => inner.MaxSizeBytes;
         public YaraScanResult ScanFile(string path, CancellationToken cancellationToken = default) => inner.ScanMemory(content, cancellationToken);
+        public YaraScanResult ScanHandle(SafeFileHandle handle, CancellationToken cancellationToken = default) => inner.ScanMemory(content, cancellationToken);
         public YaraScanResult ScanMemory(ReadOnlySpan<byte> data, CancellationToken cancellationToken = default) => inner.ScanMemory(data, cancellationToken);
     }
 
@@ -377,6 +388,8 @@ public sealed class FileScannerTests : IDisposable
             Calls++;
             return Next;
         }
+
+        public MarkOfTheWebResult Read(SafeFileHandle handle, CancellationToken cancellationToken = default) => Read("", cancellationToken);
     }
 
     private sealed class FakeHeuristics : IFileHeuristics
@@ -390,6 +403,9 @@ public sealed class FileScannerTests : IDisposable
             LastContext = context;
             return Next ?? new HeuristicResult([], FileHeuristics.DefaultThreshold, contentInspected: true, null);
         }
+
+        public HeuristicResult Analyze(SafeFileHandle handle, string path, HeuristicContext context, CancellationToken cancellationToken = default) =>
+            Analyze(path, context, cancellationToken);
     }
 
     private sealed class FakeOnline : IOnlineHashLookup

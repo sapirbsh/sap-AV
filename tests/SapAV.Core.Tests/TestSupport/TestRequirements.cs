@@ -57,6 +57,9 @@ public enum Requires
     /// i.e. no real antivirus removes or blocks it. Off by default because a real antivirus alerts on it.
     /// </summary>
     EicarFileOnDisk,
+
+    /// <summary>The temp volume has an active NTFS change journal (USN), so a file reports a non-zero USN.</summary>
+    UsnJournal,
 }
 
 /// <summary>Probes each <see cref="Requires"/> once per test process (lazily, at discovery time).</summary>
@@ -98,6 +101,7 @@ internal static class TestRequirements
             ? null
             : "none of the known Microsoft certificates is in a local certificate store"),
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
+        [Requires.UsnJournal] = new(ProbeUsnJournal),
     };
 
     /// <summary>Set to 1 to run the tests that write the EICAR test file to disk.</summary>
@@ -269,6 +273,22 @@ internal static class TestRequirements
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return $"admin share not reachable (needs elevation / file sharing): {ex.Message}";
+        }
+        finally
+        {
+            DeleteProbeDir(dir);
+        }
+    }
+
+    private static string? ProbeUsnJournal()
+    {
+        var dir = ProbeDir();
+        try
+        {
+            var path = Path.Combine(dir, "usn.bin");
+            File.WriteAllBytes(path, [1]);
+            using var handle = File.OpenHandle(path);
+            return NativeFile.TryGetUsn(handle, out _) ? null : "the temp volume has no active change journal";
         }
         finally
         {

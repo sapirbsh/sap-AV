@@ -10,30 +10,40 @@ public interface IMarkOfTheWebReader
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     MarkOfTheWebResult Read(string path, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the <c>Zone.Identifier</c> stream of the file behind an already open handle, opened <b>relative to that
+    /// handle</b> (the single-handle scan pipeline). The handle is validated first and is not closed.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    MarkOfTheWebResult Read(SafeFileHandle handle, CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Reads <c>path:Zone.Identifier</c> without trusting the path twice. Thread-safe and stateless.
-/// </summary>
+/// <summary>Reads the <c>Zone.Identifier</c> stream without resolving the path a second time. Thread-safe and stateless.</summary>
 /// <remarks>
 /// <list type="number">
-/// <item>The path must name a file, not a stream: a <c>:</c> in the file name (e.g. <c>a.txt:evil</c>) is InvalidPath.</item>
-/// <item>The <b>base file</b> is opened first through the hardened path (<see cref="SecureFile"/>: device paths
-/// never opened, <c>GetFileType</c> must be disk, directories rejected). Offline files and cloud placeholders
-/// are allowed: their stream is metadata and is opened with no-recall, so nothing is downloaded.</item>
-/// <item>Then the stream is opened the same hardened way, and its handle must report the <b>same file identity</b>
-/// (volume serial + 128-bit file ID) as the base handle, which stays open meanwhile. A path swapped between
-/// the two opens (e.g. replaced by a link to another file, a pipe or a device) is detected and nothing from
-/// it is used. If the file system can't report identities, the stream isn't read (NotRead).</item>
-/// <item>At most <see cref="MarkOfTheWeb.MaxStreamBytes"/> bytes are read; a missing stream is Absent.</item>
+/// <item>A path must name a file, not a stream: a <c>:</c> in the file name (e.g. <c>a.txt:evil</c>) is InvalidPath.</item>
+/// <item>The <b>base file</b> is opened through the hardened path (<see cref="SecureFile"/>: device paths never opened,
+/// <c>GetFileType</c> must be disk, directories rejected). Offline files and cloud placeholders are allowed: the
+/// stream is metadata and is opened with no-recall, so nothing is downloaded.</item>
+/// <item>The stream is opened with <c>NtCreateFile</c> <b>relative to the base file handle</b>
+/// (<c>RootDirectory</c> = the file, name <c>:Zone.Identifier</c>), read-only, no recall, anonymous SQOS. The path
+/// is never looked up again, so a path swapped after the base open (rename, junction flip, link to a pipe)
+/// can't redirect the read. The stream handle must also be a disk file.</item>
+/// <item>At most <see cref="MarkOfTheWeb.MaxStreamBytes"/> bytes are read; a missing stream (or a file system
+/// without streams) is Absent.</item>
 /// </list>
 /// </remarks>
 public sealed class MarkOfTheWebReader : IMarkOfTheWebReader
 {
     public const string StreamName = "Zone.Identifier";
 
-    /// <summary>Test seam: runs after the base file is open and before the stream is opened.</summary>
-    internal Action? BetweenOpensHook { get; init; }
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
+    private const int ErrorNotSupported = 50;
+    private const int ErrorInvalidParameter = 87;
+    private const int ErrorInvalidName = 123;
 
     public MarkOfTheWebResult Read(string path, CancellationToken cancellationToken = default)
     {
@@ -62,33 +72,44 @@ public sealed class MarkOfTheWebReader : IMarkOfTheWebReader
             return MarkOfTheWebResult.NotRead(failure.Reason, failure.Message);
         }
 
-        if (!NativeFile.TryGetFileId(file, out var fileId))
-        {
-            return MarkOfTheWebResult.NotRead(HashFailureReason.IoError, "The file system did not report a file identity.");
-        }
+        return ReadValidated(file, cancellationToken);
+    }
 
-        BetweenOpensHook?.Invoke();
+    public MarkOfTheWebResult Read(SafeFileHandle handle, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
         cancellationToken.ThrowIfCancellationRequested();
 
-        using var stream = SecureFile.OpenRegularFile(fullPath + ":" + StreamName, out var streamFailure, out _, allowOffline: true);
-        if (stream is null)
+        if (!SecureFile.Validate(handle, out var failure, out _, allowOffline: true))
         {
-            return streamFailure.Reason switch
-            {
-                HashFailureReason.NotFound => MarkOfTheWebResult.Absent(),
-                HashFailureReason.InvalidPath => MarkOfTheWebResult.Absent("The file system has no alternate data streams."),
-                _ => MarkOfTheWebResult.NotRead(streamFailure.Reason, streamFailure.Message),
-            };
+            return MarkOfTheWebResult.NotRead(failure.Reason, failure.Message);
         }
 
-        if (!NativeFile.TryGetFileId(stream, out var streamId) || streamId != fileId)
+        return ReadValidated(handle, cancellationToken);
+    }
+
+    private static MarkOfTheWebResult ReadValidated(SafeFileHandle file, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var stream = NativeFile.OpenStreamRelative(file, ":" + StreamName, out int error);
+        if (stream is null)
         {
-            return MarkOfTheWebResult.NotRead(HashFailureReason.ChangedDuringHashing,
-                "The file was replaced between opening it and opening its Zone.Identifier stream.");
+            return error switch
+            {
+                ErrorFileNotFound or ErrorPathNotFound => MarkOfTheWebResult.Absent(),
+                ErrorNotSupported or ErrorInvalidParameter or ErrorInvalidName =>
+                    MarkOfTheWebResult.Absent("The file system has no alternate data streams."),
+                _ => MarkOfTheWebResult.NotRead(Sha256Hasher.MapWin32Error(error), $"Could not open the Zone.Identifier stream (Win32 error {error})."),
+            };
         }
 
         try
         {
+            if (NativeFile.GetFileType(stream) != NativeFile.FileTypeDisk)
+            {
+                return MarkOfTheWebResult.NotRead(HashFailureReason.NotRegularFile, "The Zone.Identifier stream is not a disk file.");
+            }
+
             return MarkOfTheWebResult.Present(MarkOfTheWeb.Parse(ReadCapped(stream)));
         }
         catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out var reason))

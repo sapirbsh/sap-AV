@@ -25,6 +25,14 @@ public interface IYaraScanner
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     YaraScanResult ScanFile(string path, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Scans the file behind an already open handle (the single-handle scan pipeline). The handle is validated
+    /// first (disk file, not a directory, not offline) and is not closed. Same reporting rules as <see cref="ScanFile"/>.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    YaraScanResult ScanHandle(SafeFileHandle handle, CancellationToken cancellationToken = default);
+
     /// <summary>Scans a buffer. Same reporting rules as <see cref="ScanFile"/>.</summary>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     YaraScanResult ScanMemory(ReadOnlySpan<byte> data, CancellationToken cancellationToken = default);
@@ -151,6 +159,20 @@ public sealed unsafe class YaraScanner : IYaraScanner
 
         using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
         if (handle is null)
+        {
+            return YaraScanResult.NotScanned(YaraScanResult.FromHashFailure(failure.Reason), failure.Message, failure.Length);
+        }
+
+        return ScanOpenFile(handle, cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public YaraScanResult ScanHandle(SafeFileHandle handle, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!SecureFile.Validate(handle, out var failure, out _))
         {
             return YaraScanResult.NotScanned(YaraScanResult.FromHashFailure(failure.Reason), failure.Message, failure.Length);
         }

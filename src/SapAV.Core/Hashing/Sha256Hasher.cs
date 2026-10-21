@@ -1,6 +1,6 @@
 using System.Buffers;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 
 namespace SapAV.Core.Hashing;
 
@@ -9,21 +9,18 @@ namespace SapAV.Core.Hashing;
 /// does not depend on file size. Thread-safe: one instance can hash many files concurrently.
 /// </summary>
 /// <remarks>
-/// File hashing (<see cref="HashFileAsync"/>), in order:
+/// File hashing, in order:
 /// <list type="number">
-/// <item>Rejects empty/whitespace paths and paths with an embedded NUL (InvalidPath).</item>
-/// <item>Rejects device-namespace paths (<c>\\.\pipe\x</c>, <c>\\.\NUL</c>, raw volumes and disks) on both
-/// the raw path and <see cref="Path.GetFullPath(string)"/>, which turns legacy names such as <c>CON</c>,
-/// <c>NUL</c>, <c>COM1</c> and <c>LPT1</c> into <c>\\.\...</c>. These are never opened (NotRegularFile).</item>
-/// <item>Opens with <c>CreateFileW</c> (see <see cref="NativeFile.HashingFlags"/>): shared Read/Write/Delete,
-/// backup semantics (directories open and are reported as Directory), no recall (a cloud placeholder is
-/// never downloaded, even through a link), and anonymous impersonation for any pipe reached through a
-/// link or junction.</item>
-/// <item>Right after opening, before any read or metadata use, requires <c>GetFileType</c> = disk;
-/// anything else is closed as NotRegularFile. Then attributes from the handle: Directory, or
-/// Offline/placeholder (not read). The FileStream CanSeek check stays as a second backstop.</item>
-/// <item>Reads last-write time and size from the same handle (no separate stat).</item>
-/// <item>Hashes, reading at most limit + 1 bytes, so a file that grows past the limit is reported as
+/// <item><see cref="HashFileAsync"/> opens the path through <see cref="SecureFile"/>: empty/NUL paths are
+/// InvalidPath; device-namespace paths (<c>\.\pipe\x</c>, <c>\.\NUL</c>, raw volumes, and legacy names such as
+/// <c>CON</c>, <c>NUL</c>, <c>COM1</c> that <see cref="Path.GetFullPath(string)"/> turns into <c>\.\...</c>) are
+/// NotRegularFile and never opened; then one open with shared Read/Write/Delete, backup semantics (directories
+/// are reported as Directory), no recall (a cloud placeholder is never downloaded, even through a link), and
+/// anonymous impersonation for any pipe reached through a link or junction.</item>
+/// <item><see cref="HashHandleAsync"/> hashes a handle the caller already opened (the single-handle scan pipeline).
+/// Both paths validate the handle before any read: <c>GetFileType</c> = disk, not a directory, not offline.</item>
+/// <item>Reads last-write time and size from the same handle (no separate stat), then hashes with positional
+/// reads from offset 0, reading at most limit + 1 bytes, so a file that grows past the limit is reported as
 /// TooLarge instead of being read on.</item>
 /// <item>Re-reads last-write time and size from the handle; if either changed, or the bytes read don't
 /// match the size, reports ChangedDuringHashing so a half-written file can't be cached as Clean.</item>
@@ -79,91 +76,69 @@ public sealed class Sha256Hasher : IFileHasher
         ArgumentNullException.ThrowIfNull(path);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
+        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
+        if (handle is null)
         {
-            return HashResult.NotHashed(HashFailureReason.InvalidPath, "Path is empty, blank or contains a NUL character.");
+            return NotHashed(failure);
         }
 
-        if (IsDeviceNamespacePath(path))
-        {
-            return HashResult.NotHashed(HashFailureReason.NotRegularFile,
-                "Device-namespace path (pipe, device or volume), not a regular file.");
-        }
+        return await HashValidatedHandleAsync(handle, cancellationToken).ConfigureAwait(false);
+    }
 
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(path);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return HashResult.NotHashed(HashFailureReason.InvalidPath, ex.Message);
-        }
-
-        if (IsDeviceNamespacePath(fullPath))
-        {
-            return HashResult.NotHashed(HashFailureReason.NotRegularFile,
-                $"Path resolves to a device ({fullPath}), not a regular file.");
-        }
-
+    /// <inheritdoc/>
+    public async Task<HashResult> HashHandleAsync(SafeFileHandle handle, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var handle = NativeFile.OpenForHashing(fullPath, out int error);
-        if (handle.IsInvalid)
+        if (!SecureFile.Validate(handle, out var failure, out _))
         {
-            var reason = MapWin32Error(error);
-            if (reason == HashFailureReason.AccessDenied && IsFileSymlinkToDirectory(fullPath))
-            {
-                // Windows refuses to open a file-type symlink whose target is a directory.
-                return HashResult.NotHashed(HashFailureReason.Directory, "Path is a symbolic link to a directory.");
-            }
-
-            return HashResult.NotHashed(reason, $"{Marshal.GetPInvokeErrorMessage(error)} (Win32 error {error})");
+            return NotHashed(failure);
         }
 
-        FileStream? stream = null;
+        return await HashValidatedHandleAsync(handle, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static HashResult NotHashed(SecureOpenFailure failure) =>
+        HashResult.NotHashed(failure.Reason, failure.Message, failure.Length, failure.LastWriteTimeUtc, failure.Attributes);
+
+    /// <summary>Hashes a handle that <see cref="SecureFile"/> has validated, with positional reads from offset 0.</summary>
+    private async Task<HashResult> HashValidatedHandleAsync(SafeFileHandle handle, CancellationToken cancellationToken)
+    {
         try
         {
-            // First thing after opening: only disk files go further. Pipes, consoles and other devices
-            // reached through links or junctions are closed here, before any read or metadata call.
-            uint fileType = NativeFile.GetFileType(handle);
-            if (fileType != NativeFile.FileTypeDisk)
-            {
-                return HashResult.NotHashed(HashFailureReason.NotRegularFile,
-                    $"Not a regular file (file type {fileType}: device, pipe or other non-disk target).");
-            }
-
             var attributes = File.GetAttributes(handle);
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                return HashResult.NotHashed(HashFailureReason.Directory, "Path is a directory.", attributes: attributes);
-            }
-
             var lastWrite = File.GetLastWriteTimeUtc(handle);
-            if (IsOfflineOrPlaceholder(attributes))
+            long length = RandomAccess.GetLength(handle);
+            if (length > MaxSizeBytes)
             {
-                return HashResult.NotHashed(HashFailureReason.Offline,
-                    "File is offline or a cloud placeholder; not read to avoid a download.",
-                    RandomAccess.GetLength(handle), lastWrite, attributes);
+                return HashResult.NotHashed(HashFailureReason.TooLarge, length: length,
+                    lastWriteTimeUtc: lastWrite, attributes: attributes);
             }
 
-            stream = new FileStream(handle, FileAccess.Read, bufferSize: 0, isAsync: true);
-            return await HashOpenFileAsync(stream, attributes, lastWrite, cancellationToken).ConfigureAwait(false);
+            var (sha256, bytesRead) = await HashCoreAsync(
+                (buffer, offset, ct) => RandomAccess.ReadAsync(handle, buffer, offset, ct), cancellationToken).ConfigureAwait(false);
+            if (sha256 is null)
+            {
+                return HashResult.NotHashed(HashFailureReason.TooLarge, length: bytesRead,
+                    lastWriteTimeUtc: lastWrite, attributes: attributes);
+            }
+
+            var lastWriteAfter = File.GetLastWriteTimeUtc(handle);
+            long lengthAfter = RandomAccess.GetLength(handle);
+            if (lastWriteAfter != lastWrite || lengthAfter != length || bytesRead != length)
+            {
+                return HashResult.NotHashed(HashFailureReason.ChangedDuringHashing,
+                    $"File changed during hashing (size {length} -> {lengthAfter}, read {bytesRead} bytes, " +
+                    $"last write {lastWrite:O} -> {lastWriteAfter:O}).",
+                    lengthAfter, lastWriteAfter, attributes);
+            }
+
+            return HashResult.Hashed(sha256, bytesRead, lastWrite, attributes);
         }
         catch (Exception ex) when (TryClassify(ex, out var reason))
         {
             return HashResult.NotHashed(reason, ex.Message);
-        }
-        finally
-        {
-            if (stream is not null)
-            {
-                await stream.DisposeAsync().ConfigureAwait(false); // also closes the handle
-            }
-            else
-            {
-                handle.Dispose();
-            }
         }
     }
 
@@ -185,7 +160,7 @@ public sealed class Sha256Hasher : IFileHasher
                 return HashResult.NotHashed(HashFailureReason.TooLarge, length: knownRemaining);
             }
 
-            var (sha256, bytesRead) = await HashCoreAsync(stream, cancellationToken).ConfigureAwait(false);
+            var (sha256, bytesRead) = await HashCoreAsync((buffer, _, ct) => stream.ReadAsync(buffer, ct), cancellationToken).ConfigureAwait(false);
             return sha256 is null
                 ? HashResult.NotHashed(HashFailureReason.TooLarge, length: bytesRead)
                 : HashResult.Hashed(sha256, bytesRead);
@@ -196,45 +171,10 @@ public sealed class Sha256Hasher : IFileHasher
         }
     }
 
-    private async Task<HashResult> HashOpenFileAsync(
-        FileStream stream, FileAttributes attributes, DateTime lastWrite, CancellationToken cancellationToken)
-    {
-        // Second backstop after GetFileType: FileStream only reports CanSeek for disk files.
-        if (!stream.CanSeek)
-        {
-            return HashResult.NotHashed(HashFailureReason.NotRegularFile,
-                "Not a regular file (device, pipe or other non-disk target).");
-        }
 
-        long length = stream.Length;
-        if (length > MaxSizeBytes)
-        {
-            return HashResult.NotHashed(HashFailureReason.TooLarge, length: length,
-                lastWriteTimeUtc: lastWrite, attributes: attributes);
-        }
-
-        var (sha256, bytesRead) = await HashCoreAsync(stream, cancellationToken).ConfigureAwait(false);
-        if (sha256 is null)
-        {
-            return HashResult.NotHashed(HashFailureReason.TooLarge, length: bytesRead,
-                lastWriteTimeUtc: lastWrite, attributes: attributes);
-        }
-
-        var lastWriteAfter = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
-        long lengthAfter = stream.Length;
-        if (lastWriteAfter != lastWrite || lengthAfter != length || bytesRead != length)
-        {
-            return HashResult.NotHashed(HashFailureReason.ChangedDuringHashing,
-                $"File changed during hashing (size {length} -> {lengthAfter}, read {bytesRead} bytes, " +
-                $"last write {lastWrite:O} -> {lastWriteAfter:O}).",
-                lengthAfter, lastWriteAfter, attributes);
-        }
-
-        return HashResult.Hashed(sha256, bytesRead, lastWrite, attributes);
-    }
-
-    /// <summary>Hashes to the end of the stream; returns a null hash if more than the limit was read.</summary>
-    private async Task<(string? Sha256, long BytesRead)> HashCoreAsync(Stream stream, CancellationToken cancellationToken)
+    /// <summary>Hashes until the reader returns 0; returns a null hash if more than the limit was read.</summary>
+    private async Task<(string? Sha256, long BytesRead)> HashCoreAsync(
+        Func<Memory<byte>, long, CancellationToken, ValueTask<int>> read, CancellationToken cancellationToken)
     {
         // Never read more than limit + 1 bytes: one extra byte proves the content is over the limit.
         long readCap = MaxSizeBytes == long.MaxValue ? long.MaxValue : MaxSizeBytes + 1;
@@ -253,19 +193,19 @@ public sealed class Sha256Hasher : IFileHasher
                 }
 
                 int toRead = (int)Math.Min(_bufferSize, readCap - total);
-                int read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
-                if (read == 0)
+                int got = await read(buffer.AsMemory(0, toRead), total, cancellationToken).ConfigureAwait(false);
+                if (got == 0)
                 {
                     break;
                 }
 
-                total += read;
+                total += got;
                 if (total > MaxSizeBytes)
                 {
                     return (null, total);
                 }
 
-                sha.AppendData(buffer, 0, read);
+                sha.AppendData(buffer, 0, got);
             }
         }
         finally
@@ -300,32 +240,6 @@ public sealed class Sha256Hasher : IFileHasher
         return !(driveFile || uncFile || volumeFile);
 
         static bool IsSeparator(char c) => c is '\\' or '/';
-    }
-
-    /// <summary>
-    /// Only used to label an AccessDenied open: reads the first hop of a link from its reparse data
-    /// (<see cref="FileSystemInfo.LinkTarget"/> opens the link itself, not the target) and checks whether
-    /// it names an existing directory by an ordinary path. It never leads to another open for hashing.
-    /// </summary>
-    private static bool IsFileSymlinkToDirectory(string fullPath)
-    {
-        try
-        {
-            var target = new FileInfo(fullPath).LinkTarget;
-            if (target is null || IsDeviceNamespacePath(target))
-            {
-                return false;
-            }
-
-            var resolved = Path.IsPathFullyQualified(target)
-                ? target
-                : Path.GetFullPath(target, Path.GetDirectoryName(fullPath) ?? string.Empty);
-            return !IsDeviceNamespacePath(resolved) && Directory.Exists(resolved);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            return false;
-        }
     }
 
     /// <summary>True for offline files and cloud placeholders whose content would have to be recalled.</summary>

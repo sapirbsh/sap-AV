@@ -31,4 +31,13 @@ public interface ISignatureVerifier
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     SignatureCheckResult Verify(string path, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Checks the file behind an already open handle (the single-handle scan pipeline). Every read uses the handle;
+    /// <paramref name="displayPath"/> only tells Windows which subject interface package (SIP) to use and names
+    /// the file in messages. The handle is validated first and is not closed.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    SignatureCheckResult Verify(Microsoft.Win32.SafeHandles.SafeFileHandle handle, string displayPath, CancellationToken cancellationToken = default);
 }

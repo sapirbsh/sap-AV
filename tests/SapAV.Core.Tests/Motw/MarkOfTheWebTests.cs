@@ -173,27 +173,28 @@ public sealed class MarkOfTheWebTests : IDisposable
     }
 
     [Fact]
-    public void Read_FileReplacedBetweenOpens_IsDetected_AndTheNewStreamIsNotUsed()
+    public void ReadFromHandle_UsesTheOpenFile_EvenAfterThePathIsSwapped()
     {
-        var path = FileWithMotw("swap.exe", null);
-        var reader = new MarkOfTheWebReader
-        {
-            BetweenOpensHook = () =>
-            {
-                // The open base handle shares delete, so the file can be renamed away and replaced.
-                File.Move(path, _dir.File("moved.exe"));
-                File.WriteAllBytes(path, [9]);
-                File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\nZoneId=0\n");
-            },
-        };
+        var path = FileWithMotw("swap.exe", Typical);
+        using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
-        var result = reader.Read(path);
+        // Swap the path: the original is renamed away, a new file with a different mark takes its place.
+        File.Move(path, _dir.File("moved.exe"));
+        File.WriteAllBytes(path, [9]);
+        File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\nZoneId=0\n");
 
-        Assert.Equal(MarkOfTheWebStatus.NotRead, result.Status);
-        Assert.Equal(HashFailureReason.ChangedDuringHashing, result.NotReadReason);
-        Assert.Contains("replaced", result.Message);
+        var fromHandle = _reader.Read(handle);
+        Assert.Equal(SecurityZone.Internet, fromHandle.Mark!.Zone); // the stream of the file we opened
+        Assert.Equal(SecurityZone.LocalMachine, _reader.Read(path).Mark!.Zone); // the path now names the new file
     }
 
+    [Fact]
+    public void ReadFromHandle_WithoutStream_IsAbsent()
+    {
+        using var handle = File.OpenHandle(FileWithMotw("plain.exe", null));
+
+        Assert.Equal(MarkOfTheWebStatus.Absent, _reader.Read(handle).Status);
+    }
     // --- Heuristic signal ---
 
     [Fact]

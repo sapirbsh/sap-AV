@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Blocklist;
 using SapAV.Core.Hashing;
 using SapAV.Core.Heuristics;
@@ -21,29 +22,41 @@ public interface IFileScanner
 }
 
 /// <summary>
-/// The detection pipeline (ROADMAP feature 2; CLAUDE.md "Detection pipeline"), in this order:
+/// The detection pipeline (ROADMAP feature 2; CLAUDE.md "Detection pipeline") over <b>one file handle</b>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Single handle.</b> The file is opened once through <see cref="SecureFile"/> and that handle is passed to every
+/// step (hash, signature, YARA, Mark-of-the-Web, heuristics); no step opens the path again. So a path swapped
+/// between steps (rename, junction flip, made deterministic with an oplock) can't make the signature step see a
+/// Microsoft-signed file while the hash and YARA saw something else: every step judges the same file object.
+/// </para>
+/// <para>
+/// <b>No writers.</b> The handle is opened with share Read | Delete, so nobody can open the file for writing during the
+/// scan. If a writer already has it open (sharing violation), the scanner falls back to a shared handle and records
+/// the file's change-journal USN before and after the whole pipeline; any change (including a same-size rewrite
+/// with a restored timestamp) makes the result NotScanned (Error). If the volume has no change journal, a file that
+/// is open for writing is reported as Locked. Limitation: a writer that already holds the file open and has already
+/// produced a journal record for every kind of change can modify it without a new record; real-time scanning (D1)
+/// waits until no writer is left, and B5 moves the readers into a separate process.
+/// </para>
+/// <para>Steps, in order:</para>
 /// <list type="number">
-/// <item><b>SHA-256</b> (A2). If the file can't be hashed, the result is <see cref="ScanResult.NotScanned"/>
-/// via <see cref="HashResult.ToNotScannedResult"/>, never Clean, and nothing else reads the file. Skipped
-/// files get a clear Warning note: SkippedTooLarge (with size and limit) and SkippedOffline (not downloaded).
-/// One exception: an oversized file still gets the padding heuristic (A5; headers and samples only), and if
-/// that flags it the result is Scanned + Suspicious with no SHA-256.</item>
+/// <item><b>SHA-256</b> (A2). If the file can't be opened or hashed, the result is <see cref="ScanResult.NotScanned"/>
+/// via <see cref="HashResult.ToNotScannedResult"/>, never Clean, and nothing else reads the file. Skipped files get
+/// a clear Warning note: SkippedTooLarge (with size and limit) and SkippedOffline (not downloaded). One exception:
+/// an oversized file still gets the name and padding heuristics (A5; headers and samples only), and if they flag
+/// it the result is Scanned + Suspicious with no SHA-256.</item>
 /// <item><b>Blocklist</b>: a hit is Malicious <i>even if signed</i>. The signature is still checked so the result
 /// records who signed it; YARA and heuristics are skipped (the verdict can't get worse).</item>
 /// <item><b>Authenticode</b> (A3): Microsoft → Clean, all later steps skipped. OtherTrusted → no online lookup,
 /// but YARA and heuristics run. Unsigned, invalid or not checked → every step runs.</item>
 /// <item><b>YARA</b> (A4). If YARA can't scan the file (timeout, file changed, ...) and nothing else found
 /// anything, the result is NotScanned with YARA's status, because "Clean" would be a guess.</item>
-/// <item><b>Mark-of-the-Web</b> (A6) and <b>heuristics</b> (A5), which use the signature and the MOTW.</item>
+/// <item><b>Mark-of-the-Web</b> (A6, read relative to the handle) and <b>heuristics</b> (A5).</item>
 /// <item><b>Online lookup</b> (seam for D2, <see cref="IOnlineHashLookup"/>): only without a trusted signature.</item>
-/// <item><b>Verdict</b>: the worst detection; Signature status and trusted signer on the <see cref="ScanResult"/>.</item>
+/// <item><b>Verdict</b>: the worst detection; signature status and trusted signer on the <see cref="ScanResult"/>.</item>
 /// </list>
-/// <para>
-/// If YARA saw a different size than the hasher (the file changed between the steps), the result is
-/// NotScanned (Error): the SHA-256 would not describe what was scanned.
-/// </para>
 /// <para>
 /// Thread-safe if the components are (the built-in ones are). The signature check, YARA, MOTW and heuristics
 /// are synchronous native/file calls: run scans on the scan worker threads (B3).
@@ -83,18 +96,79 @@ public sealed class FileScanner : IFileScanner
         _time = time ?? TimeProvider.System;
     }
 
+    /// <summary>Test seam: runs after the file is opened and before the first step reads it.</summary>
+    internal Action<SafeFileHandle>? AfterOpenHook { get; init; }
+
     /// <inheritdoc/>
     public async Task<FileScanReport> ScanAsync(ScanItem item, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(item);
+        cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>();
+
+        var opened = Open(item.Path, notes);
+        if (opened.Handle is null)
+        {
+            return NotHashed(item, HashResult.NotHashed(opened.Failure.Reason, opened.Failure.Message,
+                opened.Failure.Length, opened.Failure.LastWriteTimeUtc, opened.Failure.Attributes), notes, null, cancellationToken);
+        }
+
+        using var handle = opened.Handle;
+        AfterOpenHook?.Invoke(handle);
+        var report = await ScanOpenAsync(item, handle, notes, cancellationToken).ConfigureAwait(false);
+
+        // Shared fallback: the whole pipeline must have seen one unchanged version of the file.
+        if (opened.UsnBefore is { } before && (!NativeFile.TryGetUsn(handle, out long after) || after != before))
+        {
+            notes.Add(new(ScanNoteLevel.Warning,
+                $"{item.Path}: the file changed during the scan (it was open for writing by another program); not scanned."));
+            return report with
+            {
+                Result = ScanResult.NotScanned(item, ScanStatus.Error, Now),
+                Notes = notes.AsReadOnly(),
+            };
+        }
+
+        return report;
+    }
+
+    private readonly record struct OpenedFile(SafeFileHandle? Handle, SecureOpenFailure Failure, long? UsnBefore);
+
+    /// <summary>Opens denying writers; if a writer has it open, a shared handle plus a USN baseline.</summary>
+    private static OpenedFile Open(string path, List<ScanNote> notes)
+    {
+        var handle = SecureFile.OpenRegularFile(path, out var failure, out _, denyWriters: true);
+        if (handle is not null || failure.Reason != HashFailureReason.Locked)
+        {
+            return new(handle, failure, null);
+        }
+
+        handle = SecureFile.OpenRegularFile(path, out failure, out _, denyWriters: false);
+        if (handle is null)
+        {
+            return new(null, failure, null);
+        }
+
+        if (!NativeFile.TryGetUsn(handle, out long usn))
+        {
+            handle.Dispose();
+            return new(null, new SecureOpenFailure(HashFailureReason.Locked,
+                "The file is open for writing by another program and the volume has no change journal to detect changes."), null);
+        }
+
+        notes.Add(new(ScanNoteLevel.Information, $"{path} is open for writing by another program; scanned with a change-journal check."));
+        return new(handle, default, usn);
+    }
+
+    private async Task<FileScanReport> ScanOpenAsync(ScanItem item, SafeFileHandle handle, List<ScanNote> notes, CancellationToken cancellationToken)
+    {
         string path = item.Path;
 
         // 1. Hash.
-        var hash = await _hasher.HashFileAsync(path, cancellationToken).ConfigureAwait(false);
+        var hash = await _hasher.HashHandleAsync(handle, cancellationToken).ConfigureAwait(false);
         if (!hash.IsHashed)
         {
-            return NotHashed(item, hash, notes, cancellationToken);
+            return NotHashed(item, hash, notes, handle, cancellationToken);
         }
 
         string sha256 = hash.Sha256;
@@ -102,7 +176,7 @@ public sealed class FileScanner : IFileScanner
         // 2. Blocklist (Malicious even if signed), 3. Signature.
         bool blocklisted = _blocklist().TryMatch(sha256, out var blocklistDetection);
         cancellationToken.ThrowIfCancellationRequested();
-        var signature = _signatures.Verify(path, cancellationToken);
+        var signature = _signatures.Verify(handle, path, cancellationToken);
         if (!signature.IsChecked)
         {
             notes.Add(new(ScanNoteLevel.Information,
@@ -127,7 +201,7 @@ public sealed class FileScanner : IFileScanner
 
         // 4. YARA.
         cancellationToken.ThrowIfCancellationRequested();
-        var yara = _yara.ScanFile(path, cancellationToken);
+        var yara = _yara.ScanHandle(handle, cancellationToken);
         if (yara.IsScanned && yara.Length != hash.Length)
         {
             notes.Add(new(ScanNoteLevel.Warning,
@@ -137,8 +211,8 @@ public sealed class FileScanner : IFileScanner
 
         // 5. Mark-of-the-Web, then heuristics.
         cancellationToken.ThrowIfCancellationRequested();
-        var motw = _motw.Read(path, cancellationToken);
-        var heuristics = _heuristics.Analyze(path, new HeuristicContext(signature, motw.Mark), cancellationToken);
+        var motw = _motw.Read(handle, cancellationToken);
+        var heuristics = _heuristics.Analyze(handle, path, new HeuristicContext(signature, motw.Mark), cancellationToken);
 
         var detections = new List<Detection>(yara.Detections);
         if (heuristics.Detection is { } heuristicDetection)
@@ -175,18 +249,18 @@ public sealed class FileScanner : IFileScanner
         return Report(result, hash, signature, yara, motw, heuristics, notes);
     }
 
-    private FileScanReport NotHashed(ScanItem item, HashResult hash, List<ScanNote> notes, CancellationToken cancellationToken)
+    private FileScanReport NotHashed(ScanItem item, HashResult hash, List<ScanNote> notes, SafeFileHandle? handle, CancellationToken cancellationToken)
     {
         string path = item.Path;
         switch (hash.FailureReason)
         {
-            case HashFailureReason.TooLarge:
+            case HashFailureReason.TooLarge when handle is not null:
                 notes.Add(new(ScanNoteLevel.Warning,
                     $"Skipped (too large): {path} is {hash.Length} bytes, over the {_hasher.MaxSizeBytes}-byte limit. " +
                     "Not hashed and not YARA-scanned; only the name and padding heuristics ran."));
 
                 // Carried over from the A2 review: padding a file past the limit must not make it invisible.
-                var heuristics = _heuristics.Analyze(path, HeuristicContext.None, cancellationToken);
+                var heuristics = _heuristics.Analyze(handle, path, HeuristicContext.None, cancellationToken);
                 if (heuristics.Detection is { } detection)
                 {
                     return Report(new ScanResult(item, [detection], Now), hash, null, null, null, heuristics, notes);

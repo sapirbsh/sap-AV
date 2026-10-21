@@ -51,6 +51,14 @@ public interface IFileHasher
     Task<HashResult> HashFileAsync(string path, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Hashes the file behind an already open handle (the single-handle scan pipeline), from offset 0, with
+    /// positional reads. The handle is validated first (disk file, not a directory, not offline) and is not closed.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="handle"/> is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    Task<HashResult> HashHandleAsync(Microsoft.Win32.SafeHandles.SafeFileHandle handle, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Hashes <paramref name="stream"/> from its current position to the end. The stream is not disposed.
     /// I/O failures while reading are reported in the result, not thrown.
     /// </summary>

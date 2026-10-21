@@ -59,62 +59,44 @@ public sealed class AuthenticodeVerifier : ISignatureVerifier
         ArgumentNullException.ThrowIfNull(path);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
+        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
+        if (handle is null)
         {
-            return SignatureCheckResult.NotChecked(HashFailureReason.InvalidPath, "Path is empty, blank or contains a NUL character.");
+            return SignatureCheckResult.NotChecked(failure.Reason, failure.Message);
         }
 
-        if (Sha256Hasher.IsDeviceNamespacePath(path))
+        return VerifyValidated(handle, Path.GetFullPath(path), cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public SignatureCheckResult Verify(SafeFileHandle handle, string displayPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        ArgumentNullException.ThrowIfNull(displayPath);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!SecureFile.Validate(handle, out var failure, out _))
         {
-            return SignatureCheckResult.NotChecked(HashFailureReason.NotRegularFile,
-                "Device-namespace path (pipe, device or volume), not a regular file.");
+            return SignatureCheckResult.NotChecked(failure.Reason, failure.Message);
         }
 
         string fullPath;
         try
         {
-            fullPath = Path.GetFullPath(path);
+            fullPath = Path.GetFullPath(displayPath);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
             return SignatureCheckResult.NotChecked(HashFailureReason.InvalidPath, ex.Message);
         }
 
-        if (Sha256Hasher.IsDeviceNamespacePath(fullPath))
-        {
-            return SignatureCheckResult.NotChecked(HashFailureReason.NotRegularFile,
-                $"Path resolves to a device ({fullPath}), not a regular file.");
-        }
+        return VerifyValidated(handle, fullPath, cancellationToken);
+    }
 
-        using var handle = NativeFile.OpenForSignatureCheck(fullPath, out int error);
-        if (handle.IsInvalid)
-        {
-            return SignatureCheckResult.NotChecked(Sha256Hasher.MapWin32Error(error),
-                $"{Marshal.GetPInvokeErrorMessage(error)} (Win32 error {error})");
-        }
-
+    private SignatureCheckResult VerifyValidated(SafeFileHandle handle, string fullPath, CancellationToken cancellationToken)
+    {
         try
         {
-            // First thing after opening: only disk files go further.
-            uint fileType = NativeFile.GetFileType(handle);
-            if (fileType != NativeFile.FileTypeDisk)
-            {
-                return SignatureCheckResult.NotChecked(HashFailureReason.NotRegularFile,
-                    $"Not a regular file (file type {fileType}: device, pipe or other non-disk target).");
-            }
-
-            var attributes = File.GetAttributes(handle);
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                return SignatureCheckResult.NotChecked(HashFailureReason.Directory, "Path is a directory.");
-            }
-
-            if (Sha256Hasher.IsOfflineOrPlaceholder(attributes))
-            {
-                return SignatureCheckResult.NotChecked(HashFailureReason.Offline,
-                    "File is offline or a cloud placeholder; not read to avoid a download.");
-            }
-
             long length = RandomAccess.GetLength(handle);
             var lastWrite = File.GetLastWriteTimeUtc(handle);
             if (length > MaxSizeBytes)

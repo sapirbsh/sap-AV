@@ -66,12 +66,23 @@ internal static class NativeFile
     internal static SafeFileHandle OpenForMemoryMap(string fullPath, out int win32Error) =>
         Open(fullPath, SignatureCheckFlags, out win32Error);
 
-    private static SafeFileHandle Open(string fullPath, uint flags, out int win32Error)
+    /// <summary>
+    /// Opens with <see cref="SignatureCheckFlags"/> (synchronous, all security flags) for the single-handle scan
+    /// pipeline. With <paramref name="denyWriters"/> the share mode is Read | Delete, so no other program can open
+    /// the file for writing while it is scanned (and an existing writer makes the open fail with a sharing
+    /// violation); otherwise Read | Write | Delete, like the hasher.
+    /// </summary>
+    internal static SafeFileHandle OpenForScan(string fullPath, bool denyWriters, out int win32Error) =>
+        Open(fullPath, SignatureCheckFlags, out win32Error,
+            denyWriters ? FileShareRead | FileShareDelete : FileShareRead | FileShareWrite | FileShareDelete);
+
+    private static SafeFileHandle Open(
+        string fullPath, uint flags, out int win32Error, uint share = FileShareRead | FileShareWrite | FileShareDelete)
     {
         var handle = CreateFileW(
             fullPath,
             GenericRead,
-            FileShareRead | FileShareWrite | FileShareDelete,
+            share,
             IntPtr.Zero,
             OpenExisting,
             flags,
@@ -84,24 +95,6 @@ internal static class NativeFile
         }
 
         return handle;
-    }
-
-    /// <summary>
-    /// The file's identity from the handle (<c>GetFileInformationByHandleEx(FileIdInfo)</c>: volume serial number
-    /// and 128-bit file ID, valid on NTFS and ReFS). Two handles with the same identity refer to the same file;
-    /// alternate data streams share their file's identity. False if the file system doesn't report one.
-    /// </summary>
-    internal static unsafe bool TryGetFileId(SafeFileHandle handle, out (ulong Volume, UInt128 FileId) id)
-    {
-        FileIdInfo info;
-        if (!GetFileInformationByHandleEx(handle, 18 /* FileIdInfo */, &info, (uint)sizeof(FileIdInfo)))
-        {
-            id = default;
-            return false;
-        }
-
-        id = (info.VolumeSerialNumber, new UInt128(info.FileIdHigh, info.FileIdLow));
-        return true;
     }
 
     /// <summary>
@@ -148,17 +141,149 @@ internal static class NativeFile
     [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode, ExactSpelling = true)]
     private static extern uint GetDriveTypeW(string rootPathName);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FileIdInfo
-    {
-        public ulong VolumeSerialNumber;
-        public ulong FileIdLow;  // FILE_ID_128 bytes 0-7 (little-endian)
-        public ulong FileIdHigh; // bytes 8-15
-    }
-
     [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern unsafe bool GetFileInformationByHandleEx(SafeFileHandle hFile, int fileInformationClass, void* info, uint bufferSize);
+
+    /// <summary>
+    /// The file's current update sequence number (<c>FSCTL_READ_FILE_USN_DATA</c>). The USN changes whenever the
+    /// change journal records a change to the file (data, size, timestamps, attributes, rename). False when the
+    /// volume has no active change journal (the call fails or reports USN 0).
+    /// </summary>
+    internal static unsafe bool TryGetUsn(SafeFileHandle handle, out long usn)
+    {
+        usn = 0;
+        ushort* input = stackalloc ushort[2];
+        input[0] = 2; // MinMajorVersion
+        input[1] = 3; // MaxMajorVersion
+        byte* output = stackalloc byte[1024];
+        if (!DeviceIoControl(handle, 0x000900EB /* FSCTL_READ_FILE_USN_DATA */, input, 4, output, 1024, out uint returned, IntPtr.Zero)
+            || returned < 8)
+        {
+            return false;
+        }
+
+        ushort major = *(ushort*)(output + 4);
+        int offset = major switch { 2 => 24, 3 => 40, _ => -1 };
+        if (offset < 0 || returned < offset + 8)
+        {
+            return false;
+        }
+
+        usn = *(long*)(output + offset);
+        return usn != 0;
+    }
+
+    /// <summary>
+    /// Opens the alternate data stream <paramref name="streamName"/> (e.g. <c>:Zone.Identifier</c>) <b>relative to the
+    /// open file handle</b> (<c>NtCreateFile</c> with <c>RootDirectory</c> = the file), so the path is never resolved
+    /// again: read-only, shared, no recall, non-directory, anonymous SQOS. On failure returns null and the Win32 error.
+    /// </summary>
+    internal static unsafe SafeFileHandle? OpenStreamRelative(SafeFileHandle file, string streamName, out int win32Error)
+    {
+        bool added = false;
+        file.DangerousAddRef(ref added);
+        try
+        {
+            fixed (char* name = streamName)
+            {
+                var unicode = new UnicodeString
+                {
+                    Length = (ushort)(streamName.Length * 2),
+                    MaximumLength = (ushort)(streamName.Length * 2),
+                    Buffer = name,
+                };
+                var sqos = new SecurityQualityOfService { Length = (uint)sizeof(SecurityQualityOfService), ImpersonationLevel = 0 /* Anonymous */ };
+                var attributes = new ObjectAttributes
+                {
+                    Length = (uint)sizeof(ObjectAttributes),
+                    RootDirectory = file.DangerousGetHandle(),
+                    ObjectName = &unicode,
+                    Attributes = 0x40, // OBJ_CASE_INSENSITIVE
+                    SecurityQualityOfService = &sqos,
+                };
+
+                int status = NtCreateFile(
+                    out IntPtr stream,
+                    0x00120089, // FILE_GENERIC_READ
+                    &attributes,
+                    out _,
+                    IntPtr.Zero,
+                    0,
+                    FileShareRead | FileShareWrite | FileShareDelete,
+                    1,          // FILE_OPEN
+                    0x00000040 | 0x00000020 | 0x00400000, // FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_NO_RECALL
+                    IntPtr.Zero,
+                    0);
+
+                if (status < 0)
+                {
+                    win32Error = (int)RtlNtStatusToDosError(status);
+                    return null;
+                }
+
+                win32Error = 0;
+                return new SafeFileHandle(stream, ownsHandle: true);
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                file.DangerousRelease();
+            }
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct UnicodeString
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public char* Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityQualityOfService
+    {
+        public uint Length;
+        public int ImpersonationLevel;
+        public byte ContextTrackingMode;
+        public byte EffectiveOnly;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct ObjectAttributes
+    {
+        public uint Length;
+        public IntPtr RootDirectory;
+        public UnicodeString* ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public SecurityQualityOfService* SecurityQualityOfService;
+    }
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern unsafe int NtCreateFile(
+        out IntPtr fileHandle, uint desiredAccess, ObjectAttributes* objectAttributes, out IoStatusBlock ioStatusBlock,
+        IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions,
+        IntPtr eaBuffer, uint eaLength);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoStatusBlock
+    {
+        public IntPtr Status;
+        public IntPtr Information;
+    }
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern uint RtlNtStatusToDosError(int status);
+
+    [DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern unsafe bool DeviceIoControl(
+        SafeFileHandle device, uint ioControlCode, void* inBuffer, uint inBufferSize, void* outBuffer, uint outBufferSize,
+        out uint bytesReturned, IntPtr overlapped);
 
     /// <summary><c>GetFileType</c>: 1 = disk, 2 = character device, 3 = pipe, 0 = unknown/error.</summary>
     internal static uint GetFileType(SafeFileHandle handle) => GetFileTypeNative(handle);

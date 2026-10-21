@@ -16,6 +16,13 @@ public interface IFileHeuristics
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     HeuristicResult Analyze(string path, HeuristicContext context, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Same as <see cref="Analyze(string, HeuristicContext, CancellationToken)"/> for an already open handle (the
+    /// single-handle scan pipeline): content rules read the handle; <paramref name="path"/> is only used for the
+    /// name and folder rules. The handle is validated first and is not closed.
+    /// </summary>
+    HeuristicResult Analyze(SafeFileHandle handle, string path, HeuristicContext context, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -93,6 +100,47 @@ public sealed class FileHeuristics : IFileHeuristics
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
+        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
+        if (handle is null)
+        {
+            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message);
+        }
+
+        return AnalyzeValidated(handle, path, context, cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public HeuristicResult Analyze(SafeFileHandle handle, string path, HeuristicContext context, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(context);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!SecureFile.Validate(handle, out var failure, out _))
+        {
+            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message);
+        }
+
+        return AnalyzeValidated(handle, path, context, cancellationToken);
+    }
+
+    private HeuristicResult AnalyzeValidated(SafeFileHandle handle, string path, HeuristicContext context, CancellationToken cancellationToken)
+    {
+        var findings = NameFindings(path);
+        try
+        {
+            InspectContent(handle, path, context, findings, cancellationToken);
+            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: true, null);
+        }
+        catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out _))
+        {
+            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: false, ex.Message);
+        }
+    }
+
+    private static List<HeuristicFinding> NameFindings(string path)
+    {
         var findings = new List<HeuristicFinding>();
         string name = Path.GetFileName(path);
 
@@ -108,21 +156,7 @@ public sealed class FileHeuristics : IFileHeuristics
                 "file name contains a right-to-left override character", MitreTechniqueIds.RightToLeftOverride));
         }
 
-        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
-        if (handle is null)
-        {
-            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: false, failure.Message);
-        }
-
-        try
-        {
-            InspectContent(handle, path, context, findings, cancellationToken);
-            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: true, null);
-        }
-        catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out _))
-        {
-            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: false, ex.Message);
-        }
+        return findings;
     }
 
     private void InspectContent(
