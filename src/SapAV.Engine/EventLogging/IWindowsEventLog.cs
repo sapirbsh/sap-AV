@@ -20,6 +20,9 @@ public interface IWindowsEventLog
     /// <summary>Removes the registration of <paramref name="source"/>. Needs admin rights.</summary>
     void DeleteSource(string source);
 
-    /// <summary>Writes one entry. The source must already be registered in <paramref name="logName"/>.</summary>
-    void WriteEntry(string source, string logName, string message, EventLogEntryType entryType, int eventId);
+    /// <summary>
+    /// Writes one entry with ReportEvent. Must never register the source: callers check <see cref="FindLogForSource"/>
+    /// first, and a missing source is skipped, not created.
+    /// </summary>
+    void ReportEvent(string source, string logName, string message, EventLogEntryType entryType, int eventId);
 }

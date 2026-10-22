@@ -46,16 +46,43 @@ public sealed class EventLogSourceInstallerTests
         Assert.Equal(1, _eventLog.DeleteCalls);
     }
 
+    [Fact]
+    public void Install_ConcurrentInstallerWinsTheRace_IsAlreadyRegistered_NotAnError()
+    {
+        _eventLog.BeforeCreate = source => _eventLog.Sources[source] = "Application";
+        var installer = new EventLogSourceInstaller(_eventLog);
+
+        Assert.Equal(EventLogSourceInstallResult.AlreadyRegistered, installer.Install(out var log));
+        Assert.Equal("Application", log);
+
+        _eventLog.Sources.Clear();
+        _eventLog.BeforeCreate = source => _eventLog.Sources[source] = "System";
+        Assert.Equal(EventLogSourceInstallResult.RegisteredInOtherLog, installer.Install(out log));
+        Assert.Equal("System", log);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("--environment Development")]
-    [InlineData("--install-eventlog-source extra")]
-    [InlineData("--INSTALL-EVENTLOG-SOURCE")]
     public void Commands_OtherArguments_StartTheEngineNormally(string commandLine)
     {
         var args = commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         Assert.Null(EngineCommands.TryRun(args, _eventLog, TextWriter.Null, TextWriter.Null));
-        Assert.Equal(0, _eventLog.CreateCalls);
+    }
+
+    [Theory]
+    [InlineData("--install-eventlog-source extra")]
+    [InlineData("--INSTALL-EVENTLOG-SOURCE")]
+    [InlineData("--environment Development --uninstall-eventlog-source")]
+    public void Commands_KnownCommandWithExtrasOrOtherCase_IsAUsageError_NeverStartsTheEngine(string commandLine)
+    {
+        var error = new StringWriter();
+
+        var exit = EngineCommands.TryRun(commandLine.Split(' '), _eventLog, TextWriter.Null, error);
+
+        Assert.Equal(EngineCommands.ExitFailed, exit);
+        Assert.Contains("Usage", error.ToString());
+        Assert.Equal((0, 0), (_eventLog.CreateCalls, _eventLog.DeleteCalls));
     }
 
     [Fact]

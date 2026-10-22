@@ -24,11 +24,15 @@ internal sealed class FakeWindowsEventLog : IWindowsEventLog
 
     public string? FindLogForSource(string source) => Sources.GetValueOrDefault(source);
 
+    /// <summary>Runs inside CreateSource before registering, e.g. to simulate a concurrent installer.</summary>
+    public Action<string>? BeforeCreate { get; set; }
+
     public void CreateSource(string source, string logName)
     {
         CreateCalls++;
         ThrowIfFailing();
-        Sources.Add(source, logName);
+        BeforeCreate?.Invoke(source);
+        Sources.Add(source, logName); // throws ArgumentException if it exists, like CreateEventSource
     }
 
     public void DeleteSource(string source)
@@ -38,7 +42,7 @@ internal sealed class FakeWindowsEventLog : IWindowsEventLog
         Sources.Remove(source);
     }
 
-    public void WriteEntry(string source, string logName, string message, EventLogEntryType entryType, int eventId)
+    public void ReportEvent(string source, string logName, string message, EventLogEntryType entryType, int eventId)
     {
         ThrowIfFailing();
         if (FindLogForSource(source) != logName)

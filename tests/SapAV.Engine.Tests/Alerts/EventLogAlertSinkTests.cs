@@ -51,6 +51,29 @@ public sealed class EventLogAlertSinkTests
     }
 
     [Fact]
+    public void Write_SourceRemovedWhileRunning_NextWriteIsSkipped_NeverReRegistered()
+    {
+        Register();
+        var sink = Sink();
+        Assert.True(sink.TryWrite(SampleAlerts.Create()));
+
+        _eventLog.Sources.Remove("sap-AV"); // admin ran --uninstall-eventlog-source while the service is up
+
+        Assert.False(sink.TryWrite(SampleAlerts.Create()));
+        Assert.Single(_eventLog.Entries);
+        Assert.Empty(_eventLog.Sources);
+        Assert.Equal(0, _eventLog.CreateCalls);
+    }
+
+    [Theory]
+    [InlineData(AlertEventMessage.MinMessageChars - 1)]
+    [InlineData(AlertEventMessage.EventLogStringLimit + 1)]
+    public void MaxMessageChars_OutsideTheDocumentedRange_IsRejected(int value)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new EventLogAlertSink(_eventLog, _logger, _time) { MaxMessageChars = value });
+    }
+
+    [Fact]
     public void Write_SourceInAnotherLog_IsNotUsed()
     {
         Register("System");
@@ -91,7 +114,7 @@ public sealed class EventLogAlertSinkTests
 
         public void DeleteSource(string source) => throw new NotSupportedException();
 
-        public void WriteEntry(string source, string logName, string message, EventLogEntryType entryType, int eventId) =>
+        public void ReportEvent(string source, string logName, string message, EventLogEntryType entryType, int eventId) =>
             throw new NotSupportedException();
     }
 }

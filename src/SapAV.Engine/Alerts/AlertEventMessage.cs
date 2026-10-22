@@ -14,6 +14,9 @@ namespace SapAV.Engine.Alerts;
 /// <b>Encoding.</b> <see cref="JavaScriptEncoder.Default"/> escapes every non-ASCII character (and <c>&lt;</c>,
 /// <c>&gt;</c>, <c>&amp;</c>, quotes), so the message is pure ASCII: characters equal bytes, and bidi controls or
 /// U+2028 in a file name show as <c>\u202E</c> / <c>\u2028</c> instead of reordering or breaking the text.
+/// Every <c>%</c> is then written as the JSON escape <c>\u0025</c> (it can only occur inside JSON strings, so the JSON means the same):
+/// Event Viewer renders the message through FormatMessage, which would otherwise expand <c>%%1001</c> or <c>%1</c> in
+/// a file name into other text.
 /// No enum converter is registered here: the models' own <c>StrictEnumConverter</c> attributes apply.
 /// </para>
 /// <para>
@@ -31,7 +34,10 @@ namespace SapAV.Engine.Alerts;
 /// </remarks>
 public static class AlertEventMessage
 {
-    /// <summary>Default cap, with headroom below the 31,839-character Event Log limit.</summary>
+    /// <summary>Most characters one ReportEvent string may have.</summary>
+    public const int EventLogStringLimit = 31_839;
+
+    /// <summary>Default cap, with headroom below <see cref="EventLogStringLimit"/>.</summary>
     public const int MaxMessageChars = 30_000;
 
     /// <summary>
@@ -47,13 +53,16 @@ public static class AlertEventMessage
     };
 
     /// <exception cref="ArgumentNullException"><paramref name="alert"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxChars"/> is below <see cref="MinMessageChars"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="maxChars"/> is not between <see cref="MinMessageChars"/> and <see cref="EventLogStringLimit"/>.
+    /// </exception>
     public static string Format(Alert alert, int maxChars = MaxMessageChars)
     {
         ArgumentNullException.ThrowIfNull(alert);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxChars, MinMessageChars);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maxChars, EventLogStringLimit);
 
-        var json = JsonSerializer.Serialize(alert, Options);
+        var json = EscapePercent(JsonSerializer.Serialize(alert, Options));
         if (json.Length <= maxChars)
         {
             return json;
@@ -64,11 +73,11 @@ public static class AlertEventMessage
             || TrimList(node, nameof(Alert.SecondaryTechniqueIds), alert.SecondaryTechniqueIds, "SecondaryTechniqueIdsOmitted", minKeep: 0, maxChars)
             || DropSourceUrl(node, alert, maxChars))
         {
-            return node.ToJsonString(Options);
+            return ToMessage(node);
         }
 
         ShortenPath(node, alert.FilePath, maxChars);
-        return node.ToJsonString(Options);
+        return ToMessage(node);
     }
 
     /// <summary>Keeps the longest prefix of <paramref name="items"/> that fits; true if the message now fits.</summary>
@@ -157,5 +166,9 @@ public static class AlertEventMessage
         return lo;
     }
 
-    private static bool Fits(JsonObject node, int maxChars) => node.ToJsonString(Options).Length <= maxChars;
+    private static bool Fits(JsonObject node, int maxChars) => ToMessage(node).Length <= maxChars;
+
+    private static string ToMessage(JsonObject node) => EscapePercent(node.ToJsonString(Options));
+
+    private static string EscapePercent(string json) => json.Replace("%", @"\u0025", StringComparison.Ordinal);
 }

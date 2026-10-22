@@ -9,29 +9,31 @@ namespace SapAV.Engine.Alerts;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The source is registered by the service installer (<see cref="EventLogSourceInstaller"/>), never here: an
-/// unregistered source makes <c>EventLog.WriteEntry</c> try to register it, which a service must not do silently.
-/// So before writing, the sink checks that the source exists and belongs to the Application log. If not, the
-/// alert is skipped, a warning is logged <b>once</b> (until the source shows up again), and the check is repeated
-/// at most every <see cref="RecheckInterval"/>.
+/// The source is registered only by the elevated service installer command (<see cref="EventLogSourceInstaller"/>);
+/// this sink never registers it. Writes go through <see cref="IWindowsEventLog.ReportEvent"/> (ReportEventW), which
+/// can't create a source, and before <b>every</b> write the registration is checked again (a registry read, inside the
+/// lock; nothing is cached as "ready"). So if an administrator removes the source while the service runs, the next
+/// alert is skipped instead of re-registering it.
 /// </para>
 /// <para>
-/// A failed write (log full, access denied, ...) is logged (the first failure as a warning, repeats at debug level)
-/// and never thrown. Thread-safe: writes are serialised, as they are rare and fast.
+/// If the source is missing or bound to another log, the alert is skipped, a warning is logged <b>once</b> (until the
+/// source is usable again), and the check is repeated at most every <see cref="RecheckInterval"/>. A failed write
+/// (log full, access denied, ...) is logged (the first failure as a warning, repeats at debug level) and never
+/// thrown. Thread-safe: writes are serialised, as they are rare and fast.
 /// </para>
 /// </remarks>
 public sealed class EventLogAlertSink : IAlertSink
 {
-    /// <summary>How long a missing or misplaced source is trusted before it is checked again.</summary>
+    /// <summary>How long a missing or misplaced source is trusted to stay that way before it is checked again.</summary>
     public static readonly TimeSpan RecheckInterval = TimeSpan.FromMinutes(5);
 
     private readonly IWindowsEventLog _eventLog;
     private readonly ILogger<EventLogAlertSink> _logger;
     private readonly TimeProvider _time;
     private readonly Lock _gate = new();
+    private readonly int _maxMessageChars = AlertEventMessage.MaxMessageChars;
 
-    private bool _sourceReady;
-    private DateTimeOffset _nextCheck = DateTimeOffset.MinValue;
+    private DateTimeOffset _skipUntil = DateTimeOffset.MinValue;
     private bool _unavailableLogged;
     private bool _writeFailureLogged;
 
@@ -49,7 +51,19 @@ public sealed class EventLogAlertSink : IAlertSink
     public string SourceName { get; init; } = AlertEventCatalog.SourceName;
 
     /// <summary>Message cap (see <see cref="AlertEventMessage.Format"/>).</summary>
-    public int MaxMessageChars { get; init; } = AlertEventMessage.MaxMessageChars;
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Not between <see cref="AlertEventMessage.MinMessageChars"/> and <see cref="AlertEventMessage.EventLogStringLimit"/>.
+    /// </exception>
+    public int MaxMessageChars
+    {
+        get => _maxMessageChars;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, AlertEventMessage.MinMessageChars);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, AlertEventMessage.EventLogStringLimit);
+            _maxMessageChars = value;
+        }
+    }
 
     public ValueTask WriteAsync(Alert alert, CancellationToken cancellationToken = default)
     {
@@ -64,40 +78,34 @@ public sealed class EventLogAlertSink : IAlertSink
     {
         ArgumentNullException.ThrowIfNull(alert);
         var definition = AlertEventCatalog.For(alert.Type);
-        var message = AlertEventMessage.Format(alert, MaxMessageChars);
+        var message = AlertEventMessage.Format(alert, _maxMessageChars);
 
         lock (_gate)
         {
-            if (!EnsureSource())
+            if (!SourceUsable())
             {
                 return false;
             }
 
             try
             {
-                _eventLog.WriteEntry(SourceName, AlertEventCatalog.LogName, message, definition.EntryType, definition.EventId);
+                _eventLog.ReportEvent(SourceName, AlertEventCatalog.LogName, message, definition.EntryType, definition.EventId);
                 _writeFailureLogged = false;
                 return true;
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
                 LogWriteFailure(ex, alert);
-                _sourceReady = false; // check the registration again before the next write
-                _nextCheck = DateTimeOffset.MinValue;
                 return false;
             }
         }
     }
 
-    private bool EnsureSource()
+    /// <summary>Checks the registration now (no cached "ready"), unless it was found unusable less than <see cref="RecheckInterval"/> ago.</summary>
+    private bool SourceUsable()
     {
-        if (_sourceReady)
-        {
-            return true;
-        }
-
         var now = _time.GetUtcNow();
-        if (now < _nextCheck)
+        if (now < _skipUntil)
         {
             return false;
         }
@@ -128,13 +136,12 @@ public sealed class EventLogAlertSink : IAlertSink
             _unavailableLogged = false;
         }
 
-        _sourceReady = true;
         return true;
     }
 
     private bool Unavailable(DateTimeOffset now, string why)
     {
-        _nextCheck = now + RecheckInterval;
+        _skipUntil = now + RecheckInterval;
         if (!_unavailableLogged)
         {
             _unavailableLogged = true;

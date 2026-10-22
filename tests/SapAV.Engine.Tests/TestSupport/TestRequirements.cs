@@ -14,15 +14,28 @@ public enum Requires
     /// Event Log source. Normal <c>dotnet test</c> runs and GitHub Actions don't qualify by design: skip.
     /// </summary>
     RunningElevated,
+
+    /// <summary>
+    /// Opt-in (<c>SAPAV_TEST_ALLOW_HKLM=1</c>): the test may write machine-wide registry keys (e.g. register and remove a
+    /// throwaway Event Log source). Needed on top of <see cref="RunningElevated"/> because GitHub Actions
+    /// <c>windows-latest</c> runs elevated, and a CI run must not change HKLM.
+    /// </summary>
+    HklmWritesAllowed,
 }
 
 internal static class TestRequirements
 {
     public const string SimulateCleanMachineVariable = "SAPAV_TEST_SIMULATE_CLEAN_MACHINE";
 
+    /// <summary>Set to 1 to allow tests that write HKLM (see <see cref="Requires.HklmWritesAllowed"/>).</summary>
+    public const string AllowHklmVariable = "SAPAV_TEST_ALLOW_HKLM";
+
     private static readonly Dictionary<Requires, Lazy<string?>> Probes = new()
     {
         [Requires.RunningElevated] = new(ProbeElevated),
+        [Requires.HklmWritesAllowed] = new(() => Environment.GetEnvironmentVariable(AllowHklmVariable)?.Trim() == "1"
+            ? null
+            : $"opt-in: set {AllowHklmVariable}=1 to let the test register and remove a throwaway Event Log source"),
     };
 
     public static IReadOnlyCollection<Requires> All => Probes.Keys;

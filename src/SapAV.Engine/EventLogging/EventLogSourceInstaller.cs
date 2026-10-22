@@ -69,7 +69,19 @@ public sealed class EventLogSourceInstaller
                 : EventLogSourceInstallResult.RegisteredInOtherLog;
         }
 
-        _eventLog.CreateSource(Source, LogName);
+        try
+        {
+            _eventLog.CreateSource(Source, LogName);
+        }
+        catch (ArgumentException) when (_eventLog.FindLogForSource(Source) is { } raced)
+        {
+            // A concurrent install registered it between our lookup and CreateEventSource ("already exists").
+            registeredLog = raced;
+            return IsExpectedLog(raced)
+                ? EventLogSourceInstallResult.AlreadyRegistered
+                : EventLogSourceInstallResult.RegisteredInOtherLog;
+        }
+
         registeredLog = LogName;
         return EventLogSourceInstallResult.Created;
     }

@@ -1,5 +1,5 @@
 using System.Diagnostics.Eventing.Reader;
-using SapAV.Core.Alerts;
+using Microsoft.Win32;
 using SapAV.Engine.Alerts;
 using SapAV.Engine.EventLogging;
 using SapAV.Engine.Tests.TestSupport;
@@ -7,19 +7,26 @@ using SapAV.Engine.Tests.TestSupport;
 namespace SapAV.Engine.Tests.EventLogging;
 
 /// <summary>
-/// Against the real Windows Event Log. Needs an elevated test run, so it skips on normal runs and in CI.
-/// Uses its own throwaway source name (never "sap-AV", so a real installation isn't touched) and always removes it.
-/// The written entry stays in the Application log (single entries can't be deleted); it is harmless.
+/// Against the real Windows Event Log. Runs only when elevated <b>and</b> opted in with <c>SAPAV_TEST_ALLOW_HKLM=1</c>,
+/// so it skips on normal runs and in CI (GitHub's windows-latest is elevated, but doesn't opt in).
+/// It uses a throwaway <c>sap-AV-test-*</c> source (never "sap-AV", so a real installation isn't touched),
+/// first removes stale ones left by an earlier crashed run, and removes its own at the end.
+/// The written entry stays in the Application log, because single entries can't be deleted; it is harmless.
 /// </summary>
 public sealed class RealEventLogTests
 {
-    [RequiresFact(Requires.RunningElevated)]
+    private const string TestSourcePrefix = "sap-AV-test-";
+
+    [RequiresFact(Requires.RunningElevated, Requires.HklmWritesAllowed)]
     public void InstallWriteReadBackUninstall()
     {
-        var source = "sap-AV-test-" + Guid.NewGuid().ToString("N")[..12];
         var eventLog = new WindowsEventLog();
+        SweepStaleTestSources(eventLog);
+
+        var source = TestSourcePrefix + Guid.NewGuid().ToString("N")[..12];
         var installer = new EventLogSourceInstaller(eventLog, source);
         var alert = SampleAlerts.Create();
+        Exception? cleanupFailure = null;
         try
         {
             Assert.Equal(EventLogSourceInstallResult.Created, installer.Install(out _));
@@ -37,10 +44,31 @@ public sealed class RealEventLogTests
         }
         finally
         {
-            installer.Uninstall(out _);
+            // Never let a cleanup error replace the real assertion failure; report it only if the test passed.
+            try
+            {
+                installer.Uninstall(out _);
+            }
+            catch (Exception ex)
+            {
+                cleanupFailure = ex;
+            }
         }
 
+        Assert.Null(cleanupFailure);
         Assert.Null(eventLog.FindLogForSource(source));
+    }
+
+    private static void SweepStaleTestSources(WindowsEventLog eventLog)
+    {
+        using var application = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\EventLog\Application");
+        foreach (var name in application?.GetSubKeyNames() ?? [])
+        {
+            if (name.StartsWith(TestSourcePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                eventLog.DeleteSource(name);
+            }
+        }
     }
 
     private static EventRecord? ReadBack(string source)

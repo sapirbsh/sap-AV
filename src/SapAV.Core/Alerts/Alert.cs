@@ -41,6 +41,9 @@ public sealed record Alert
     /// <summary>Longest <see cref="EngineVersion"/> accepted, in characters.</summary>
     public const int MaxEngineVersionLength = 64;
 
+    /// <summary>The <see cref="Signer"/> value for a signer name that sanitises to nothing.</summary>
+    public const string UnreadableSigner = "\uFFFD";
+
     private readonly IReadOnlyList<string> _secondaryTechniqueIds;
     private readonly IReadOnlyList<string> _reasons;
 
@@ -127,7 +130,8 @@ public sealed record Alert
     /// <summary>Authenticode outcome, or null if the signature wasn't checked.</summary>
     public SignatureStatus? SignatureStatus { get; }
 
-    /// <summary>Trusted signer name (only with Microsoft / OtherTrusted), sanitised and capped at <see cref="MaxSignerLength"/>.</summary>
+    /// <summary>Trusted signer name (only with Microsoft / OtherTrusted), sanitised and capped at <see cref="MaxSignerLength"/>.
+    /// A name with nothing printable left becomes <see cref="UnreadableSigner"/> (U+FFFD).</summary>
     public string? Signer { get; }
 
     /// <summary>Primary MITRE ATT&amp;CK technique (from the worst detection). Required for file detection types.</summary>
@@ -293,13 +297,10 @@ public sealed record Alert
             throw new ArgumentException("A signer name requires a Microsoft or OtherTrusted signature.", nameof(signer));
         }
 
+        // A certificate CN can be nothing but control characters or blanks. Never drop the alert for that: a
+        // trusted-signed malicious file must still be reported, so an empty result becomes U+FFFD.
         var clean = SafeText.SingleLine(signer, MaxSignerLength);
-        if (clean.Length == 0)
-        {
-            throw new ArgumentException("The signer must not be blank.", nameof(signer));
-        }
-
-        return (status, clean);
+        return (status, clean.Length == 0 ? UnreadableSigner : clean);
     }
 
     private static string? ValidateTechniqueId(AlertType type, string? techniqueId)

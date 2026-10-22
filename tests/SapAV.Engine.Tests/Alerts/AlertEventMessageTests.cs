@@ -42,6 +42,18 @@ public sealed class AlertEventMessageTests
     }
 
     [Fact]
+    public void Format_PercentSigns_AreEscaped_SoFormatMessageCantExpandThem()
+    {
+        var alert = SampleAlerts.Create(path: @"C:\Users\test\Downloads\%%1001 %1 100%.exe", reasons: ["matched %%3001"]);
+
+        var message = AlertEventMessage.Format(alert);
+
+        Assert.DoesNotContain('%', message);
+        Assert.Contains(@"\u0025\u00251001", message);
+        Assert.Equal(alert, JsonSerializer.Deserialize<Alert>(message));
+    }
+
+    [Fact]
     public void Format_ManyLongReasons_DropsReasonsFromTheEnd_KeepsIdentifyingFields()
     {
         var reasons = Enumerable.Range(0, 200).Select(i => $"reason {i:D3} " + new string('r', 1000)).ToArray();

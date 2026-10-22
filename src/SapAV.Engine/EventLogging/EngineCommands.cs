@@ -17,15 +17,27 @@ public static class EngineCommands
     public const int ExitNotElevated = 5;
 
     /// <summary>
-    /// Runs the command if <paramref name="args"/> is exactly one known command and returns its exit code;
-    /// otherwise returns null and the engine starts normally.
+    /// Runs the command if <paramref name="args"/> is exactly one known command and returns its exit code.
+    /// If any argument looks like a command (any letter case) but the command line isn't exactly that, prints the
+    /// usage and returns <see cref="ExitFailed"/>: an installer typo must never start the engine instead.
+    /// Otherwise returns null and the engine starts normally.
     /// </summary>
     public static int? TryRun(string[] args, IWindowsEventLog eventLog, TextWriter output, TextWriter error)
     {
         ArgumentNullException.ThrowIfNull(args);
-        if (args.Length != 1 || args[0] is not (InstallEventLogSource or UninstallEventLogSource))
+        ArgumentNullException.ThrowIfNull(error);
+        bool mentionsCommand = args.Any(a => a.Equals(InstallEventLogSource, StringComparison.OrdinalIgnoreCase)
+                                             || a.Equals(UninstallEventLogSource, StringComparison.OrdinalIgnoreCase));
+        if (!mentionsCommand)
         {
             return null;
+        }
+
+        if (args.Length != 1 || args[0] is not (InstallEventLogSource or UninstallEventLogSource))
+        {
+            error.WriteLine($"Usage: SapAV.Engine {InstallEventLogSource} | {UninstallEventLogSource} " +
+                            "(exactly one, lowercase, no other arguments; run elevated).");
+            return ExitFailed;
         }
 
         var installer = new EventLogSourceInstaller(eventLog);

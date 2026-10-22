@@ -76,6 +76,19 @@ public sealed class AlertTests
     }
 
     [Fact]
+    public void FromScanResult_SignerOfOnlyControlCharacters_StillGivesTheAlert()
+    {
+        // ScanResult accepts it (not whitespace), but nothing printable is left after sanitising.
+        var result = new ScanResult(Download, [Yara], ScanTime, Sha, ScanStatus.Scanned, SignatureStatus.OtherTrusted, "\u0001\u0002\r\n");
+
+        var alert = Alert.FromScanResult(result, null, AlertAction.Quarantined, Version);
+
+        Assert.NotNull(alert);
+        Assert.Equal(Alert.UnreadableSigner, alert.Signer);
+        Assert.Equal(alert, JsonSerializer.Deserialize<Alert>(JsonSerializer.Serialize(alert)));
+    }
+
+    [Fact]
     public void FromScanResult_CleanOrNotScanned_GivesNoAlert()
     {
         Assert.Null(Alert.FromScanResult(ScanResult.Clean(Download, ScanTime, Sha), null, AlertAction.None, Version));
