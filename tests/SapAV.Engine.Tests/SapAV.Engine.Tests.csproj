@@ -19,6 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Raw junction writer shared with SapAV.Core.Tests (restore-redirection tests). -->
+    <Compile Include="..\SapAV.Core.Tests\TestSupport\RawJunction.cs" Link="TestSupport\RawJunction.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SapAV.Engine\SapAV.Engine.csproj" />
     <ProjectReference Include="..\..\src\SapAV.Core\SapAV.Core.csproj" />
   </ItemGroup>

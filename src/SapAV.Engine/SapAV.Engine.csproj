@@ -5,7 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-SapAV.Engine-365345aa-cf25-4786-beaf-5e835d74901b</UserSecretsId>
+    <!-- Quarantine interop (B2): handle-relative NtCreateFile, rename/delete by handle. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Test seams (crash hooks, cross-volume switch, extra trusted SIDs for a temp store) are internal. -->
+    <InternalsVisibleTo Include="SapAV.Engine.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.13" />

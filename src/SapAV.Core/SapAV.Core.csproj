@@ -11,6 +11,8 @@
   <ItemGroup>
     <!-- Test seams (e.g. Sha256Hasher.BeforeReadHook) are internal. -->
     <InternalsVisibleTo Include="SapAV.Core.Tests" />
+    <!-- The engine's quarantine (B2) reuses the hardened open (SecureFile / NativeFile) instead of a second copy. -->
+    <InternalsVisibleTo Include="SapAV.Engine" />
   </ItemGroup>
 
   <!-- YARA-X engine: pinned native DLL, downloaded once, hash-verified, copied to the output. -->

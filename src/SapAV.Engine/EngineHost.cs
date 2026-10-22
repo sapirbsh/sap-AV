@@ -1,5 +1,6 @@
 using SapAV.Engine.Alerts;
 using SapAV.Engine.EventLogging;
+using SapAV.Engine.Quarantine;
 
 namespace SapAV.Engine;
 
@@ -28,6 +29,13 @@ public static class EngineHost
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<IWindowsEventLog, WindowsEventLog>();
         builder.Services.AddSingleton<IAlertSink, EventLogAlertSink>();
+
+        // Quarantine (B2): store opened + recovered at startup; the pipe (B4) and scan queue (B3) use IQuarantineService.
+        builder.Services.Configure<QuarantineOptions>(builder.Configuration.GetSection(QuarantineOptions.SectionName));
+        builder.Services.AddSingleton<IQuarantineKeyProvider, DpapiQuarantineKeyProvider>();
+        builder.Services.AddSingleton<QuarantineManager>();
+        builder.Services.AddSingleton<IQuarantineService>(sp => sp.GetRequiredService<QuarantineManager>());
+        builder.Services.AddHostedService<QuarantineStartupService>();
         builder.Services.AddHostedService<Worker>();
         return builder;
     }

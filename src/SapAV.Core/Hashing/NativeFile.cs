@@ -70,18 +70,21 @@ internal static class NativeFile
     /// Opens with <see cref="SignatureCheckFlags"/> (synchronous, all security flags) for the single-handle scan
     /// pipeline. With <paramref name="denyWriters"/> the share mode is Read | Delete, so no other program can open
     /// the file for writing while it is scanned (and an existing writer makes the open fail with a sharing
-    /// violation); otherwise Read | Write | Delete, like the hasher.
+    /// violation); otherwise Read | Write | Delete, like the hasher. <paramref name="additionalAccess"/> is OR-ed into
+    /// GENERIC_READ (the quarantine asks for DELETE so it can move the file by handle); 0 for every scanner.
     /// </summary>
-    internal static SafeFileHandle OpenForScan(string fullPath, bool denyWriters, out int win32Error) =>
+    internal static SafeFileHandle OpenForScan(string fullPath, bool denyWriters, out int win32Error, uint additionalAccess = 0) =>
         Open(fullPath, SignatureCheckFlags, out win32Error,
-            denyWriters ? FileShareRead | FileShareDelete : FileShareRead | FileShareWrite | FileShareDelete);
+            denyWriters ? FileShareRead | FileShareDelete : FileShareRead | FileShareWrite | FileShareDelete,
+            GenericRead | additionalAccess);
 
     private static SafeFileHandle Open(
-        string fullPath, uint flags, out int win32Error, uint share = FileShareRead | FileShareWrite | FileShareDelete)
+        string fullPath, uint flags, out int win32Error, uint share = FileShareRead | FileShareWrite | FileShareDelete,
+        uint access = GenericRead)
     {
         var handle = CreateFileW(
             fullPath,
-            GenericRead,
+            access,
             share,
             IntPtr.Zero,
             OpenExisting,

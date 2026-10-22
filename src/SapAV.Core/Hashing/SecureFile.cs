@@ -29,8 +29,12 @@ internal static class SecureFile
     /// <summary>Opens <paramref name="path"/> if it is a regular local file; otherwise null and the reason.</summary>
     /// <param name="allowOffline">If true, offline files / placeholders are returned too (for metadata-only callers).</param>
     /// <param name="denyWriters">Share Read | Delete only (no writers while open; an existing writer gives Locked).</param>
+    /// <param name="additionalAccess">
+    /// Access rights added to GENERIC_READ (e.g. DELETE for the quarantine's move by handle). 0 for every content reader.
+    /// </param>
     public static SafeFileHandle? OpenRegularFile(
-        string path, out SecureOpenFailure failure, out FileAttributes attributes, bool allowOffline = false, bool denyWriters = false)
+        string path, out SecureOpenFailure failure, out FileAttributes attributes, bool allowOffline = false, bool denyWriters = false,
+        uint additionalAccess = 0)
     {
         attributes = default;
         if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
@@ -62,7 +66,7 @@ internal static class SecureFile
             return null;
         }
 
-        var handle = NativeFile.OpenForScan(fullPath, denyWriters, out int error);
+        var handle = NativeFile.OpenForScan(fullPath, denyWriters, out int error, additionalAccess);
         if (handle.IsInvalid)
         {
             var reason = Sha256Hasher.MapWin32Error(error);

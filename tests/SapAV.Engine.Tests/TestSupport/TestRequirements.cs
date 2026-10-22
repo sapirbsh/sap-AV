@@ -21,6 +21,15 @@ public enum Requires
     /// <c>windows-latest</c> runs elevated, and a CI run must not change HKLM.
     /// </summary>
     HklmWritesAllowed,
+
+    /// <summary>A junction can be created in the temp folder (FSCTL_SET_REPARSE_POINT; NTFS).</summary>
+    Junctions,
+
+    /// <summary>
+    /// Opt-in (<c>SAPAV_TEST_SECOND_VOLUME=X:\some\folder</c>): an existing writable folder on a different volume
+    /// than %TEMP%, for the real cross-volume quarantine test. Tests create and remove only a subfolder there.
+    /// </summary>
+    SecondVolume,
 }
 
 internal static class TestRequirements
@@ -36,6 +45,8 @@ internal static class TestRequirements
         [Requires.HklmWritesAllowed] = new(() => Environment.GetEnvironmentVariable(AllowHklmVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {AllowHklmVariable}=1 to let the test register and remove a throwaway Event Log source"),
+        [Requires.Junctions] = new(ProbeJunctions),
+        [Requires.SecondVolume] = new(ProbeSecondVolume),
     };
 
     public static IReadOnlyCollection<Requires> All => Probes.Keys;
@@ -80,6 +91,52 @@ internal static class TestRequirements
         }
     }
 
+    /// <summary>Set to an existing folder on another volume to run the real cross-volume test.</summary>
+    public const string SecondVolumeVariable = "SAPAV_TEST_SECOND_VOLUME";
+
+    /// <summary>The <see cref="Requires.SecondVolume"/> folder (valid only when that requirement is met).</summary>
+    public static string SecondVolumeFolder => Environment.GetEnvironmentVariable(SecondVolumeVariable)!.Trim();
+
+    private static string? ProbeJunctions()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "sapav-tests", "probe-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var target = Directory.CreateDirectory(Path.Combine(dir, "t")).FullName;
+            var why = SapAV.Core.Tests.TestSupport.RawJunction.TryCreate(Path.Combine(dir, "j"), @"\??\" + target);
+            return why is null ? null : $"can't create a junction in %TEMP%: {why}";
+        }
+        finally
+        {
+            try
+            {
+                TempDir.DeleteTree(dir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // best effort
+            }
+        }
+    }
+
+    private static string? ProbeSecondVolume()
+    {
+        var folder = Environment.GetEnvironmentVariable(SecondVolumeVariable)?.Trim();
+        if (string.IsNullOrEmpty(folder))
+        {
+            return $"opt-in: set {SecondVolumeVariable} to an existing folder on a volume other than %TEMP%'s";
+        }
+
+        if (!Directory.Exists(folder) || !Path.IsPathFullyQualified(folder))
+        {
+            return $"{SecondVolumeVariable}={folder} is not an existing fully qualified folder";
+        }
+
+        return string.Equals(Path.GetPathRoot(Path.GetFullPath(folder)), Path.GetPathRoot(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase)
+            ? $"{SecondVolumeVariable}={folder} is on the same drive as %TEMP%"
+            : null;
+    }
+
     private static string? ProbeElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
@@ -119,4 +176,20 @@ public sealed class TestRequirementsTests
             Assert.Contains(requirement.ToString(), reason);
         }
     }
+}
+
+/// <summary>A <see cref="TheoryAttribute"/> that is reported as Skipped when a <see cref="Requires"/> is not met.</summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
+public sealed class RequiresTheoryAttribute : TheoryAttribute
+{
+    public RequiresTheoryAttribute(params Requires[] requirements)
+    {
+        Requirements = requirements;
+        if (TestRequirements.SkipReason(requirements) is { } reason)
+        {
+            Skip = reason;
+        }
+    }
+
+    public Requires[] Requirements { get; }
 }
