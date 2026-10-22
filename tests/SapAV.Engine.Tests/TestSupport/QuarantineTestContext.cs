@@ -212,13 +212,26 @@ internal sealed class QuarantineTestContext : IDisposable
         Directory.GetFiles(StoreRoot).Select(System.IO.Path.GetFileName).Where(n => n != DpapiQuarantineKeyProvider.KeyFileName).Order().ToArray()!;
 
     /// <summary>A scan report for <paramref name="path"/> as if it had <paramref name="scannedContent"/>.</summary>
+    /// <remarks>The identity (file ID + final path) is captured from the file now at <paramref name="path"/>, as the scanner does.</remarks>
     public static FileScanReport ReportFor(string path, byte[] scannedContent, Verdict verdict = Verdict.Malicious)
+    {
+        FileIdentity? identity;
+        using (var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            identity = FileIdentity.TryCapture(handle);
+        }
+
+        return ReportFor(path, scannedContent, identity, verdict);
+    }
+
+    /// <summary>A scan report with an explicit identity (or none).</summary>
+    public static FileScanReport ReportFor(string path, byte[] scannedContent, FileIdentity? identity, Verdict verdict = Verdict.Malicious)
     {
         string sha = Convert.ToHexStringLower(SHA256.HashData(scannedContent));
         var item = new ScanItem(path, ScanTrigger.RealTime);
         var detection = new Detection(verdict, "YARA rule Test_Rule matched (test.yar)", "T1204.002", DetectionSource.Yara, ["T1036.007"]);
         var result = new ScanResult(item, [detection], new DateTimeOffset(2026, 10, 22, 9, 0, 0, TimeSpan.Zero), sha);
-        return new FileScanReport(result, HashResult.Hashed(sha, scannedContent.Length), null, null, null, null, []);
+        return new FileScanReport(result, HashResult.Hashed(sha, scannedContent.Length), null, null, null, null, []) { Identity = identity };
     }
 
     /// <summary>Synthetic "malware": a marker string in random bytes (no MZ header, so a real antivirus leaves it alone; never real malware, never EICAR).</summary>

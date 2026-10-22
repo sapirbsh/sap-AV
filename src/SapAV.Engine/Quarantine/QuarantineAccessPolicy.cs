@@ -89,6 +89,26 @@ public sealed class QuarantineAccessPolicy
     }
 
     /// <summary>
+    /// DACL for a file renamed into the store (same volume): protected, full control without FILE_EXECUTE for the trusted
+    /// SIDs, and an OWNER RIGHTS entry granting only READ_CONTROL, so the original owner loses the implicit WRITE_DAC
+    /// (they could otherwise re-grant themselves access, or add a hard link, while the raw file is staged).
+    /// </summary>
+    public byte[] CreateStagedFileDaclBytes()
+    {
+        var acl = new RawAcl(GenericAcl.AclRevision, _trusted.Length + 1);
+        foreach (var sid in _trusted)
+        {
+            acl.InsertAce(acl.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, FullControlNoExecute, sid, false, null));
+        }
+
+        acl.InsertAce(acl.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x00020000 /* READ_CONTROL */,
+            new SecurityIdentifier("S-1-3-4" /* OWNER RIGHTS */), false, null));
+        var bytes = new byte[acl.BinaryLength];
+        acl.GetBinaryForm(bytes, 0);
+        return bytes;
+    }
+
+    /// <summary>
     /// Checks a directory's descriptor (owner + DACL). Wider = no DACL, not protected, or any allow entry for a SID
     /// outside <see cref="TrustedSids"/> (deny entries never widen access).
     /// </summary>

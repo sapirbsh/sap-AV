@@ -138,6 +138,48 @@ internal static class NativeFile
         return GetDriveTypeW(root) == 3 /* DRIVE_FIXED */;
     }
 
+    /// <summary><c>GetFileInformationByHandleEx(FileIdInfo)</c>: 64-bit volume serial and 128-bit file ID (lowercase hex).</summary>
+    internal static unsafe bool TryGetFileId(SafeFileHandle handle, out ulong volumeSerial, out string fileId)
+    {
+        byte* info = stackalloc byte[24];
+        if (!GetFileInformationByHandleEx(handle, 18 /* FileIdInfo */, info, 24))
+        {
+            volumeSerial = 0;
+            fileId = string.Empty;
+            return false;
+        }
+
+        volumeSerial = *(ulong*)info;
+        fileId = Convert.ToHexStringLower(new ReadOnlySpan<byte>(info + 8, 16));
+        return true;
+    }
+
+    /// <summary>The handle's final path as <c>C:\...</c> (the <c>\\?\</c> prefix removed); null for UNC or no drive letter.</summary>
+    internal static unsafe string? TryGetFinalDosPath(SafeFileHandle handle)
+    {
+        const int Capacity = 32_768;
+        var buffer = new char[Capacity];
+        uint length;
+        fixed (char* p = buffer)
+        {
+            length = GetFinalPathNameByHandleW(handle, p, Capacity, 0 /* FILE_NAME_NORMALIZED | VOLUME_NAME_DOS */);
+        }
+
+        if (length == 0 || length >= Capacity)
+        {
+            return null;
+        }
+
+        var path = new string(buffer, 0, (int)length);
+        if (!path.StartsWith(@"\\?\", StringComparison.Ordinal) || path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        path = path[4..];
+        return path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\' ? path : null;
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern unsafe uint GetFinalPathNameByHandleW(SafeFileHandle hFile, char* path, uint length, uint flags);
 

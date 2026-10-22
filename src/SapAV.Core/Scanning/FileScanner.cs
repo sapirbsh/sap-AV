@@ -115,7 +115,10 @@ public sealed class FileScanner : IFileScanner
 
         using var handle = opened.Handle;
         AfterOpenHook?.Invoke(handle);
-        var report = await ScanOpenAsync(item, handle, notes, cancellationToken).ConfigureAwait(false);
+
+        // Which file object this scan judged (B2: the quarantine acts only on this exact object).
+        var identity = FileIdentity.TryCapture(handle);
+        var report = await ScanOpenAsync(item, handle, notes, cancellationToken).ConfigureAwait(false) with { Identity = identity };
 
         // Shared fallback: the whole pipeline must have seen one unchanged version of the file.
         if (opened.UsnBefore is { } before && (!NativeFile.TryGetUsn(handle, out long after) || after != before))

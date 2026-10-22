@@ -67,6 +67,34 @@ public sealed class FileScannerSingleHandleTests : IDisposable
         Assert.Contains(report.Result.Detections, d => d.Source == DetectionSource.Yara);
     }
 
+    [Fact]
+    public async Task Report_CarriesTheIdentityOfTheScannedObject_EvenIfThePathIsSwappedDuringTheScan()
+    {
+        var path = _dir.WriteFile("ident.bin", YaraTestRules.MarkerBytes());
+
+        var report = await Scanner(new SwappingVerifier(() => SwapPathTo(path, "harmless"u8.ToArray())))
+            .ScanAsync(new ScanItem(path, ScanTrigger.CustomScan));
+
+        Assert.NotNull(report.Identity);
+        Assert.Equal(Path.GetFullPath(path), report.Identity.FinalPath, ignoreCase: true);
+        Assert.True(report.Identity.IsSameObject(Capture(_dir.File("original-moved.bin")))); // the object that was read
+        Assert.False(report.Identity.IsSameObject(Capture(path)));                            // not the replacement
+    }
+
+    [Fact]
+    public async Task UnopenableFile_HasNoIdentity()
+    {
+        var report = await Scanner().ScanAsync(new ScanItem(_dir.File("missing.bin"), ScanTrigger.CustomScan));
+
+        Assert.Null(report.Identity);
+    }
+
+    private static FileIdentity? Capture(string path)
+    {
+        using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return FileIdentity.TryCapture(handle);
+    }
+
     [RequiresFact(Requires.NotepadRegularFile)]
     public async Task PathSwappedToAMicrosoftSignedFile_IsNotClean()
     {

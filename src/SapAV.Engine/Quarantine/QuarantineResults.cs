@@ -37,8 +37,13 @@ public enum QuarantineStatus
     /// <summary>Not on a drive-letter path (network share, volume without a letter) or the size is over the limit.</summary>
     UnsupportedLocation,
 
-    /// <summary>The folder chain of the file's real location contains a reparse point.</summary>
+    /// <summary>
+    /// The path (or a folder on it) is a reparse point, or the scan.s handle / the opened file is not at the scanned path.
+    /// </summary>
     PathRedirected,
+
+    /// <summary>The opened file is a different file object (volume serial / 128-bit file ID) than the one that was scanned.</summary>
+    IdentityMismatch,
 
     /// <summary>The move, copy or removal failed; the original is still in place (see Reason).</summary>
     Failed,
@@ -133,10 +138,29 @@ public interface IQuarantineService
     bool IsAvailable { get; }
 
     /// <summary>
-    /// Quarantines exactly the file that <paramref name="report"/> describes (same size and SHA-256, checked on the
-    /// writer-denied handle that is then moved). Never throws for file problems; see <see cref="QuarantineStatus"/>.
+    /// Quarantines exactly the file object that <paramref name="report"/> describes. The scanned path is opened with no
+    /// reparse point anywhere (<see cref="SafeFile"/>), and must equal the final path the scan saw; the opened object must
+    /// have the scanned volume serial + 128-bit file ID (<see cref="Core.Scanning.FileScanReport.Identity"/>), size and
+    /// SHA-256. Never throws for file problems; see <see cref="QuarantineStatus"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>Caller authorisation (B4).</b> The engine acts as SYSTEM. A request that comes from a user over the pipe must
+    /// only be honoured if <i>that user</i> could delete the file: before calling this, the pipe server impersonates the
+    /// client and checks that the client token is granted DELETE on the file (or DELETE_CHILD on its folder), and refuses
+    /// otherwise. Engine-initiated quarantine (real-time / scan jobs acting on a Malicious verdict) needs no such check.
+    /// </remarks>
     Task<QuarantineResult> QuarantineAsync(Core.Scanning.FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Quarantines through an already-open handle (the scan.s own handle, B3), so the file is never reopened by path.
+    /// The handle must be open with read, DELETE and WRITE_DAC access and must deny writers (share Read | Delete); it
+    /// must be the handle the scan used (its identity and final path are checked against <paramref name="report"/>).
+    /// It is not closed; after success the file is gone and the handle only refers to a deleted file.
+    /// </summary>
+    /// <remarks>The B4 authorisation rule of <see cref="QuarantineAsync"/> applies here too.</remarks>
+    Task<QuarantineResult> QuarantineHandleAsync(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, Core.Scanning.FileScanReport report, Guid? alertId = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Restores an item to its recorded original path only (explicit user request). Emits a QuarantineRestored alert.

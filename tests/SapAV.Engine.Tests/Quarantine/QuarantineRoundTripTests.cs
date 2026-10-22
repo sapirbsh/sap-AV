@@ -202,35 +202,6 @@ public sealed class QuarantineRoundTripTests
         Assert.Equal(QuarantineStatus.Quarantined, (await first).Status);
     }
 
-    [RequiresFact(Requires.Junctions)]
-    public async Task SameFileThroughAnotherPath_WhileOneIsRunning_IsBusy()
-    {
-        using var gate = new ManualResetEventSlim();
-        using var reached = new ManualResetEventSlim();
-        using var ctx = new QuarantineTestContext();
-        var content = QuarantineTestContext.SampleContent();
-        var path = ctx.WriteFile(@"real\busy.dat", content);
-        var alias = Path.Combine(ctx.Base, "alias");
-        Assert.Null(SapAV.Core.Tests.TestSupport.RawJunction.TryCreate(alias, @"\??\" + Path.Combine(ctx.Files, "real")));
-        ctx.Restart(step =>
-        {
-            if (step == QuarantineStep.QuarantineJournalWritten)
-            {
-                reached.Set();
-                gate.Wait(TimeSpan.FromSeconds(30));
-            }
-        });
-
-        var first = ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(path, content));
-        Assert.True(reached.Wait(TimeSpan.FromSeconds(30)));
-        var second = await ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(Path.Combine(alias, "busy.dat"), content));
-        gate.Set();
-
-        Assert.Equal(QuarantineStatus.Busy, second.Status);
-        Assert.Equal(QuarantineStatus.Quarantined, (await first).Status);
-        Assert.Single(ctx.Manager.List());
-    }
-
     [Fact]
     public async Task Restore_EmitsQuarantineRestoredAlert_Event3001()
     {

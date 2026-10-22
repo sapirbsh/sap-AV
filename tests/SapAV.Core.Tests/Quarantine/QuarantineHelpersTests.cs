@@ -116,6 +116,8 @@ public sealed class QuarantineHelpersTests
         ScannedPath = @"C:\Users\u\Downloads\invoice.pdf.exe",
         SizeBytes = 68,
         Sha256 = new string('a', 64),
+        SourceVolumeSerial = 0x1234,
+        SourceFileId = QuarantineItemId.New(),
         Attributes = (int)FileAttributes.Archive,
         CreationTimeUtc = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero),
         LastWriteTimeUtc = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero).AddTicks(7),

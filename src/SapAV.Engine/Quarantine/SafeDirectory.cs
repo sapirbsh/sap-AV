@@ -171,3 +171,66 @@ public static class SafeDirectory
         CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
     private static extern uint GetDriveType(string root);
 }
+
+/// <summary>
+/// Opens a file for privileged use with <b>no reparse point anywhere</b>: the parent folder through
+/// <see cref="SafeDirectory.TryOpen"/>, then the file relative to that handle with <c>FILE_OPEN_REPARSE_POINT</c> and
+/// <c>OBJ_DONT_REPARSE</c>; a file that is itself a reparse point (symlink, junction, any tag) is refused, and the
+/// handle must pass <see cref="Core.Hashing.SecureFile.Validate"/> (disk file, not a directory, not offline).
+/// No <c>CreateFileW</c> path open is involved, so neither junctions nor object-manager links can redirect it.
+/// </summary>
+public static class SafeFile
+{
+    /// <summary>
+    /// Opens <paramref name="fullPath"/> (validated <c>X:\...</c>). On success returns the file handle and, in
+    /// <paramref name="directory"/>, the verified parent folder handle (the caller owns both).
+    /// </summary>
+    public static SafeFileHandle? TryOpen(
+        string fullPath, uint access, uint share, out SafeFileHandle? directory, out SafeDirectoryFailure failure, out int win32Error, out string reason)
+    {
+        win32Error = 0;
+        directory = null;
+        if (!QuarantinePath.TryValidateOriginalPath(fullPath, out var why))
+        {
+            failure = SafeDirectoryFailure.Unsupported;
+            reason = $"Unsupported path: {why}.";
+            return null;
+        }
+
+        var parent = SafeDirectory.TryOpen(Path.GetDirectoryName(fullPath)!, out failure, out reason);
+        if (parent is null)
+        {
+            return null;
+        }
+
+        var file = N.OpenRelative(parent, Path.GetFileName(fullPath), access, share, N.FileOpen,
+            N.FileNonDirectoryFile | N.FileOpenReparsePoint, out win32Error, N.ObjCaseInsensitive | N.ObjDontReparse);
+        if (file is null)
+        {
+            parent.Dispose();
+            failure = win32Error is N.ErrorFileNotFound or N.ErrorPathNotFound ? SafeDirectoryFailure.NotFound
+                : win32Error is N.ErrorReparsePointEncountered ? SafeDirectoryFailure.Redirected
+                : SafeDirectoryFailure.Error;
+            reason = $"Can't open '{fullPath}' (Win32 error {win32Error}).";
+            return null;
+        }
+
+        string? problem = !N.TryGetAttributeTag(file, out uint attributes, out uint tag) ? "its attributes can't be read"
+            : (attributes & N.FileAttributeReparsePoint) != 0 ? $"it is a reparse point (tag 0x{tag:X8}); refusing to follow it"
+            : !Core.Hashing.SecureFile.Validate(file, out var invalid, out _) ? invalid.Message
+            : null;
+        if (problem is not null)
+        {
+            file.Dispose();
+            parent.Dispose();
+            failure = (attributes & N.FileAttributeReparsePoint) != 0 ? SafeDirectoryFailure.Redirected : SafeDirectoryFailure.Error;
+            reason = $"'{fullPath}' can't be used: {problem}.";
+            return null;
+        }
+
+        directory = parent;
+        failure = SafeDirectoryFailure.None;
+        reason = string.Empty;
+        return file;
+    }
+}

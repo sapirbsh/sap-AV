@@ -11,48 +11,144 @@ namespace SapAV.Engine.Quarantine;
 
 public sealed partial class QuarantineManager
 {
+    /// <summary>Access the source handle must have: read, DELETE (move / delete by handle), WRITE_DAC (lock down the staged file).</summary>
+    private const uint SourceAccess = N.GenericRead | N.Delete | N.WriteDac;
+
+    /// <summary>The specific rights GENERIC_READ | DELETE | WRITE_DAC map to that matter here (FILE_READ_DATA = 0x1).</summary>
+    private const uint RequiredGranted = 0x1 | N.Delete | N.WriteDac;
+
     /// <inheritdoc/>
     public Task<QuarantineResult> QuarantineAsync(FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsEligible(report, out var refusal))
+        if (!IsEligible(report, out var scannedPath, out var refusal) || !TryGetStore(out var store, out var key, out refusal))
         {
             return Task.FromResult(refusal);
         }
 
-        if (!TryGetStore(out var store, out var key))
-        {
-            return Task.FromResult(new QuarantineResult(QuarantineStatus.StoreUnavailable, "The quarantine store is not available."));
-        }
-
         // Cancellation is honoured until the journal is written; after that the operation always runs to a consistent end.
-        return Task.Run(() => QuarantineLocked(store, key, report, alertId, cancellationToken), CancellationToken.None);
+        return Task.Run(() => QuarantineByPath(store, key, report, scannedPath, alertId, cancellationToken), CancellationToken.None);
     }
 
-    private static bool IsEligible(FileScanReport report, out QuarantineResult refusal)
+    /// <inheritdoc/>
+    public Task<QuarantineResult> QuarantineHandleAsync(
+        SafeFileHandle handle, FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        ArgumentNullException.ThrowIfNull(report);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsEligible(report, out var scannedPath, out var refusal) || !TryGetStore(out var store, out var key, out refusal))
+        {
+            return Task.FromResult(refusal);
+        }
+
+        if (handle.IsInvalid || handle.IsClosed || !N.TryGetGrantedAccess(handle, out uint granted) || (granted & RequiredGranted) != RequiredGranted)
+        {
+            return Task.FromResult(new QuarantineResult(QuarantineStatus.NotEligible,
+                "The handle must be open with read, DELETE and WRITE_DAC access (and deny writers)."));
+        }
+
+        return Task.Run(() => QuarantineByHandle(store, key, handle, report, scannedPath, alertId, cancellationToken), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// The scan must be actionable, carry the scanned object's identity, and the scan itself must not have gone through a
+    /// redirect: the normalised requested path equals the final path of the handle the scan used.
+    /// </summary>
+    private static bool IsEligible(FileScanReport report, out string scannedPath, out QuarantineResult refusal)
     {
         var result = report.Result;
+        scannedPath = string.Empty;
+        string? normalized = null;
+        try
+        {
+            normalized = Path.GetFullPath(result.Item.Path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+        }
+
         string? why =
             result.Status != ScanStatus.Scanned ? $"the file was not scanned ({result.Status})"
             : result.Verdict is not (Verdict.Suspicious or Verdict.Malicious) ? "the verdict is Clean"
             : result.Sha256 is null || report.Hash.Sha256 is null || report.Hash.Length is null ? "the scan has no SHA-256 / size"
             : !string.Equals(result.Sha256, report.Hash.Sha256, StringComparison.OrdinalIgnoreCase) ? "the scan result and hash disagree"
+            : report.Identity?.FinalPath is null ? "the scan has no file identity (file ID and final path)"
+            : normalized is null || !QuarantinePath.TryValidateOriginalPath(normalized, out _) ? "the scanned path is not a local drive-letter path"
             : null;
-        refusal = new QuarantineResult(QuarantineStatus.NotEligible, why ?? string.Empty);
-        return why is null;
-    }
-
-    private QuarantineResult QuarantineLocked(QuarantineStore store, byte[] key, FileScanReport report, Guid? alertId, CancellationToken ct)
-    {
-        string path = report.Result.Item.Path;
-        using var lease = _locks.TryAcquire("path:" + path);
-        if (lease is null)
+        if (why is not null)
         {
-            return new(QuarantineStatus.Busy, "Another quarantine operation on this file is running.");
+            refusal = new QuarantineResult(QuarantineStatus.NotEligible, why);
+            return false;
         }
 
-        var result = QuarantineCore(store, key, report, alertId, ct);
+        if (!string.Equals(normalized, report.Identity!.FinalPath, StringComparison.OrdinalIgnoreCase))
+        {
+            refusal = new QuarantineResult(QuarantineStatus.PathRedirected,
+                $"The scan's handle resolved to {report.Identity.FinalPath}, not the requested {normalized}; refusing to act on it.");
+            return false;
+        }
+
+        scannedPath = normalized!;
+        refusal = null!;
+        return true;
+    }
+
+    private bool TryGetStore(out QuarantineStore store, out byte[] key, out QuarantineResult refusal)
+    {
+        refusal = new QuarantineResult(QuarantineStatus.StoreUnavailable, "The quarantine store is not available.");
+        return TryGetStore(out store, out key);
+    }
+
+    /// <summary>Path entry: opens the scanned path with no reparse point anywhere (folders and the file itself).</summary>
+    private QuarantineResult QuarantineByPath(QuarantineStore store, byte[] key, FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
+    {
+        using var lease = _locks.TryAcquire("path:" + scannedPath);
+        if (lease is null)
+        {
+            return Log(scannedPath, new(QuarantineStatus.Busy, "Another quarantine operation on this file is running."));
+        }
+
+        using var file = SafeFile.TryOpen(scannedPath, SourceAccess, N.ShareRead | N.ShareDelete,
+            out var directory, out var failure, out int error, out var reason);
+        using (directory)
+        {
+            if (file is null)
+            {
+                return Log(scannedPath, new(MapOpenFailure(failure, error), $"Can't open the file: {reason}"));
+            }
+
+            return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: true, directory!, report, scannedPath, alertId, ct));
+        }
+    }
+
+    /// <summary>Handle entry (B3): the scan's own writer-denied handle; it is never reopened by path and not closed here.</summary>
+    private QuarantineResult QuarantineByHandle(
+        QuarantineStore store, byte[] key, SafeFileHandle file, FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
+    {
+        using var lease = _locks.TryAcquire("path:" + scannedPath);
+        if (lease is null)
+        {
+            return Log(scannedPath, new(QuarantineStatus.Busy, "Another quarantine operation on this file is running."));
+        }
+
+        if (!SecureFile.Validate(file, out var invalid, out _))
+        {
+            return Log(scannedPath, new(QuarantineStatus.NotRegularFile, $"The handle is not a usable file: {invalid.Message}"));
+        }
+
+        using var directory = SafeDirectory.TryOpen(Path.GetDirectoryName(scannedPath)!, out var failure, out var reason);
+        if (directory is null)
+        {
+            return Log(scannedPath, new(MapOpenFailure(failure, 0), $"The file's folder can't be verified: {reason}"));
+        }
+
+        return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: false, directory, report, scannedPath, alertId, ct));
+    }
+
+    private QuarantineResult Log(string path, QuarantineResult result)
+    {
         if (result.Status == QuarantineStatus.Quarantined)
         {
             _logger.LogInformation("Quarantined {Path} as item {Id}.", path, result.Entry!.Id);
@@ -65,21 +161,26 @@ public sealed partial class QuarantineManager
         return result;
     }
 
-    private QuarantineResult QuarantineCore(QuarantineStore store, byte[] key, FileScanReport report, Guid? alertId, CancellationToken ct)
+    private QuarantineResult QuarantineCore(
+        QuarantineStore store, byte[] key, SafeFileHandle file, bool ownsHandle, SafeFileHandle originalDirectory,
+        FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
     {
-        // The hardened open, denying writers, with DELETE so the same handle can be moved / deleted.
-        using var file = SecureFile.OpenRegularFile(report.Result.Item.Path, out var openFailure, out _,
-            allowOffline: false, denyWriters: true, additionalAccess: N.Delete);
-        if (file is null)
+        // Bound to the scanned object: same volume + 128-bit file ID, and the handle is at exactly the scanned path.
+        var now = FileIdentity.TryCapture(file);
+        if (now is null || !now.IsSameObject(report.Identity))
         {
-            return new(MapOpenFailure(openFailure.Reason), $"Can't open the file: {openFailure.Message}");
+            return new(QuarantineStatus.IdentityMismatch, "This is not the file object that was scanned (volume / file ID differ).");
+        }
+
+        if (!string.Equals(now.FinalPath, scannedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return new(QuarantineStatus.PathRedirected, $"The file is at {now.FinalPath ?? "an unknown path"}, not the scanned {scannedPath}.");
         }
 
         N.ByHandleFileInformation info;
-        string finalPath;
         try
         {
-            if (!CheckSource(file, report, ct, out info, out finalPath, out var refusal))
+            if (!CheckSource(file, report, ct, out info, out var refusal))
             {
                 return refusal;
             }
@@ -91,26 +192,18 @@ public sealed partial class QuarantineManager
             return new(locked ? QuarantineStatus.Locked : QuarantineStatus.Failed, $"Can't read the file: {ex.Message}");
         }
 
-        // The path lock doesn't see other spellings of the same file (case, 8.3 names, links in the path): lock the file itself.
-        using var fileLease = _locks.TryAcquire($"file:{info.VolumeSerialNumber:x8}:{info.FileIndexHigh:x8}{info.FileIndexLow:x8}");
+        // The path lock doesn't see other spellings of the same file: lock the file object itself.
+        using var fileLease = _locks.TryAcquire($"file:{now.VolumeSerialNumber:x16}:{now.FileId}");
         if (fileLease is null)
         {
             return new(QuarantineStatus.Busy, "Another quarantine operation on this file is running.");
-        }
-
-        string directory = Path.GetDirectoryName(finalPath)!;
-        using var originalDirectory = SafeDirectory.TryOpen(directory, out var dirFailure, out var dirReason);
-        if (originalDirectory is null)
-        {
-            return new(dirFailure is SafeDirectoryFailure.Redirected or SafeDirectoryFailure.PathMismatch
-                ? QuarantineStatus.PathRedirected : QuarantineStatus.Failed, $"The file's folder can't be verified: {dirReason}");
         }
 
         bool sameVolume = !ForceCrossVolume && info.VolumeSerialNumber == store.VolumeSerial;
         QuarantineMetadata metadata;
         try
         {
-            metadata = BuildMetadata(file, info, report, finalPath, alertId, sameVolume);
+            metadata = BuildMetadata(file, info, now, report, scannedPath, alertId, sameVolume);
             ct.ThrowIfCancellationRequested();
             store.WriteMetadata(metadata, key);
         }
@@ -120,51 +213,40 @@ public sealed partial class QuarantineManager
         }
 
         Hook(QuarantineStep.QuarantineJournalWritten);
-        return sameVolume
-            ? MoveSameVolume(store, key, file, originalDirectory, metadata)
-            : MoveCrossVolume(store, key, file, metadata);
+        var move = new SourceHandle(file, ownsHandle, originalDirectory);
+        return sameVolume ? MoveSameVolume(store, key, move, metadata) : MoveCrossVolume(store, key, move, metadata);
     }
 
-    private bool CheckSource(
-        SafeFileHandle file, FileScanReport report, CancellationToken ct,
-        out N.ByHandleFileInformation info, out string finalPath, out QuarantineResult refusal)
+    /// <summary>The source handle, whether this code closes it, and its verified original folder (for moving back).</summary>
+    private readonly record struct SourceHandle(SafeFileHandle File, bool Owns, SafeFileHandle OriginalDirectory)
+    {
+        public void CloseIfOwned()
+        {
+            if (Owns)
+            {
+                File.Dispose();
+            }
+        }
+    }
+
+    private bool CheckSource(SafeFileHandle file, FileScanReport report, CancellationToken ct, out N.ByHandleFileInformation info, out QuarantineResult refusal)
     {
         info = N.GetFileInformation(file);
-        finalPath = string.Empty;
         long length = RandomAccess.GetLength(file);
-        string? why = null;
-        var status = QuarantineStatus.ContentChanged;
-        if (info.NumberOfLinks != 1)
-        {
-            (status, why) = (QuarantineStatus.MultipleHardLinks, $"the file has {info.NumberOfLinks} hard links");
-        }
-        else if (length != report.Hash.Length)
-        {
-            why = $"the size changed since the scan ({report.Hash.Length} -> {length} bytes)";
-        }
-        else if (length > _options.MaxFileSizeBytes)
-        {
-            (status, why) = (QuarantineStatus.UnsupportedLocation, $"the file is over the {_options.MaxFileSizeBytes}-byte limit");
-        }
-        else if (StoredContent.Hash(file, ct).Sha256 != report.Result.Sha256!.ToLowerInvariant())
-        {
-            why = "the SHA-256 changed since the scan; refusing to quarantine something that wasn't scanned";
-        }
-        else if (N.GetFinalDosPath(file) is not { } final || !QuarantinePath.TryValidateOriginalPath(final, out _))
-        {
-            (status, why) = (QuarantineStatus.UnsupportedLocation, "the file is not on a local drive-letter path");
-        }
-        else
-        {
-            finalPath = final;
-        }
-
-        refusal = new(status, why ?? string.Empty);
-        return why is null;
+        (QuarantineStatus Status, string Why)? problem =
+            info.NumberOfLinks != 1 ? (QuarantineStatus.MultipleHardLinks, $"the file has {info.NumberOfLinks} hard links")
+            : length != report.Hash.Length ? (QuarantineStatus.ContentChanged, $"the size changed since the scan ({report.Hash.Length} -> {length} bytes)")
+            : length > _options.MaxFileSizeBytes ? (QuarantineStatus.UnsupportedLocation, $"the file is over the {_options.MaxFileSizeBytes}-byte limit")
+            : StoredContent.Hash(file, ct).Sha256 != report.Result.Sha256!.ToLowerInvariant()
+                ? (QuarantineStatus.ContentChanged, "the SHA-256 changed since the scan; refusing to quarantine something that wasn't scanned")
+            : null;
+        refusal = problem is { } p ? new(p.Status, p.Why) : null!;
+        return problem is null;
     }
 
     private QuarantineMetadata BuildMetadata(
-        SafeFileHandle file, N.ByHandleFileInformation info, FileScanReport report, string finalPath, Guid? alertId, bool sameVolume)
+        SafeFileHandle file, N.ByHandleFileInformation info, FileIdentity identity, FileScanReport report, string finalPath,
+        Guid? alertId, bool sameVolume)
     {
         var result = report.Result;
         var ordered = result.Detections.OrderByDescending(d => d.Verdict).ToArray();
@@ -177,6 +259,8 @@ public sealed partial class QuarantineManager
             ScannedPath = result.Item.Path,
             SizeBytes = report.Hash.Length!.Value,
             Sha256 = result.Sha256!.ToLowerInvariant(),
+            SourceVolumeSerial = identity.VolumeSerialNumber,
+            SourceFileId = identity.FileId,
             Attributes = (int)info.FileAttributes,
             CreationTimeUtc = FromFileTime(info.CreationTime),
             LastWriteTimeUtc = FromFileTime(info.LastWriteTime),
@@ -196,15 +280,19 @@ public sealed partial class QuarantineManager
         };
     }
 
-    /// <summary>Same volume: rename by handle into the store, neutralise from the handle, delete the staged raw file.</summary>
-    private QuarantineResult MoveSameVolume(
-        QuarantineStore store, byte[] key, SafeFileHandle file, SafeFileHandle originalDirectory, QuarantineMetadata metadata)
+    /// <summary>
+    /// Same volume: rename by handle into the store, lock the staged file down (protected SYSTEM/Administrators DACL,
+    /// no implicit owner rights), neutralise from the handle, re-check the link count, delete the staged raw file.
+    /// </summary>
+    private QuarantineResult MoveSameVolume(QuarantineStore store, byte[] key, SourceHandle source, QuarantineMetadata metadata)
     {
-        if (!N.TryRenameRelative(file, store.RootHandle, QuarantineStore.StagedName(metadata.Id), out int error))
+        if (!N.TryRenameRelative(source.File, store.RootHandle, QuarantineStore.StagedName(metadata.Id), out int error))
         {
             if (error == N.ErrorNotSameDevice)
             {
-                return MoveCrossVolume(store, key, file, metadata with { MoveKind = QuarantineMoveKind.CrossVolume });
+                var cross = metadata with { MoveKind = QuarantineMoveKind.CrossVolume };
+                TryWriteJournal(store, key, cross);
+                return MoveCrossVolume(store, key, source, cross);
             }
 
             DeleteMetadataQuietly(store, metadata.Id);
@@ -212,44 +300,71 @@ public sealed partial class QuarantineManager
         }
 
         Hook(QuarantineStep.QuarantineStaged);
+        int aclError = N.SetSecurity(source.File, N.DaclSecurityInformation | N.ProtectedDaclSecurityInformation, null,
+            _policy.CreateStagedFileDaclBytes());
+        if (aclError != 0)
+        {
+            return MoveBack(store, source, metadata, QuarantineStatus.Failed, $"Can't protect the staged file (Win32 error {aclError})");
+        }
+
         try
         {
-            WriteStoredCopy(store, file, metadata);
+            WriteStoredCopy(store, source.File, metadata);
         }
         catch (Exception ex) when (IsIoFailure(ex))
         {
             DeleteQuietly(store.PartialPath(metadata.Id));
-            string name = Path.GetFileName(metadata.OriginalPath);
-            if (N.TryRenameRelative(file, originalDirectory, name, out int backError))
-            {
-                DeleteMetadataQuietly(store, metadata.Id);
-                return new(QuarantineStatus.Failed, $"Can't write the neutralised copy ({ex.Message}); the file was moved back.");
-            }
-
-            _logger.LogError("Quarantine item {Id}: the neutralised copy failed ({Message}) and moving the file back failed " +
-                "(Win32 error {Error}); it stays in the protected staging area and is finished at the next start.", metadata.Id, ex.Message, backError);
-            return new(QuarantineStatus.Failed, $"Can't write the neutralised copy ({ex.Message}); the original is kept in the quarantine staging area.");
+            return MoveBack(store, source, metadata, QuarantineStatus.Failed, $"Can't write the neutralised copy ({ex.Message})");
         }
 
         Hook(QuarantineStep.QuarantineStoredCopyWritten);
-        if (!N.TryDeleteByHandle(file, out error))
+        if (LinkCount(source.File) != 1)
+        {
+            DeleteQuietly(store.DataPath(metadata.Id));
+            return MoveBack(store, source, metadata, QuarantineStatus.MultipleHardLinks, "A hard link to the file appeared during the move");
+        }
+
+        if (!N.TryDeleteByHandle(source.File, out error))
         {
             _logger.LogWarning("Quarantine item {Id}: removing the staged raw file failed (Win32 error {Error}); recovery finishes it.",
                 metadata.Id, error);
             return new(QuarantineStatus.Quarantined, "Quarantined; the staged raw copy is removed at the next start.", QuarantineEntry.From(metadata));
         }
 
-        file.Dispose();
+        source.CloseIfOwned();
         Hook(QuarantineStep.QuarantineSourceDeleted);
         return Finish(store, key, metadata);
     }
 
-    /// <summary>Different volume: neutralised copy from the handle, verify it, then delete the original by the same handle.</summary>
-    private QuarantineResult MoveCrossVolume(QuarantineStore store, byte[] key, SafeFileHandle file, QuarantineMetadata metadata)
+    /// <summary>
+    /// Undo a same-volume move: rename back relative to the verified original folder (never by path), put the original
+    /// DACL back, drop the journal. If that fails, the raw file stays in the protected staging area for recovery.
+    /// </summary>
+    private QuarantineResult MoveBack(QuarantineStore store, SourceHandle source, QuarantineMetadata metadata, QuarantineStatus status, string why)
+    {
+        if (N.TryRenameRelative(source.File, source.OriginalDirectory, Path.GetFileName(metadata.OriginalPath), out int backError))
+        {
+            var notes = new List<string>();
+            if (metadata.SecurityDescriptor is { } sddl)
+            {
+                ApplySecurity(source.File, sddl, canSetOwner: false, notes);
+            }
+
+            DeleteMetadataQuietly(store, metadata.Id);
+            return new(status, $"{why}; the file was moved back." + (notes.Count > 0 ? " " + string.Join(" ", notes) : string.Empty));
+        }
+
+        _logger.LogError("Quarantine item {Id}: {Why}, and moving the file back failed (Win32 error {Error}); it stays in the " +
+            "protected staging area and is finished at the next start.", metadata.Id, why, backError);
+        return new(status, $"{why}; the original is kept in the quarantine staging area.");
+    }
+
+    /// <summary>Different volume: neutralised copy from the handle, verify it, re-check links, then delete the original by the same handle.</summary>
+    private QuarantineResult MoveCrossVolume(QuarantineStore store, byte[] key, SourceHandle source, QuarantineMetadata metadata)
     {
         try
         {
-            WriteStoredCopy(store, file, metadata);
+            WriteStoredCopy(store, source.File, metadata);
         }
         catch (Exception ex) when (IsIoFailure(ex))
         {
@@ -259,18 +374,46 @@ public sealed partial class QuarantineManager
         }
 
         Hook(QuarantineStep.QuarantineStoredCopyWritten);
+        string? refusal = LinkCount(source.File) != 1 ? "A hard link to the file appeared during the copy" : null;
 
         // Part of the move, not a deletion of user data: the verified copy is already in the store.
-        if (!N.TryDeleteByHandle(file, out int error))
+        int error = 0;
+        if (refusal is not null || !N.TryDeleteByHandle(source.File, out error))
         {
             DeleteQuietly(store.DataPath(metadata.Id));
             DeleteMetadataQuietly(store, metadata.Id);
-            return new(MapWin32(error), $"Can't remove the original after copying (Win32 error {error}); it was left in place.");
+            return refusal is not null
+                ? new(QuarantineStatus.MultipleHardLinks, refusal + "; the file was left in place.")
+                : new(MapWin32(error), $"Can't remove the original after copying (Win32 error {error}); it was left in place.");
         }
 
-        file.Dispose();
+        source.CloseIfOwned();
         Hook(QuarantineStep.QuarantineSourceDeleted);
         return Finish(store, key, metadata);
+    }
+
+    private static uint LinkCount(SafeFileHandle file)
+    {
+        try
+        {
+            return N.GetFileInformation(file).NumberOfLinks;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return uint.MaxValue;
+        }
+    }
+
+    private void TryWriteJournal(QuarantineStore store, byte[] key, QuarantineMetadata metadata)
+    {
+        try
+        {
+            store.WriteMetadata(metadata, key);
+        }
+        catch (Exception ex) when (IsIoFailure(ex))
+        {
+            _logger.LogWarning("Quarantine item {Id}: journal update failed ({Message}).", metadata.Id, ex.Message);
+        }
     }
 
     /// <summary>Copies + neutralises from the handle, checks the plaintext hash, verifies the stored file, then publishes it.</summary>
@@ -352,12 +495,14 @@ public sealed partial class QuarantineManager
     private static DateTimeOffset FromFileTime(long fileTime) =>
         new(DateTime.FromFileTimeUtc(Math.Max(0, fileTime)), TimeSpan.Zero);
 
-    private static QuarantineStatus MapOpenFailure(HashFailureReason reason) => reason switch
+    private static QuarantineStatus MapOpenFailure(SafeDirectoryFailure failure, int win32Error) => failure switch
     {
-        HashFailureReason.Locked => QuarantineStatus.Locked,
-        HashFailureReason.AccessDenied => QuarantineStatus.AccessDenied,
-        HashFailureReason.NotFound => QuarantineStatus.NotFound,
-        HashFailureReason.Directory or HashFailureReason.NotRegularFile or HashFailureReason.Offline => QuarantineStatus.NotRegularFile,
+        SafeDirectoryFailure.NotFound => QuarantineStatus.NotFound,
+        SafeDirectoryFailure.Redirected or SafeDirectoryFailure.PathMismatch => QuarantineStatus.PathRedirected,
+        SafeDirectoryFailure.Unsupported => QuarantineStatus.UnsupportedLocation,
+        _ when win32Error is N.ErrorSharingViolation or N.ErrorLockViolation => QuarantineStatus.Locked,
+        _ when win32Error == N.ErrorAccessDenied => QuarantineStatus.AccessDenied,
+        _ when win32Error == 0 => QuarantineStatus.NotRegularFile, // opened, but not a usable regular file
         _ => QuarantineStatus.Failed,
     };
 

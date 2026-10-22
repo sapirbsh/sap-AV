@@ -36,4 +36,10 @@ public sealed record FileScanReport(
 {
     /// <summary>The download URL from the Mark-of-the-Web, if any (shown in results and alerts).</summary>
     public string? SourceUrl => MarkOfTheWeb?.Mark?.HostUrl;
+
+    /// <summary>
+    /// The file object that was scanned (volume serial, 128-bit file ID, final path), from the scan's own handle; null
+    /// if the file couldn't be opened or the file system has no file IDs. The quarantine refuses to act without it.
+    /// </summary>
+    public FileIdentity? Identity { get; init; }
 }

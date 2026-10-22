@@ -113,6 +113,27 @@ internal static unsafe class QuarantineNative
         }
     }
 
+    /// <summary>The access mask granted to <paramref name="handle"/> (<c>NtQueryObject(ObjectBasicInformation)</c>).</summary>
+    public static bool TryGetGrantedAccess(SafeHandle handle, out uint grantedAccess)
+    {
+        byte* info = stackalloc byte[56]; // OBJECT_BASIC_INFORMATION
+        bool added = false;
+        handle.DangerousAddRef(ref added);
+        try
+        {
+            int status = NtQueryObject(handle.DangerousGetHandle(), 0 /* ObjectBasicInformation */, info, 56, out _);
+            grantedAccess = status >= 0 ? *(uint*)(info + 4) : 0;
+            return status >= 0;
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+    }
+
     /// <summary>Opens a directory by full path without following a final reparse point (backup semantics).</summary>
     public static SafeFileHandle OpenDirectoryNoReparse(string path, uint access, uint share, out int win32Error)
     {
@@ -454,6 +475,9 @@ internal static unsafe class QuarantineNative
 
     [DllImport("ntdll.dll", ExactSpelling = true)]
     private static extern int NtSetInformationFile(IntPtr fileHandle, out IoStatusBlock ioStatusBlock, void* information, uint length, int fileInformationClass);
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtQueryObject(IntPtr handle, int objectInformationClass, void* information, uint length, out uint returnLength);
 
     [DllImport("ntdll.dll", ExactSpelling = true)]
     private static extern uint RtlNtStatusToDosError(int status);

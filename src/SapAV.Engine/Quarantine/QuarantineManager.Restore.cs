@@ -248,9 +248,8 @@ public sealed partial class QuarantineManager
     }
 
     /// <summary>
-    /// A protected original DACL is restored as is. An inheriting one: only its explicit entries are set (unprotected),
-    /// so the inherited part comes from the folder as for any new file; with no explicit entries the new file's
-    /// inherited DACL is already right and nothing is set. The owner is set only if allowed (SYSTEM needs
+    /// A protected original DACL is restored as is. An inheriting one: only its explicit entries are set (unprotected, possibly
+    /// none), so the inherited part is recomputed from the folder the file is in. The owner is set only if allowed (SYSTEM needs
     /// SeRestorePrivilege to give a file to another user; it is not enabled, so that becomes a note).
     /// </summary>
     private static void ApplySecurity(SafeFileHandle target, string sddl, bool canSetOwner, List<string> notes)
@@ -278,7 +277,8 @@ public sealed partial class QuarantineManager
                 }
             }
 
-            if (isProtected || explicitAces.Count > 0)
+            // Always set: an unprotected DACL with no explicit entries re-inherits from the folder (this also replaces a
+            // lockdown DACL when a staged file is moved back).
             {
                 var bytes = new byte[explicitAces.BinaryLength];
                 explicitAces.GetBinaryForm(bytes, 0);

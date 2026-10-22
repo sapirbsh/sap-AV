@@ -75,6 +75,12 @@ public sealed record QuarantineMetadata
     /// <summary>Lowercase hex SHA-256 of the original content.</summary>
     public required string Sha256 { get; init; }
 
+    /// <summary>64-bit volume serial of the original file object (FILE_ID_INFO).</summary>
+    public required ulong SourceVolumeSerial { get; init; }
+
+    /// <summary>128-bit file ID of the original file object, 32 lowercase hex characters (FILE_ID_INFO).</summary>
+    public required string SourceFileId { get; init; }
+
     /// <summary>The original <see cref="FileAttributes"/>, as a number.</summary>
     public required int Attributes { get; init; }
 
@@ -129,6 +135,7 @@ public sealed record QuarantineMetadata
             && !ScannedPath.Contains('\0'), "Invalid scanned path.");
         Check(SizeBytes >= 0, "Negative size.");
         Check(Sha256 is { Length: 64 } && Sha256.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f'), "Invalid SHA-256.");
+        Check(QuarantineItemId.IsValid(SourceFileId), "Invalid source file ID.");
         Check(SecurityDescriptor is null || (SecurityDescriptor.Length <= MaxSddlLength && !SecurityDescriptor.Contains('\0')),
             "Invalid security descriptor.");
         Check(ZoneIdentifier is null || ZoneIdentifier.Length <= MaxZoneIdentifierBytes, "Zone.Identifier too large.");
