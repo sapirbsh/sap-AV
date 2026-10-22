@@ -251,6 +251,27 @@ section A: single-handle pipeline, crash-safe YARA content access, YARA import a
 - **D3:** (M5) Rule and blocklist files load only from the ACL'd `%ProgramData%\sap-AV` folder.
 - **E2:** (L5) Lint rule atom quality, since slow rules turn into timeouts.
 
+**Carried over from the B1 review (Medium/Low).** H1 (the ILogger EventLog provider auto-registering a source),
+H2 (a write re-creating a removed source) and M2/L1/L2/L3/L6/L7 are fixed in B1.
+- **X2 — decision needed (M1):** anyone on the machine can write Application-log events with source `sap-AV` (fake 1001
+  alerts, or floods that push real ones out). Options: a dedicated `sap-AV` event log whose CustomSD lets only SYSTEM write,
+  or a manifest-based ETW channel. Until decided, document that SIEMs must not trust these events on source + ID alone.
+- **Service installer / D3 (M3):** the message DLL `System.Diagnostics.EventLog.Messages.dll` is registered from the
+  engine folder. The installer must refuse unless that folder is admin-only (Program Files), or point
+  `MessageResourceFile` at a protected path.
+- **B3 (M4):** alert flooding and blocking writes. Aggregate/rate-limit per hash+path with one summary event; write
+  through a bounded channel with a single writer, so a hung Event Log RPC can't block scan threads.
+- **X2 (L4):** middle truncation of a crafted long path can hide the directory that matters (`\Startup\`). Add
+  `FilePathLength` + `FilePathSha256`, or keep the last directory parts and the file name first.
+- **F1 / UI (L5):** `FilePath` keeps bidi controls on purpose (evidence). The UI must show paths with FSI/PDI isolation or
+  visible escapes, so an RLO can't spoof names.
+- **B4 / F (L8):** `SafeText.SingleLine` keeps invisible format characters (U+200B, U+2060–2064, U+FEFF, U+FFF9–FFFB, tag
+  characters). Map them to U+FFFD before display.
+- **X2 (L9):** apply the "`\` ends the authority" URL rule only to http/https/ftp/file; other schemes keep their
+  userinfo redaction as before.
+- **A7 (L10):** heuristic findings are joined in insertion order, so the 1024-character reason cap can cut the strongest
+  one. Join them by score.
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |
