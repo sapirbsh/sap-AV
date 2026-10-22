@@ -61,18 +61,18 @@ pass comes at the end.
 
 | Step | What | Status |
 |---|---|---|
-| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Built** (`6b0e586`). Immediate review not done yet: it was stopped at end of day; rerun first next session |
-| B2 | Reversible quarantine | Not started |
+| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Done** (`6b0e586`, review fixes `80f29a9`) |
+| B2 | Reversible quarantine | Being built |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | Not started |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
 
 ## Next session — start here (stopped 2026-10-21)
 
-1. **Rerun B1's immediate review** (it was stopped at end of day, with no findings yet). Fix any Critical/High, and record
+1. ~~Rerun B1's immediate review~~: done. 2 High fixed (`80f29a9`), Medium/Low recorded in ROADMAP.md. One decision is open: X2 M1, a dedicated `sap-AV` event log.
    Medium/Low in ROADMAP.md.
 2. Then **B2** (reversible quarantine, with an immediate review), then **B5** (scan-worker sandbox, full review), then B3, then B4.
-3. To do once by hand: run `dotnet test` from an **elevated** terminal, so the real Event Log test (skipped so far) actually runs.
+3. To do once by hand: from an **elevated** terminal, run `SAPAV_TEST_ALLOW_HKLM=1 dotnet test` (PowerShell: `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`), so the real Event Log test (skipped so far) actually runs.
 4. Check the GitHub **Actions** tab: CI results haven't been confirmed from here.
 
 The working tree is clean, and everything is committed and pushed.
