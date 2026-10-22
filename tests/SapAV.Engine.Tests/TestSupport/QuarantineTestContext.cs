@@ -235,9 +235,11 @@ internal sealed class QuarantineTestContext : IDisposable
     }
 
     /// <summary>Synthetic "malware": a marker string in random bytes (no MZ header, so a real antivirus leaves it alone; never real malware, never EICAR).</summary>
-    public static byte[] SampleContent(int size = 10_000)
+    /// <remarks>Fixed seed (default 1), so a real antivirus sees the same bytes on every run (review L6).</remarks>
+    public static byte[] SampleContent(int size = 10_000, int seed = 1)
     {
-        var bytes = RandomNumberGenerator.GetBytes(size);
+        var bytes = new byte[size];
+        new Random(seed).NextBytes(bytes);
         Marker.CopyTo(bytes, 64);
         return bytes;
     }

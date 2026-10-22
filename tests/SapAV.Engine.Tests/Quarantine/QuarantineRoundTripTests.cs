@@ -229,7 +229,7 @@ public sealed class QuarantineRoundTripTests
     {
         using var ctx = new QuarantineTestContext();
         var a = QuarantineTestContext.SampleContent();
-        var b = QuarantineTestContext.SampleContent();
+        var b = QuarantineTestContext.SampleContent(seed: 2);
         var qa = await ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(ctx.WriteFile("a.exe", a), a), Guid.NewGuid());
         await ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(ctx.WriteFile("b.exe", b), b));
 

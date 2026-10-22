@@ -19,6 +19,9 @@ public sealed class AuthenticodeVerifierHandleLeakTests(ITestOutputHelper output
 {
     private const int AllowedGrowth = 60; // runtime/crypt32 noise; a leak of one handle per check would be >= the iterations
 
+    /// <summary>Checks per loop: a leak of one handle per check (150) is still 2.5x <see cref="AllowedGrowth"/>; keeps each test well under 3 s.</summary>
+    private const int LoopIterations = 150;
+
     private readonly TempDirectory _dir = new();
     private readonly AuthenticodeVerifier _verifier = new();
 
@@ -68,33 +71,37 @@ public sealed class AuthenticodeVerifierHandleLeakTests(ITestOutputHelper output
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public void CatalogTrusted_Loop_HandleCountStaysFlat()
     {
         var path = SignedSamples.RequireCatalogOnlyWindowsBinary(); // hard requirement
 
-        AssertNoHandleGrowth(path, r => r.Status == SignatureStatus.Microsoft && r.Kind == SignatureKind.Catalog, 300);
+        AssertNoHandleGrowth(path, r => r.Status == SignatureStatus.Microsoft && r.Kind == SignatureKind.Catalog, LoopIterations);
     }
 
     [RequiresFact(Requires.SignedDotNetRuntime)]
+    [Trait("Category", "Slow")]
     public void EmbeddedTrusted_Loop_HandleCountStaysFlat()
     {
         var source = SignedSamples.RequireEmbeddedSignedMicrosoftDll();
 
         var path = _dir.WriteFile("signed.dll", File.ReadAllBytes(source));
-        AssertNoHandleGrowth(path, r => r.Status == SignatureStatus.Microsoft && r.Kind == SignatureKind.Embedded, 500);
+        AssertNoHandleGrowth(path, r => r.Status == SignatureStatus.Microsoft && r.Kind == SignatureKind.Embedded, LoopIterations);
         AssertNoOtherHandleOpen(path);
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public void NotSigned_Loop_HandleCountStaysFlat()
     {
         // Goes through the embedded check and both catalog lookups (SHA-256 and SHA-1), all finding nothing.
         var path = _dir.WriteFile("unsigned.exe", [0x4D, 0x5A, 1, 2, 3]);
-        AssertNoHandleGrowth(path, r => r.FailureReason == SignatureFailureReason.NotSigned, 500);
+        AssertNoHandleGrowth(path, r => r.FailureReason == SignatureFailureReason.NotSigned, LoopIterations);
         AssertNoOtherHandleOpen(path);
     }
 
     [RequiresFact(Requires.SignedDotNetRuntime)]
+    [Trait("Category", "Slow")]
     public void HashMismatch_Loop_HandleCountStaysFlat()
     {
         var source = SignedSamples.RequireEmbeddedSignedMicrosoftDll();
@@ -102,7 +109,7 @@ public sealed class AuthenticodeVerifierHandleLeakTests(ITestOutputHelper output
         var bytes = File.ReadAllBytes(source);
         bytes[PeImage.BodyByteOffset(bytes)] ^= 0x01;
         var path = _dir.WriteFile("tampered.dll", bytes);
-        AssertNoHandleGrowth(path, r => r.FailureReason == SignatureFailureReason.HashMismatch, 500);
+        AssertNoHandleGrowth(path, r => r.FailureReason == SignatureFailureReason.HashMismatch, LoopIterations);
         AssertNoOtherHandleOpen(path);
     }
 

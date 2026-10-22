@@ -11,8 +11,9 @@ namespace SapAV.Engine.Quarantine;
 /// <list type="table">
 /// <item><term>Quarantining</term><description>
 /// <c>.partial</c> is always discarded. Stored copy verifies + staged raw file present → delete staged, mark Quarantined.
-/// Stored copy verifies, no staged file → if the original is still in place with the same hash the move never
-/// happened: discard the copy and the metadata (roll back); otherwise mark Quarantined.
+/// Stored copy verifies, no staged file → same volume: mark Quarantined (never rolled back); cross volume: if the
+/// very same file object (file ID, size, hash) is still at the original path the delete never happened: discard the copy
+/// and the metadata (roll back); otherwise mark Quarantined.
 /// No valid stored copy + staged file with the right hash → finish: neutralise from the staged file, verify, delete it.
 /// No valid stored copy, no staged file → the original must still be in place: discard the metadata (and a bad copy).
 /// Anything that doesn't verify and isn't backed by an intact original is left untouched and logged.</description></item>
@@ -82,7 +83,9 @@ public sealed partial class QuarantineManager
 
         if (dataOk)
         {
-            if (OriginalStillInPlace(metadata))
+            // A same-volume item that verifies is never rolled back: its original was renamed in, so anything at the
+            // original path now is a different file. Cross-volume: only the very same file object (file ID) counts.
+            if (metadata.MoveKind == QuarantineMoveKind.CrossVolume && OriginalStillInPlace(metadata))
             {
                 DeleteQuietly(store.DataPath(id));
                 DeleteMetadataQuietly(store, id);
@@ -196,11 +199,19 @@ public sealed partial class QuarantineManager
         }
     }
 
-    /// <summary>The original is at its recorded path with the recorded size and hash (read-only hardened open).</summary>
+    /// <summary>
+    /// The original file object (same volume serial + file ID) is still at its recorded path, unchanged (size + hash).
+    /// Opened read-only with no reparse point anywhere (<see cref="SafeFile"/>).
+    /// </summary>
     private static bool OriginalStillInPlace(QuarantineMetadata metadata)
     {
-        using var file = SecureFile.OpenRegularFile(metadata.OriginalPath, out _, out _);
-        if (file is null)
+        using var file = SafeFile.TryOpen(metadata.OriginalPath, N.GenericRead, N.ShareRead | N.ShareWrite | N.ShareDelete,
+            out var directory, out _, out _, out _);
+        directory?.Dispose();
+        if (file is null
+            || Core.Scanning.FileIdentity.TryCapture(file) is not { } identity
+            || identity.VolumeSerialNumber != metadata.SourceVolumeSerial
+            || identity.FileId != metadata.SourceFileId)
         {
             return false;
         }

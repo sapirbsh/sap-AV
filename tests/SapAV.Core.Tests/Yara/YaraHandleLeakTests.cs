@@ -14,8 +14,12 @@ namespace SapAV.Core.Tests.Yara;
 [Collection(HandleCountCollection.Name)]
 public sealed class YaraHandleLeakTests(ITestOutputHelper output) : IDisposable
 {
-    private const int Iterations = 3000;
+    // A leak of one handle per scan grows the count by Iterations, far over AllowedGrowth; 500 keeps each test well under 3 s.
+    private const int Iterations = 500;
     private const int AllowedGrowth = 100;
+
+    /// <summary>Compile/dispose cycles measured (each leaked set would hold its native arenas; see the assertion).</summary>
+    private const int Cycles = 150;
     private readonly TempDirectory _dir = new();
 
     public void Dispose() => _dir.Dispose();
@@ -48,6 +52,7 @@ public sealed class YaraHandleLeakTests(ITestOutputHelper output) : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public void FileScans_MatchedClean_Empty_TooLarge_Directory_HandleCountStaysFlat()
     {
         using var rules = YaraTestRules.MarkerSet();
@@ -67,6 +72,7 @@ public sealed class YaraHandleLeakTests(ITestOutputHelper output) : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public void CompileAndDispose_ManyTimes_DoesNotGrowMemoryOrHandles()
     {
         static void Cycle()
@@ -92,7 +98,7 @@ public sealed class YaraHandleLeakTests(ITestOutputHelper output) : IDisposable
         long memoryBefore = process.PrivateMemorySize64;
         int handlesBefore = HandleCount();
 
-        for (int i = 0; i < 1000; i++)
+        for (int i = 0; i < Cycles; i++)
         {
             Cycle();
         }
@@ -102,9 +108,10 @@ public sealed class YaraHandleLeakTests(ITestOutputHelper output) : IDisposable
         process.Refresh();
         long growth = process.PrivateMemorySize64 - memoryBefore;
         int handleGrowth = HandleCount() - handlesBefore;
-        output.WriteLine($"1000 compile/dispose cycles: private bytes +{growth / 1024} KiB, handles +{handleGrowth}");
+        output.WriteLine($"{Cycles} compile/dispose cycles: private bytes +{growth / 1024} KiB, handles +{handleGrowth}");
 
-        // Each set holds at least tens of KiB of native arenas; 1000 leaked sets would be tens of MiB.
+        // Measured: a leaked set holds about 1 MiB of native arenas (200 kept sets: ~190 MiB), so 150 leaked sets would be
+        // ~140 MiB, far over this limit; 150 clean cycles grow by ~2 MiB.
         Assert.True(growth < 16L * 1024 * 1024, $"private memory grew by {growth / 1024} KiB");
         Assert.True(handleGrowth < AllowedGrowth, $"handle count grew by {handleGrowth}");
     }

@@ -41,7 +41,7 @@ public sealed class QuarantineRestoreSecurityTests
     {
         using var ctx = new QuarantineTestContext();
         var a = QuarantineTestContext.SampleContent();
-        var b = QuarantineTestContext.SampleContent();
+        var b = QuarantineTestContext.SampleContent(seed: 2);
         var idA = (await ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(ctx.WriteFile("a.exe", a), a))).Entry!.Id;
         var idB = (await ctx.Manager.QuarantineAsync(QuarantineTestContext.ReportFor(ctx.WriteFile("b.exe", b), b))).Entry!.Id;
 
