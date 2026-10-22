@@ -49,8 +49,7 @@ elevated run). Simulated clean machine (after B1): Core 982 passed, 55 skipped,
 - A Rust panic or a native crash inside YARA-X still takes down the process until **B5** (scan-worker sandbox) lands.
 - USN fallback gap: a writer that already holds the file open can, in rare cases, change it without a new journal record.
   D1 and B5 reduce this.
-- CI on GitHub `windows-latest` has not been confirmed from here (no `gh` CLI): check the Actions tab. The most likely
-  failure is the `cmd.exe` Microsoft-signature test if the runner uses an unlisted Microsoft CA.
+- CI on GitHub `windows-latest` is green (runs 1–16, confirmed by the user), including the `cmd.exe` Microsoft-signature test.
 - Heuristic thresholds were tested on synthetic PE files only; tune them on real software (A5 follow-up).
 
 ## Section B — Engine infrastructure (in progress)
@@ -62,7 +61,7 @@ pass comes at the end.
 | Step | What | Status |
 |---|---|---|
 | B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Done** (`6b0e586`, review fixes `80f29a9`) |
-| B2 | Reversible quarantine | Being built |
+| B2 | Reversible quarantine | Built (`08fe657`); immediate review running |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | Not started |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
@@ -73,7 +72,7 @@ pass comes at the end.
    Medium/Low in ROADMAP.md.
 2. Then **B2** (reversible quarantine, with an immediate review), then **B5** (scan-worker sandbox, full review), then B3, then B4.
 3. To do once by hand: from an **elevated** terminal, run `SAPAV_TEST_ALLOW_HKLM=1 dotnet test` (PowerShell: `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`), so the real Event Log test (skipped so far) actually runs.
-4. Check the GitHub **Actions** tab: CI results haven't been confirmed from here.
+4. ~~Check CI~~: **CI is green** (runs 1–16 passed on windows-latest, including the YARA-X download and hash check on the runner; reported by the user 2026-10-22).
 
 The working tree is clean, and everything is committed and pushed.
 
