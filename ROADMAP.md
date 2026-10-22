@@ -272,6 +272,30 @@ H2 (a write re-creating a removed source) and M2/L1/L2/L3/L6/L7 are fixed in B1.
 - **A7 (L10):** heuristic findings are joined in insertion order, so the 1024-character reason cap can cut the strongest
   one. Join them by score.
 
+**Carried over from the B2 review (Medium/Low).** C1 (quarantine not bound to the scanned file, so it could be
+redirected into a SYSTEM file delete), H1 (PE heuristic tests could pass vacuously under a Defender block),
+M1, L1, L6 and L7 are fixed in B2/A5.
+- **B3 (M2):** `SafeDirectory` refuses every reparse point, so nothing under a OneDrive sync root (Desktop/Documents) can
+  be quarantined or restored. Refuse only name-surrogate tags (`IsReparseTagNameSurrogate`); `OBJ_DONT_REPARSE` still
+  blocks real redirects. Verify on a OneDrive machine.
+- **D3 (M3):** a standard user can pre-create `%ProgramData%\sap-AV` (or `…\Quarantine`) so the store is UntrustedOwner
+  and quarantine stays off. The installer creates the folders with a protected ACL, and startup raises an Event Log
+  error/alert when the store is unavailable.
+- **B3 (M4):** no store quota or free-space floor, so mass-dropped unique flagged files can fill the system drive. Add a
+  quota plus a free-space check → `StoreFull` + alert.
+- **B4/B5 (M5):** restore has no caller identity. B4 must authorise restore (admin, or the requester's token has
+  FILE_ADD_FILE on the target folder), and quarantine requests from the pipe need DELETE on the file for the client token.
+- **B2 follow-up (L2):** restoring an unprotected DACL may recompute inheritance by resolving the parent by name, which
+  can follow reparse points. Merge the original explicit entries with the inherited ones the kernel set at create time,
+  and set them with `NtSetSecurityObject`. Verify.
+- **B5 (L3):** the original owner isn't restored (SeRestorePrivilege off), so a protected original DACL can lock the
+  user out of their restored file.
+- **D3 (L4):** TOCTOU in `FixWiderAcl` (empty check, then DACL replace). Set the DACL first, then enumerate.
+- **D3 (L5):** for a configured `Root`, only the immediate parent is checked and pinned, and store I/O goes by path.
+  Require all ancestors to be non-user-writable, or do store I/O relative to `RootHandle`.
+- **Tests (L8):** add the missing cases as each item above lands: C1 swap, hard link after the check, untrusted-owner
+  parent, recovery rollback.
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |
