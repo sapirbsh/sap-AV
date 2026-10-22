@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 built, its review is next |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 being built |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -61,8 +61,8 @@ pass comes at the end.
 | Step | What | Status |
 |---|---|---|
 | B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Done** (`6b0e586`, review fixes `80f29a9`) |
-| B2 | Reversible quarantine | Built (`08fe657`); immediate review running |
-| B5 | Privilege separation: all file parsing in a low-privilege scan worker | Not started |
+| B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
+| B5 | Privilege separation: all file parsing in a low-privilege scan worker | Being built |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
 

@@ -295,6 +295,20 @@ M1, L1, L6 and L7 are fixed in B2/A5.
   Require all ancestors to be non-user-writable, or do store I/O relative to `RootHandle`.
 - **Tests (L8):** add the missing cases as each item above lands: C1 swap, hard link after the check, untrusted-owner
   parent, recovery rollback.
+- **From the B2 follow-up review (C1/H1 confirmed closed):**
+  - **B4/B3/D3 (Medium):** who may request a quarantine.
+    - B4: pipe requests require DELETE on the file for the client token.
+    - B4: never deserialize a `FileScanReport`/`Identity` from the pipe.
+    - B3/D3: exclude the engine's own data folders (e.g. `rules\*.yar`, which match themselves) from scanning and quarantine.
+  - **B2 follow-up (Low):** if `SecurityDescriptor` is null, a moved-back file keeps the lockdown DACL. Set an empty
+    unprotected DACL so it re-inherits from the folder.
+  - **B2 follow-up (Low):** a tiny hard-link window remains between the re-check and the delete. After the delete, check
+    `NumberOfLinks` again; if it isn't 0, report a partial result and raise an alert.
+  - **B3 (Low):** `Path.GetFullPath` strips trailing dots/spaces and doesn't expand 8.3 names, so `x.exe.` can't be
+    quarantined. Compare `\\?\`-normalised paths, or use the scan's final path as canonical.
+  - **B3 (Low):** the handle overload can't verify the caller's handle denies writers, so B3 must open with Read|Delete sharing only.
+  - **Phase 2 USB (Low):** FAT/exFAT may not report `FileIdInfo`, so quarantine refuses those files (fails closed). Verify.
+  - Tests: add an explicit object-manager link test (junction to `\RPC Control` + symlink).
 
 **B. Engine infrastructure (engine-dev)**
 
