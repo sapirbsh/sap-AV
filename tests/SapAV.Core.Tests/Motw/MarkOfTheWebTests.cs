@@ -225,13 +225,23 @@ public sealed class MarkOfTheWebTests : IDisposable
         var exe = _dir.WriteFile("tool.exe", SyntheticPe.Build(new byte[8192]));
         var doc = _dir.WriteFile("notes.txt", "hello"u8.ToArray());
 
-        var hit = heuristics.Analyze(exe, new HeuristicContext(MarkOfTheWeb: internet));
+        // Every call must really inspect the content (a blocked read would leave only name rules and pass vacuously).
+        HeuristicResult Inspect(string path, HeuristicContext context)
+        {
+            var r = heuristics.Analyze(path, context);
+            Assert.True(r.ContentInspected, $"{path}: content not inspected ({r.ContentError}).");
+            return r;
+        }
+
+        var hit = Inspect(exe, new HeuristicContext(MarkOfTheWeb: internet));
         var finding = Assert.Single(hit.Findings, f => f.Kind == HeuristicKind.InternetOrigin);
         Assert.Contains("cdn.example.com", finding.Reason);
 
-        Assert.DoesNotContain(heuristics.Analyze(exe, new HeuristicContext(MarkOfTheWeb: trustedZone)).Findings, f => f.Kind == HeuristicKind.InternetOrigin);
-        Assert.DoesNotContain(heuristics.Analyze(doc, new HeuristicContext(MarkOfTheWeb: internet)).Findings, f => f.Kind == HeuristicKind.InternetOrigin);
-        Assert.DoesNotContain(heuristics.Analyze(exe, new HeuristicContext(SyntheticPe.TrustedSignature(), internet)).Findings,
+        var trusted = Inspect(exe, new HeuristicContext(SyntheticPe.Unsigned(), trustedZone));
+        Assert.Contains(trusted.Findings, f => f.Kind == HeuristicKind.UnsignedExecutable); // control: the PE was parsed
+        Assert.DoesNotContain(trusted.Findings, f => f.Kind == HeuristicKind.InternetOrigin);
+        Assert.DoesNotContain(Inspect(doc, new HeuristicContext(MarkOfTheWeb: internet)).Findings, f => f.Kind == HeuristicKind.InternetOrigin);
+        Assert.DoesNotContain(Inspect(exe, new HeuristicContext(SyntheticPe.TrustedSignature(), internet)).Findings,
             f => f.Kind == HeuristicKind.InternetOrigin);
     }
 }

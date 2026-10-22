@@ -178,9 +178,11 @@ public sealed class FileScannerSingleHandleTests : IDisposable
         Assert.Equal((await hasher.HashFileAsync(path)).Sha256, (await hasher.HashHandleAsync(handle)).Sha256);
         Assert.Equal(new AuthenticodeVerifier().Verify(path).Status, new AuthenticodeVerifier().Verify(handle, path).Status);
         Assert.Equal(new YaraScanner(_rules).ScanFile(path).IsScanned, new YaraScanner(_rules).ScanHandle(handle).IsScanned);
-        Assert.Equal(
-            new FileHeuristics().Analyze(path, HeuristicContext.None).Score,
-            new FileHeuristics().Analyze(handle, path, HeuristicContext.None).Score);
+        var byPath = new FileHeuristics().Analyze(path, new HeuristicContext(SyntheticPe.Unsigned()));
+        var byHandle = new FileHeuristics().Analyze(handle, path, new HeuristicContext(SyntheticPe.Unsigned()));
+        Assert.True(byPath.ContentInspected && byHandle.ContentInspected, $"content not inspected: {byPath.ContentError} / {byHandle.ContentError}");
+        Assert.Contains(byHandle.Findings, f => f.Kind == HeuristicKind.UnsignedExecutable); // the PE was parsed through the handle
+        Assert.Equal(byPath.Findings.Select(f => (f.Kind, f.Score)), byHandle.Findings.Select(f => (f.Kind, f.Score)));
         Assert.Equal(new MarkOfTheWebReader().Read(path).Status, new MarkOfTheWebReader().Read(handle).Status);
     }
 }

@@ -16,8 +16,19 @@ public sealed class FileHeuristicsTests : IDisposable
 
     public void Dispose() => _dir.Dispose();
 
-    private HeuristicResult Analyze(string name, byte[] content, HeuristicContext? context = null, FileHeuristics? heuristics = null) =>
-        (heuristics ?? _heuristics).Analyze(_dir.WriteFile(name, content), context ?? HeuristicContext.None);
+    /// <summary>
+    /// Writes and analyses a temp file. Fails loudly if the content wasn't inspected (e.g. a real antivirus blocked the
+    /// open or read): otherwise only the name rules run, and a negative assertion about a content rule would pass vacuously.
+    /// </summary>
+    private HeuristicResult Analyze(string name, byte[] content, HeuristicContext? context = null, FileHeuristics? heuristics = null)
+    {
+        var result = (heuristics ?? _heuristics).Analyze(_dir.WriteFile(name, content), context ?? HeuristicContext.None);
+        Assert.True(result.ContentInspected, $"{name}: content not inspected ({result.ContentError}); the content rules did not run.");
+        return result;
+    }
+
+    /// <summary>Unsigned context: a parsed PE then always gets <see cref="HeuristicKind.UnsignedExecutable"/> (a positive control).</summary>
+    private static HeuristicContext UnsignedContext => new(SyntheticPe.Unsigned());
 
     private static HeuristicKind[] Kinds(HeuristicResult r) => r.Findings.Select(f => f.Kind).ToArray();
 
@@ -114,8 +125,9 @@ public sealed class FileHeuristicsTests : IDisposable
     {
         // Like an installer: normal sections, compressed payload appended after them.
         var pe = SyntheticPe.Build(new byte[16 * 1024]);
-        var result = Analyze("installer.exe", [.. pe, .. SyntheticPe.Random(256 * 1024)]);
+        var result = Analyze("installer.exe", [.. pe, .. SyntheticPe.Random(256 * 1024)], UnsignedContext);
 
+        Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(result)); // control: the PE was parsed
         Assert.DoesNotContain(HeuristicKind.HighEntropyExecutable, Kinds(result));
     }
 
@@ -131,7 +143,11 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void TrustedSignature_CancelsWeakSignals_ButNotMasquerading()
     {
-        var packed = Analyze("tool.exe", SyntheticPe.Build(SyntheticPe.Random(64 * 1024)), new HeuristicContext(SyntheticPe.TrustedSignature()));
+        var packedBytes = SyntheticPe.Build(SyntheticPe.Random(64 * 1024));
+        var control = Analyze("tool-unsigned.exe", packedBytes, UnsignedContext);
+        Assert.Contains(HeuristicKind.HighEntropyExecutable, Kinds(control)); // control: the same bytes do trigger the content rule
+
+        var packed = Analyze("tool.exe", packedBytes, new HeuristicContext(SyntheticPe.TrustedSignature()));
         Assert.Empty(packed.Findings);
 
         var masquerading = Analyze("invoice.pdf.exe", SyntheticPe.Build(new byte[8192]), new HeuristicContext(SyntheticPe.TrustedSignature()));
@@ -180,15 +196,29 @@ public sealed class FileHeuristicsTests : IDisposable
             ? SyntheticPe.Build(new byte[8192], 1024 * 1024, (byte)overlayByte)
             : [.. SyntheticPe.Build(new byte[8192]), .. SyntheticPe.Random(1024 * 1024)];
 
-        Assert.Equal(padded, Kinds(Analyze("big.exe", pe, heuristics: small)).Contains(HeuristicKind.PaddedOversizedExecutable));
+        var kinds = Kinds(Analyze("big.exe", pe, UnsignedContext, small));
+
+        Assert.Contains(HeuristicKind.UnsignedExecutable, kinds); // control: the PE headers were parsed
+        Assert.Equal(padded, kinds.Contains(HeuristicKind.PaddedOversizedExecutable));
     }
 
     [Fact]
     public void ZeroPaddedExecutable_UnderTheLimit_IsNotPaddingFinding()
     {
-        var result = Analyze("ok.exe", SyntheticPe.Build(new byte[8192], overlayLength: 1024 * 1024));
+        var result = Analyze("ok.exe", SyntheticPe.Build(new byte[8192], overlayLength: 1024 * 1024), UnsignedContext);
 
+        Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(result)); // control: the PE was parsed
         Assert.DoesNotContain(HeuristicKind.PaddedOversizedExecutable, Kinds(result));
+    }
+
+    [Fact]
+    public void SyntheticPe_IsAcceptedByThePeParser()
+    {
+        // Self-test for the fixture every PE test relies on.
+        foreach (var bytes in new[] { SyntheticPe.Build(new byte[8192]), SyntheticPe.Build(SyntheticPe.Random(4096), overlayLength: 4096) })
+        {
+            Assert.NotNull(PeHeaders.TryParse(bytes.AsSpan(0, Math.Min(bytes.Length, 64 * 1024)), bytes.Length));
+        }
     }
 
     // --- Non-regular targets ---
