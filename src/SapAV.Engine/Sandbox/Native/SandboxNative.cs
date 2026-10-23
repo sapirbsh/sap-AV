@@ -266,6 +266,12 @@ internal static class SandboxNative
     [DllImport("advapi32.dll", SetLastError = true, ExactSpelling = true)]
     public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
 
+    // ---- Pipes (review L3: unsolicited worker output) ----
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PeekNamedPipe(
+        SafeHandle pipe, IntPtr buffer, uint bufferSize, IntPtr bytesRead, out uint totalBytesAvailable, IntPtr bytesLeftThisMessage);
+
     // ---- Object security (worker process / thread DACL) ----
     public const int SeKernelObject = 6;
     public const uint DaclSecurityInformation = 0x00000004;

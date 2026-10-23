@@ -52,6 +52,11 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
             try
             {
                 WorkerFraming.Write(output, bytes, WorkerLimits.MaxResponseBytes);
+                if (fault == WorkerTestFault.TrailingFrame && service.TestHooksEnabled)
+                {
+                    var extra = WorkerService.Failed(request.Id + 1, "an unsolicited frame (test hook)");
+                    WorkerFraming.Write(output, WorkerJson.Serialize(extra, WorkerLimits.MaxResponseBytes), WorkerLimits.MaxResponseBytes);
+                }
             }
             catch (IOException)
             {

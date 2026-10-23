@@ -14,7 +14,6 @@ internal sealed record RulePackage(int Generation, WorkerLoadRules Rules);
 /// </summary>
 internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOptions options, TimeProvider time, ILogger logger) : IDisposable
 {
-    private long _nextId;
     private WorkerProcess? _worker;
     private int _generation = -1;
     private int _consecutiveFailures;
@@ -42,6 +41,12 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
         if (_worker is { } existing && existing.HasExited)
         {
             Lost($"worker {Index} (pid {existing.ProcessId}) exited with 0x{existing.ExitCode ?? 0:X8}");
+        }
+        else if (_worker is { } chatty && chatty.HasUnsolicitedOutput)
+        {
+            // Review L3: a frame queued before the request could be taken as its answer. Replace the worker first;
+            // the file about to be scanned is not blamed.
+            Lost($"worker {Index} (pid {chatty.ProcessId}) wrote data nobody asked for");
         }
 
         if (_worker is null)
@@ -110,7 +115,8 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
         WorkerRequestKind kind, WorkerLoadRules? rules, WorkerScanRequest? scan, int maxBytes, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var worker = _worker ?? throw new WorkerRequestException(WorkerFailureKind.Unavailable, "No scan worker is running.");
-        var request = new WorkerRequest { Id = ++_nextId, Kind = kind, LoadRules = rules, Scan = scan, Probe = null };
+        // Random request IDs (review L3): a frame the worker queued in advance can't guess the ID it must echo.
+        var request = new WorkerRequest { Id = NewRequestId(), Kind = kind, LoadRules = rules, Scan = scan, Probe = null };
         try
         {
             return await WorkerChannel.ExchangeAsync(worker, request, maxBytes, timeout, cancellationToken).ConfigureAwait(false);
@@ -126,6 +132,9 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
             throw;
         }
     }
+
+    private static long NewRequestId() =>
+        BitConverter.ToInt64(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)) & long.MaxValue; // 63 random bits
 
     private void Lost(string why)
     {

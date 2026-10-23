@@ -76,6 +76,9 @@ public enum WorkerTestFault
 
     /// <summary>The worker answers with a response for another request ID.</summary>
     WrongIdResponse,
+
+    /// <summary>The worker answers normally, then writes an extra frame nobody asked for (review L3).</summary>
+    TrailingFrame,
 }
 
 /// <summary>Scan one file. The handles are values <b>in the worker's handle table</b>, duplicated there by the broker.</summary>

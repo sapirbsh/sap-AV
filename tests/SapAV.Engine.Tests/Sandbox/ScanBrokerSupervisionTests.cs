@@ -173,6 +173,28 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
     }
 
     [Fact]
+    public async Task UnsolicitedFrame_IsNeverTakenAsTheNextAnswer_TheWorkerIsReplaced_AndTheNextFileIsNotBlamed()
+    {
+        using var broker = Broker();
+        var first = await broker.ScanAsync(File(nameof(WorkerTestFault.TrailingFrame) + ".bin"));
+        Assert.Equal(Verdict.Clean, first.Result.Verdict); // its own answer came first and was valid
+
+        var worker = broker.Slots[0].Worker!;
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!worker.HasUnsolicitedOutput && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(worker.HasUnsolicitedOutput);
+        var next = await broker.ScanAsync(File("next.txt", "sapav-b5-marker"));
+
+        Assert.Equal(Verdict.Malicious, next.Result.Verdict); // scanned for real, not the queued "Failed" frame
+        Assert.Equal(1, broker.Status.WorkerRestarts);
+        Assert.NotSame(worker, broker.Slots[0].Worker);
+    }
+
+    [Fact]
     public async Task WorkerKilledFromOutside_EngineKeepsScanning()
     {
         using var broker = Broker();

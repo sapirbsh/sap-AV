@@ -180,6 +180,13 @@ internal sealed class WorkerProcess : IDisposable
         }
     }
 
+    /// <summary>
+    /// True if the worker has written bytes nobody asked for (review L3): between requests the response pipe must be
+    /// empty. A broken pipe counts as unsolicited too, so the worker gets replaced either way.
+    /// </summary>
+    public bool HasUnsolicitedOutput =>
+        !SandboxNative.PeekNamedPipe(_responses.SafePipeHandle, IntPtr.Zero, 0, IntPtr.Zero, out uint available, IntPtr.Zero) || available > 0;
+
     /// <summary>Kills the worker (and anything in its job). Idempotent.</summary>
     public void Kill()
     {
