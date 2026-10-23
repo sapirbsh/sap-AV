@@ -366,6 +366,12 @@ M3, M4, L1 and L4 are fixed in B3.
 - **X2 / B6 / B4 (L3):** worker text still partly reaches outputs: alerts carry 4×200 characters of reasons + signer + URL,
   and `ScanJobFileResult.Detail` carries worker note text (up to 512 characters) to pipe clients.
 - **B4 (L5):** Created-but-never-started jobs are never trimmed; B4 must cap them.
+- **B2 follow-up (from the H1 fix):** names ending in a dot or space (e.g. a Malicious `evil.exe.`) are detected and
+  alerted, but auto-quarantine refuses them as PathRedirected, because quarantine/restore (`SafeFile`, `SafeDirectory`)
+  still normalise with `GetFullPath`. This fails safe (never confused with `evil.exe`), but the user must act. Make
+  quarantine and restore use `ExactPath` (`\\?\` exact names).
+- **B3 follow-up (M4 detail):** deny ACEs are ignored when judging "user-modifiable", so a file can look modifiable
+  even if a deny ACE blocks the user (minor; it only makes such a file eligible).
 - **D1 (L6):** a writer holding a writable mapped view gets around deny-writers sharing (a scan race on the attacker's
   own file, an evasion, not a quarantine abuse).
 

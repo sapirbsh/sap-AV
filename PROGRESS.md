@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 built (review running) |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 being built |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -63,8 +63,8 @@ pass comes at the end.
 | B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Done** (`6b0e586`, review fixes `80f29a9`) |
 | B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
-| B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Built** (`4523493`, `687e259`, `fa9a712`); immediate review running |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
+| B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | Being built |
 | B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
 
 ## Current status — paused 2026-10-23, start here next session
