@@ -43,6 +43,12 @@ public sealed class SandboxOptions
 
     public TimeSpan RestartBackoffMax { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>A worker is replaced after scanning this many files (bounds how long anything it holds can live; review M1).</summary>
+    public int MaxFilesPerWorker { get; set; } = 500;
+
+    /// <summary>A worker is replaced after running this long (checked after each file; review M1).</summary>
+    public TimeSpan MaxWorkerLifetime { get; set; } = TimeSpan.FromMinutes(30);
+
     /// <summary>The worker exe; default <c>ScanWorker\SapAV.ScanWorker.exe</c> next to the engine.</summary>
     public string? WorkerPath { get; set; }
 
@@ -94,5 +100,7 @@ public sealed class SandboxOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxFailuresPerFile, 1, nameof(MaxFailuresPerFile));
         ArgumentOutOfRangeException.ThrowIfNegative(RestartBackoffInitial.Ticks, nameof(RestartBackoffInitial));
         ArgumentOutOfRangeException.ThrowIfLessThan(RestartBackoffMax, RestartBackoffInitial, nameof(RestartBackoffMax));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxFilesPerWorker, 1, nameof(MaxFilesPerWorker));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxWorkerLifetime, TimeSpan.FromSeconds(1), nameof(MaxWorkerLifetime));
     }
 }

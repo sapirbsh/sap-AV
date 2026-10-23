@@ -33,6 +33,26 @@ internal static class TestHooks
                 break;
         }
     }
+
+    private static readonly List<IntPtr> KeptCopies = [];
+
+    /// <summary>Simulates a compromised parser that keeps its own copy of a brokered handle.</summary>
+    public static void KeepCopy(long handle)
+    {
+        IntPtr self = GetCurrentProcess();
+        if (DuplicateHandle(self, (IntPtr)handle, self, out IntPtr copy, 0, false, 2 /* DUPLICATE_SAME_ACCESS */))
+        {
+            KeptCopies.Add(copy);
+        }
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target,
+        uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint options);
 }
 
 /// <summary>Operations the sandbox must block, each reported as succeeded / failed with the Win32 error.</summary>

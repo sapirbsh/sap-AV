@@ -134,6 +134,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             if (response.Kind == WorkerResponseKind.Failed)
             {
                 slot.Succeeded(); // the worker survived and said so
+                slot.CountFileAndMaybeRecycle();
                 return NotScanned(item, opened, notes, $"The scan worker could not scan the file: {SafeText.SingleLine(response.Error ?? "?", WorkerLimits.MaxTextLength)}");
             }
 
@@ -149,6 +150,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             }
 
             slot.Succeeded();
+            slot.CountFileAndMaybeRecycle();
             notes.AddRange(report.Notes);
             report = report with { Identity = opened.Identity, Notes = notes.AsReadOnly() };
             report = await OnlineLookupAsync(report, cancellationToken).ConfigureAwait(false);
@@ -249,6 +251,8 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         // MOTW: the broker opens the stream relative to its own handle; the worker can't (no access to user files).
         using var stream = NativeFile.OpenStreamRelative(opened.Handle, ":Zone.Identifier", out int streamError);
         IntPtr remoteFile = IntPtr.Zero, remoteStream = IntPtr.Zero;
+        int before = worker.HandleCount;
+        WorkerResponse response;
         try
         {
             remoteFile = worker.DuplicateInto(opened.Handle, WorkerProcess.ReadOnlyFileAccess);
@@ -265,7 +269,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
                 StreamOpenError = stream is null ? streamError : 0,
                 TestFault = FaultInjector?.Invoke(item) ?? WorkerTestFault.None,
             };
-            return await slot.ScanAsync(request, cancellationToken).ConfigureAwait(false);
+            response = await slot.ScanAsync(request, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -275,6 +279,19 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
                 worker.CloseInWorker(remoteStream);
             }
         }
+
+        // Review M1: a (compromised) worker could duplicate the brokered handle before the broker closes it, keeping the
+        // file readable and writer-blocked. Cheap trigger: the handle count grew over the request; then the precise check
+        // (does any worker handle name the same file or stream object?). Legitimate growth (crypto caches) never matches.
+        int after = worker.HandleCount;
+        if ((before < 0 || after < 0 || after > before) && worker.HoldsCopyOf(opened.Handle, stream))
+        {
+            slot.Discard($"worker {slot.Index} kept a copy of the brokered file handle (handles {before} -> {after})");
+            throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation,
+                "The scan worker kept a copy of the file handle after answering; it was killed and its answer discarded.");
+        }
+
+        return response;
     }
 
     private async Task<RulePackage> CurrentPackageAsync(CancellationToken cancellationToken)

@@ -102,6 +102,10 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             }
 
             TestHooks.Inject(scan.TestFault);
+            if (scan.TestFault == WorkerTestFault.KeepHandleCopy)
+            {
+                TestHooks.KeepCopy(scan.FileHandle);
+            }
         }
 
         if (_yara is null)

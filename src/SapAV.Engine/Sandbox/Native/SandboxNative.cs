@@ -266,6 +266,27 @@ internal static class SandboxNative
     [DllImport("advapi32.dll", SetLastError = true, ExactSpelling = true)]
     public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
 
+    // ---- Handles held by the worker (review M1) ----
+    public const int ProcessHandleInformation = 51;
+    public const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetProcessHandleCount(SafeProcessHandle process, out uint count);
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    public static extern unsafe int NtQueryInformationProcess(SafeProcessHandle process, int infoClass, void* info, uint length, out uint returned);
+
+    /// <summary>STATUS_SUCCESS (0) when both handles refer to the same kernel object (Windows 10 1607+).</summary>
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    public static extern int NtCompareObjects(IntPtr first, IntPtr second);
+
+    [DllImport("kernel32.dll", EntryPoint = "DuplicateHandle", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DuplicateHandleFrom(
+        SafeProcessHandle sourceProcess, IntPtr sourceHandle, IntPtr targetProcess, out IntPtr targetHandle,
+        uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint options);
+
     // ---- Pipes (review L3: unsolicited worker output) ----
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -18,6 +18,8 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     private int _generation = -1;
     private int _consecutiveFailures;
     private DateTimeOffset _notBefore = DateTimeOffset.MinValue;
+    private DateTimeOffset _startedAt;
+    private int _filesScanned;
 
     public SemaphoreSlim Lock { get; } = new(1, 1);
 
@@ -61,6 +63,8 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
             {
                 _worker = launcher.Start();
                 _generation = -1;
+                _startedAt = time.GetUtcNow();
+                _filesScanned = 0;
                 logger.LogDebug("Scan worker {Index} started (pid {Pid}).", Index, _worker.ProcessId);
             }
             catch (SandboxUnavailableException ex)
@@ -94,6 +98,32 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
 
     /// <summary>A request completed normally: the backoff starts over.</summary>
     public void Succeeded() => _consecutiveFailures = 0;
+
+    /// <summary>
+    /// After a file: replaces the worker once it has scanned <see cref="SandboxOptions.MaxFilesPerWorker"/> files or run for
+    /// <see cref="SandboxOptions.MaxWorkerLifetime"/> (review M1: bounds how long anything a worker holds can live).
+    /// A planned recycle, not a failure: no backoff, not counted as lost.
+    /// </summary>
+    public void CountFileAndMaybeRecycle()
+    {
+        if (_worker is null)
+        {
+            return;
+        }
+
+        if (++_filesScanned >= options.MaxFilesPerWorker || time.GetUtcNow() - _startedAt >= options.MaxWorkerLifetime)
+        {
+            logger.LogDebug("Recycling scan worker {Index} after {Files} files.", Index, _filesScanned);
+            Kill();
+            Recycles++;
+        }
+    }
+
+    /// <summary>Kills a misbehaving worker: counted as lost, with backoff.</summary>
+    public void Discard(string why) => Lost(why);
+
+    /// <summary>Planned recycles so far (tests, status).</summary>
+    public int Recycles { get; private set; }
 
     public void Kill()
     {

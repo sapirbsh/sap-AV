@@ -195,6 +195,67 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
     }
 
     [Fact]
+    public async Task WorkerKeepingACopyOfTheFileHandle_IsKilled_AnswerDiscarded_FileReleased()
+    {
+        using var broker = Broker();
+        var item = File(nameof(WorkerTestFault.KeepHandleCopy) + ".bin", "sapav-b5-marker");
+
+        var report = await broker.ScanAsync(item);
+
+        Assert.Equal(ScanStatus.Error, report.Result.Status); // the (possibly compromised) answer is not used
+        Assert.Contains(report.Notes, n => n.Message.Contains("kept a copy", StringComparison.Ordinal));
+        Assert.Equal(1, broker.Status.WorkerRestarts);
+        using (System.IO.File.OpenHandle(item.Path, FileMode.Open, FileAccess.Write))
+        {
+            // no copy is left to keep the file writer-blocked
+        }
+
+        Assert.Equal(Verdict.Clean, (await broker.ScanAsync(File("next.txt"))).Result.Verdict);
+    }
+
+    [Fact]
+    public async Task LegitimateScans_NeverTripTheHandleCheck()
+    {
+        using var broker = Broker();
+        var motw = File("download.exe", "MZ text");
+        System.IO.File.WriteAllText(motw.Path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+        var items = new[]
+        {
+            File("plain.txt"),
+            motw,
+            new ScanItem(Path.Combine(Environment.SystemDirectory, "cmd.exe"), ScanTrigger.CustomScan), // catalog lookup
+            new ScanItem(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll"), ScanTrigger.CustomScan),
+        };
+
+        for (int round = 0; round < 5; round++)
+        {
+            foreach (var item in items)
+            {
+                Assert.Equal(ScanStatus.Scanned, (await broker.ScanAsync(item)).Result.Status);
+            }
+        }
+
+        Assert.Equal(0, broker.Status.WorkerRestarts);
+    }
+
+    [Fact]
+    public async Task Workers_AreRecycledAfterMaxFiles_WithoutCountingAsFailures()
+    {
+        using var broker = Broker(configure: o => o.MaxFilesPerWorker = 3);
+        int firstPid = 0;
+        for (int i = 0; i < 4; i++)
+        {
+            var report = await broker.ScanAsync(File($"f{i}.txt"));
+            Assert.Equal(Verdict.Clean, report.Result.Verdict);
+            firstPid = i == 0 ? broker.Slots[0].Worker!.ProcessId : firstPid;
+        }
+
+        Assert.Equal(1, broker.Slots[0].Recycles);
+        Assert.Equal(0, broker.Status.WorkerRestarts);
+        Assert.NotEqual(firstPid, broker.Slots[0].Worker!.ProcessId);
+    }
+
+    [Fact]
     public async Task WorkerKilledFromOutside_EngineKeepsScanning()
     {
         using var broker = Broker();

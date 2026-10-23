@@ -180,6 +180,76 @@ internal sealed class WorkerProcess : IDisposable
         }
     }
 
+    /// <summary>The worker's open handle count (cheap trigger for <see cref="HoldsCopyOf"/>), or -1 if unknown.</summary>
+    public int HandleCount => SandboxNative.GetProcessHandleCount(Process, out uint count) ? (int)count : -1;
+
+    /// <summary>
+    /// Review M1: true if any handle in the worker refers to the same kernel object as one of
+    /// <paramref name="objects"/> (e.g. a brokered file the broker has already closed there). Each worker handle is
+    /// duplicated into the broker and compared with <c>NtCompareObjects</c>; nothing of the worker's is used otherwise.
+    /// An enumeration failure counts as true (the caller recycles the worker).
+    /// </summary>
+    public unsafe bool HoldsCopyOf(params SafeHandle?[] objects)
+    {
+        const int EntrySize = 40; // PROCESS_HANDLE_TABLE_ENTRY_INFO on x64
+        uint size = 64 * 1024;
+        for (int attempt = 0; attempt < 4; attempt++, size *= 4)
+        {
+            var buffer = new byte[size];
+            int status;
+            uint returned;
+            fixed (byte* p = buffer)
+            {
+                status = SandboxNative.NtQueryInformationProcess(Process, SandboxNative.ProcessHandleInformation, p, size, out returned);
+            }
+
+            if (status == SandboxNative.StatusInfoLengthMismatch)
+            {
+                continue;
+            }
+
+            if (status < 0)
+            {
+                return true;
+            }
+
+            long count = BitConverter.ToInt64(buffer, 0); // NumberOfHandles, then Reserved, then the entries
+            if (count < 0 || 16 + (count * EntrySize) > buffer.Length)
+            {
+                return true;
+            }
+
+            for (long i = 0; i < count; i++)
+            {
+                IntPtr value = (IntPtr)BitConverter.ToInt64(buffer, (int)(16 + (i * EntrySize)));
+                if (!SandboxNative.DuplicateHandleFrom(Process, value, SandboxNative.GetCurrentProcess(), out IntPtr copy, 0, false,
+                        SandboxNative.DuplicateSameAccess))
+                {
+                    continue; // e.g. closed meanwhile, or not duplicable
+                }
+
+                try
+                {
+                    foreach (var local in objects)
+                    {
+                        if (local is { IsInvalid: false, IsClosed: false } && SandboxNative.NtCompareObjects(copy, local.DangerousGetHandle()) == 0)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                finally
+                {
+                    SandboxNative.CloseHandle(copy);
+                }
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// True if the worker has written bytes nobody asked for (review L3): between requests the response pipe must be
     /// empty. A broken pipe counts as unsolicited too, so the worker gets replaced either way.
@@ -274,6 +344,10 @@ internal sealed class WorkerProcess : IDisposable
         }
 
         Kill();
+
+        // Termination is asynchronous: wait (bounded) until the process is gone, so everything it held, including any
+        // copy of a brokered file handle, is closed by the time the broker moves on.
+        WaitForExit(TimeSpan.FromSeconds(5));
         _requests.Dispose();
         _responses.Dispose();
         _job.Dispose(); // KILL_ON_JOB_CLOSE as well

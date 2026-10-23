@@ -79,6 +79,9 @@ public enum WorkerTestFault
 
     /// <summary>The worker answers normally, then writes an extra frame nobody asked for (review L3).</summary>
     TrailingFrame,
+
+    /// <summary>The worker duplicates the brokered file handle and keeps the copy (review M1).</summary>
+    KeepHandleCopy,
 }
 
 /// <summary>Scan one file. The handles are values <b>in the worker's handle table</b>, duplicated there by the broker.</summary>
