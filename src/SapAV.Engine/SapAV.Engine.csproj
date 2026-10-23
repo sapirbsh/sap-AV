@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-SapAV.Engine-365345aa-cf25-4786-beaf-5e835d74901b</UserSecretsId>
-    <!-- Quarantine interop (B2): handle-relative NtCreateFile, rename/delete by handle. -->
+    <!-- Quarantine interop (B2): handle-relative NtCreateFile, rename/delete by handle. Sandbox interop (B5). -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
@@ -21,5 +21,22 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SapAV.Core\SapAV.Core.csproj" />
+    <!-- B5: the sandboxed scan worker. Built first, not referenced as an assembly; its output goes to ScanWorker\. -->
+    <ProjectReference Include="..\SapAV.ScanWorker\SapAV.ScanWorker.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
+
+  <!--
+    Copies the worker's whole output (exe, dll, deps/runtimeconfig, SapAV.Core.dll, yara_x_capi.dll) into
+    $(OutDir)ScanWorker\ as ContentWithTargetPath items, so it also flows to projects that reference the engine (tests).
+    The worker gets its own folder so the AppContainer read/execute grant (dev/CI builds only) covers nothing else.
+  -->
+  <PropertyGroup>
+    <ScanWorkerOutputDir>$(MSBuildThisFileDirectory)..\SapAV.ScanWorker\bin\$(Configuration)\$(TargetFramework)\</ScanWorkerOutputDir>
+  </PropertyGroup>
+  <Target Name="IncludeScanWorkerOutput" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <_ScanWorkerFile Include="$(ScanWorkerOutputDir)**\*" />
+      <ContentWithTargetPath Include="@(_ScanWorkerFile)" TargetPath="ScanWorker\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 </Project>

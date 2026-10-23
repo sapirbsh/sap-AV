@@ -92,14 +92,25 @@ public sealed class MarkOfTheWebReader : IMarkOfTheWebReader
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var stream = NativeFile.OpenStreamRelative(file, ":" + StreamName, out int error);
-        if (stream is null)
+        return FromOpenedStream(stream, error);
+    }
+
+    /// <summary>
+    /// The result for an already opened <c>Zone.Identifier</c> stream (<paramref name="stream"/>), or for the Win32
+    /// error of a failed open (<paramref name="openError"/>, when <paramref name="stream"/> is null). Shared by this
+    /// reader and the sandboxed scan worker (B5), which gets the stream handle from the broker. Never throws for I/O;
+    /// the stream is not closed.
+    /// </summary>
+    internal static MarkOfTheWebResult FromOpenedStream(SafeFileHandle? stream, int openError)
+    {
+        if (stream is null || stream.IsInvalid)
         {
-            return error switch
+            return openError switch
             {
                 ErrorFileNotFound or ErrorPathNotFound => MarkOfTheWebResult.Absent(),
                 ErrorNotSupported or ErrorInvalidParameter or ErrorInvalidName =>
                     MarkOfTheWebResult.Absent("The file system has no alternate data streams."),
-                _ => MarkOfTheWebResult.NotRead(Sha256Hasher.MapWin32Error(error), $"Could not open the Zone.Identifier stream (Win32 error {error})."),
+                _ => MarkOfTheWebResult.NotRead(Sha256Hasher.MapWin32Error(openError), $"Could not open the Zone.Identifier stream (Win32 error {openError})."),
             };
         }
 

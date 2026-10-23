@@ -106,61 +106,35 @@ public sealed class FileScanner : IFileScanner
         cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>();
 
-        var opened = Open(item.Path, notes);
-        if (opened.Handle is null)
+        using var opened = ScanFileOpener.Open(item, notes, _time, out var failureReport);
+        if (opened is null)
         {
-            return NotHashed(item, HashResult.NotHashed(opened.Failure.Reason, opened.Failure.Message,
-                opened.Failure.Length, opened.Failure.LastWriteTimeUtc, opened.Failure.Attributes), notes, null, cancellationToken);
+            return failureReport!;
         }
 
-        using var handle = opened.Handle;
-        AfterOpenHook?.Invoke(handle);
+        AfterOpenHook?.Invoke(opened.Handle);
 
-        // Which file object this scan judged (B2: the quarantine acts only on this exact object).
-        var identity = FileIdentity.TryCapture(handle);
-        var report = await ScanOpenAsync(item, handle, notes, cancellationToken).ConfigureAwait(false) with { Identity = identity };
+        // Identity: which file object this scan judged (B2: the quarantine acts only on this exact object).
+        var report = await ScanOpenAsync(item, opened.Handle, notes, cancellationToken).ConfigureAwait(false) with { Identity = opened.Identity };
 
         // Shared fallback: the whole pipeline must have seen one unchanged version of the file.
-        if (opened.UsnBefore is { } before && (!NativeFile.TryGetUsn(handle, out long after) || after != before))
-        {
-            notes.Add(new(ScanNoteLevel.Warning,
-                $"{item.Path}: the file changed during the scan (it was open for writing by another program); not scanned."));
-            return report with
-            {
-                Result = ScanResult.NotScanned(item, ScanStatus.Error, Now),
-                Notes = notes.AsReadOnly(),
-            };
-        }
-
-        return report;
+        return ScanFileOpener.VerifyUnchanged(opened, report, notes, _time);
     }
 
-    private readonly record struct OpenedFile(SafeFileHandle? Handle, SecureOpenFailure Failure, long? UsnBefore);
-
-    /// <summary>Opens denying writers; if a writer has it open, a shared handle plus a USN baseline.</summary>
-    private static OpenedFile Open(string path, List<ScanNote> notes)
+    /// <summary>
+    /// Runs the pipeline on a file that is <b>already open</b> (B5: the sandboxed scan worker never opens a file by
+    /// path; the broker opened it with <see cref="ScanFileOpener"/> and passed a read-only duplicate of the handle).
+    /// Each step validates the handle; it is not closed. <see cref="FileScanReport.Identity"/> is null: the identity
+    /// and the change-journal check belong to whoever opened the file.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    public Task<FileScanReport> ScanHandleAsync(ScanItem item, SafeFileHandle handle, CancellationToken cancellationToken = default)
     {
-        var handle = SecureFile.OpenRegularFile(path, out var failure, out _, denyWriters: true);
-        if (handle is not null || failure.Reason != HashFailureReason.Locked)
-        {
-            return new(handle, failure, null);
-        }
-
-        handle = SecureFile.OpenRegularFile(path, out failure, out _, denyWriters: false);
-        if (handle is null)
-        {
-            return new(null, failure, null);
-        }
-
-        if (!NativeFile.TryGetUsn(handle, out long usn))
-        {
-            handle.Dispose();
-            return new(null, new SecureOpenFailure(HashFailureReason.Locked,
-                "The file is open for writing by another program and the volume has no change journal to detect changes."), null);
-        }
-
-        notes.Add(new(ScanNoteLevel.Information, $"{path} is open for writing by another program; scanned with a change-journal check."));
-        return new(handle, default, usn);
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(handle);
+        cancellationToken.ThrowIfCancellationRequested();
+        return ScanOpenAsync(item, handle, [], cancellationToken);
     }
 
     private async Task<FileScanReport> ScanOpenAsync(ScanItem item, SafeFileHandle handle, List<ScanNote> notes, CancellationToken cancellationToken)
@@ -271,17 +245,9 @@ public sealed class FileScanner : IFileScanner
 
                 return Report(hash.ToNotScannedResult(item, Now), hash, null, null, null, heuristics, notes);
 
-            case HashFailureReason.Offline:
-                notes.Add(new(ScanNoteLevel.Warning,
-                    $"Skipped (offline): {path} is an offline or cloud-only file; it was not downloaded to scan it."));
-                break;
-
             default:
-                notes.Add(new(ScanNoteLevel.Warning, $"Not scanned ({hash.FailureReason}): {path}: {hash.ErrorMessage}"));
-                break;
+                return ScanFileOpener.NotOpenedReport(item, hash, notes, Now);
         }
-
-        return Report(hash.ToNotScannedResult(item, Now), hash, null, null, null, null, notes);
     }
 
     private DateTimeOffset Now => _time.GetUtcNow();

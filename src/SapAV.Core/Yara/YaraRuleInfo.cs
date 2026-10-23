@@ -54,3 +54,8 @@ public sealed record YaraRuleInfo
 /// <param name="Name">Unique name, e.g. <c>antivirus-test-file.yar</c> or <c>third-party/x.yar</c>.</param>
 /// <param name="Text">YARA source.</param>
 public sealed record YaraRuleSource(string Name, string Text);
+
+/// <summary>A rule file's raw bytes, read but not yet compiled (see <see cref="YaraRuleSet.ReadDirectoryFiles"/>).</summary>
+/// <param name="Name">The path relative to the rules directory with <c>/</c> separators (also the YARA namespace).</param>
+/// <param name="Content">The file content (UTF-8 rule text, checked when compiled).</param>
+public sealed record YaraRuleFile(string Name, byte[] Content);

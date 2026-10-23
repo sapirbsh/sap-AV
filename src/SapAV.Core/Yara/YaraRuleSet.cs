@@ -124,6 +124,22 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
     public static YaraRuleSet LoadDirectory(
         string directory, CancellationToken cancellationToken = default, long maxRuleFileBytes = DefaultMaxRuleFileBytes)
     {
+        var files = ReadDirectoryFiles(directory, out var readErrors, cancellationToken, maxRuleFileBytes);
+        return FromFiles(files, readErrors, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads (never compiles) every <c>*.yar</c> file under <paramref name="directory"/>, the same files and names
+    /// <see cref="LoadDirectory"/> uses, sorted by name. Files that can't be read, or are over
+    /// <paramref name="maxRuleFileBytes"/>, are reported in <paramref name="readErrors"/>. Used by the engine (B5),
+    /// which reads the rule files and sends their bytes to the sandboxed worker that compiles them.
+    /// </summary>
+    /// <exception cref="DirectoryNotFoundException">The directory doesn't exist.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    public static IReadOnlyList<YaraRuleFile> ReadDirectoryFiles(
+        string directory, out IReadOnlyList<YaraRuleFileError> readErrors, CancellationToken cancellationToken = default,
+        long maxRuleFileBytes = DefaultMaxRuleFileBytes)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentOutOfRangeException.ThrowIfNegative(maxRuleFileBytes);
 
@@ -147,26 +163,57 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
             .OrderBy(f => f.Name, StringComparer.Ordinal)
             .ToArray();
 
-        var sources = new List<PreparedSource>();
+        var read = new List<YaraRuleFile>();
         var errors = new List<YaraRuleFileError>();
         foreach (var (full, name) in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                byte[] bytes = ReadRuleFile(full, maxRuleFileBytes);
-                if (PreparedSource.TryCreate(name, bytes, out var prepared, out var why))
-                {
-                    sources.Add(prepared);
-                }
-                else
-                {
-                    errors.Add(new YaraRuleFileError(name, [why]));
-                }
+                read.Add(new YaraRuleFile(name, ReadRuleFile(full, maxRuleFileBytes)));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 errors.Add(new YaraRuleFileError(name, [$"Could not read the file: {ex.Message}"]));
+            }
+        }
+
+        readErrors = errors.AsReadOnly();
+        return read.AsReadOnly();
+    }
+
+    /// <summary>
+    /// Compiles rule files that were already read (<see cref="ReadDirectoryFiles"/>, or bytes the engine sent to the
+    /// sandboxed worker). Content checks (UTF-8, no NUL), compilation and the module allowlist are exactly those of
+    /// <see cref="LoadDirectory"/>; <paramref name="readErrors"/> are carried into <see cref="FileErrors"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">A name is blank or used twice (case-insensitive).</exception>
+    /// <exception cref="InvalidOperationException">The YARA-X engine itself failed (see <see cref="LoadDirectory"/>).</exception>
+    public static YaraRuleSet FromFiles(
+        IEnumerable<YaraRuleFile> files, IEnumerable<YaraRuleFileError>? readErrors = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sources = new List<PreparedSource>();
+        var errors = new List<YaraRuleFileError>(readErrors ?? []);
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ArgumentNullException.ThrowIfNull(file);
+            ArgumentException.ThrowIfNullOrWhiteSpace(file.Name, nameof(files));
+            ArgumentNullException.ThrowIfNull(file.Content, nameof(files));
+            if (!names.Add(file.Name))
+            {
+                throw new ArgumentException($"Duplicate rule file name '{file.Name}'.", nameof(files));
+            }
+
+            if (PreparedSource.TryCreate(file.Name, file.Content, out var prepared, out var why))
+            {
+                sources.Add(prepared);
+            }
+            else
+            {
+                errors.Add(new YaraRuleFileError(file.Name, [why]));
             }
         }
 
