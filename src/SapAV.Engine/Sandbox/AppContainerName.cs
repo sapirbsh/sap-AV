@@ -107,7 +107,7 @@ internal static class AppContainerName
 
     private static bool IsSuffix(string text) => text.Length == SuffixBytes * 2 && text.All(char.IsAsciiHexDigitLower);
 
-    private static bool IsLocalSystem()
+    internal static bool IsLocalSystem()
     {
         using var self = WindowsIdentity.GetCurrent();
         return self.User?.IsWellKnown(WellKnownSidType.LocalSystemSid) == true;

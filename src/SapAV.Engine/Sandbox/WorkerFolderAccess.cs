@@ -1,5 +1,8 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+using SapAV.Engine.Quarantine;
+using N = SapAV.Engine.Quarantine.Native.QuarantineNative;
 
 namespace SapAV.Engine.Sandbox;
 
@@ -14,15 +17,22 @@ internal enum FolderGrantResult
 }
 
 /// <summary>
-/// The one ACL change the sandbox makes: the AppContainer must be able to <b>read and execute</b> the worker's own folder
-/// (the worker exe, its assemblies, <c>SapAV.Core.dll</c> and <c>yara_x_capi.dll</c>). The .NET runtime in
-/// <c>Program Files\dotnet</c> already allows ALL APPLICATION PACKAGES, and so does an install under Program Files, so
-/// in production this is normally a no-op. On a development or CI build folder it adds one inheritable
-/// ReadAndExecute entry for the specific AppContainer SID (not ALL APPLICATION PACKAGES), on that folder only.
+/// The AppContainer must be able to <b>read and execute</b> the worker's own folder (the worker exe, its assemblies,
+/// <c>SapAV.Core.dll</c>, <c>yara_x_capi.dll</c>). The .NET runtime in <c>Program Files\dotnet</c> already allows ALL
+/// APPLICATION PACKAGES, and so does an install under Program Files.
 /// </summary>
 /// <remarks>
-/// Never on user data: the folder must contain the worker exe, and the drive root, the profile folder, Desktop,
-/// Documents, Downloads, Temp and the Windows folder are refused outright. No write access is ever granted.
+/// <list type="bullet">
+/// <item><b>As SYSTEM (the service) no ACL is ever changed</b> (review M4): the installer places the worker where the
+/// container can read it. If the folder doesn't grant read/execute, the sandbox is unavailable (files NotScanned) and
+/// the reason is logged.</item>
+/// <item>Console / dev / CI runs under a user account may add one inheritable ReadAndExecute entry for the specific
+/// AppContainer SID (never ALL APPLICATION PACKAGES, never write access), and only on exactly
+/// <c>AppContext.BaseDirectory\ScanWorker</c>. That folder is opened through <see cref="SafeDirectory"/> (no reparse
+/// point anywhere on the path), and the DACL is read and written <b>by that handle</b>, so a junction swapped in can't
+/// redirect the change.</item>
+/// <item>Grant and revoke are serialized in-process (a read-modify-write of one DACL).</item>
+/// </list>
 /// </remarks>
 internal static class WorkerFolderAccess
 {
@@ -37,23 +47,44 @@ internal static class WorkerFolderAccess
     /// </summary>
     private static readonly object DaclGate = new();
 
-    /// <exception cref="SandboxUnavailableException">The folder is refused, or the ACL can't be read or changed.</exception>
-    public static FolderGrantResult Ensure(string workerExe, SecurityIdentifier appContainerSid)
+    /// <summary>The only folder a grant may touch: the worker folder next to the running engine.</summary>
+    public static string ExpectedFolder => Path.TrimEndingDirectorySeparator(Path.Combine(AppContext.BaseDirectory, "ScanWorker"));
+
+    /// <exception cref="SandboxUnavailableException">Not granted and not allowed to grant, the folder is refused, or the ACL can't be changed.</exception>
+    public static FolderGrantResult Ensure(string workerExe, SecurityIdentifier appContainerSid) =>
+        Ensure(workerExe, appContainerSid, AppContainerName.IsLocalSystem(), ExpectedFolder);
+
+    /// <summary>Test seam: the SYSTEM decision and the expected folder are parameters.</summary>
+    internal static FolderGrantResult Ensure(string workerExe, SecurityIdentifier appContainerSid, bool runningAsSystem, string expectedFolder)
     {
-        var folder = CheckedFolder(workerExe);
+        string folder = WorkerFolder(workerExe);
         try
         {
+            if (runningAsSystem)
+            {
+                // Read only (by path is fine: nothing is changed).
+                var current = new DirectoryInfo(folder).GetAccessControl(AccessControlSections.Access);
+                if (Grants(current, AllApplicationPackages) || Grants(current, appContainerSid))
+                {
+                    return FolderGrantResult.AlreadyGranted;
+                }
+
+                throw new SandboxUnavailableException(
+                    $"The scan worker folder {folder} doesn't let the worker's AppContainer read and execute it, and the engine never changes " +
+                    "ACLs when running as SYSTEM. Install sap-AV under Program Files (or let the installer grant ALL APPLICATION PACKAGES read/execute).");
+            }
+
+            using var handle = OpenExpected(folder, expectedFolder);
             lock (DaclGate)
             {
-                var info = new DirectoryInfo(folder);
-                var security = info.GetAccessControl(AccessControlSections.Access);
+                var security = ReadDacl(handle, folder);
                 if (Grants(security, AllApplicationPackages) || Grants(security, appContainerSid))
                 {
                     return FolderGrantResult.AlreadyGranted;
                 }
 
                 security.AddAccessRule(new FileSystemAccessRule(appContainerSid, Needed, Inherit, PropagationFlags.None, AccessControlType.Allow));
-                info.SetAccessControl(security);
+                WriteDacl(handle, security, folder);
                 return FolderGrantResult.Granted;
             }
         }
@@ -64,14 +95,17 @@ internal static class WorkerFolderAccess
     }
 
     /// <summary>Removes the explicit entry <see cref="Ensure"/> added for <paramref name="appContainerSid"/> (tests). Idempotent.</summary>
-    public static void Revoke(string workerExe, SecurityIdentifier appContainerSid)
+    public static void Revoke(string workerExe, SecurityIdentifier appContainerSid) => Revoke(workerExe, appContainerSid, ExpectedFolder);
+
+    internal static void Revoke(string workerExe, SecurityIdentifier appContainerSid, string expectedFolder)
     {
-        var info = new DirectoryInfo(CheckedFolder(workerExe));
+        string folder = WorkerFolder(workerExe);
+        using var handle = OpenExpected(folder, expectedFolder);
         lock (DaclGate)
         {
-            var security = info.GetAccessControl(AccessControlSections.Access);
+            var security = ReadDacl(handle, folder);
             security.PurgeAccessRules(appContainerSid);
-            info.SetAccessControl(security);
+            WriteDacl(handle, security, folder);
         }
     }
 
@@ -102,7 +136,7 @@ internal static class WorkerFolderAccess
         return inherits && (allowed & Needed) == Needed;
     }
 
-    private static string CheckedFolder(string workerExe)
+    private static string WorkerFolder(string workerExe)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workerExe);
         var exe = Path.GetFullPath(workerExe);
@@ -111,24 +145,48 @@ internal static class WorkerFolderAccess
             throw new SandboxUnavailableException($"The scan worker is missing: {exe}");
         }
 
-        var folder = Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(exe)!);
-        var refused = new[]
-            {
-                Path.GetPathRoot(folder),
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
-                Path.GetTempPath(),
-            }
-            .Where(p => !string.IsNullOrEmpty(p))
-            .Select(p => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p!)));
-        if (refused.Any(p => string.Equals(p, folder, StringComparison.OrdinalIgnoreCase)))
+        return Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(exe)!);
+    }
+
+    /// <summary>The folder must be exactly <paramref name="expected"/>, reached without any reparse point; then READ_CONTROL | WRITE_DAC on it.</summary>
+    private static SafeFileHandle OpenExpected(string folder, string expected)
+    {
+        if (!string.Equals(folder, Path.TrimEndingDirectorySeparator(Path.GetFullPath(expected)), StringComparison.OrdinalIgnoreCase))
         {
-            throw new SandboxUnavailableException($"Refusing to change the ACL of {folder}: the scan worker must live in its own folder.");
+            throw new SandboxUnavailableException(
+                $"Refusing to change the ACL of {folder}: only the worker folder next to the engine ({expected}) may be granted.");
         }
 
-        return folder;
+        using var validated = SafeDirectory.TryOpen(folder, out var failure, out string reason)
+            ?? throw new SandboxUnavailableException($"Refusing to change the ACL of {folder}: {failure}: {reason}");
+
+        // Reopen the same directory object (empty name relative to the validated handle) with the rights to change its DACL.
+        return N.OpenRelative(validated, string.Empty, N.ReadControl | N.WriteDac, N.ShareRead | N.ShareWrite | N.ShareDelete,
+                N.FileOpen, N.FileDirectoryFile | N.FileOpenReparsePoint, out int error, N.ObjCaseInsensitive | N.ObjDontReparse)
+            ?? throw new SandboxUnavailableException($"Could not open {folder} to change its ACL (Win32 error {error}).");
+    }
+
+    private static DirectorySecurity ReadDacl(SafeFileHandle handle, string folder)
+    {
+        var bytes = N.TryGetSecurity(handle, N.DaclSecurityInformation, out int error)
+            ?? throw new SandboxUnavailableException($"Could not read the ACL of {folder} (Win32 error {error}).");
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorBinaryForm(bytes, AccessControlSections.Access);
+        return security;
+    }
+
+    private static void WriteDacl(SafeFileHandle handle, DirectorySecurity security, string folder)
+    {
+        var sd = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+        var dacl = new byte[sd.DiscretionaryAcl!.BinaryLength];
+        sd.DiscretionaryAcl.GetBinaryForm(dacl, 0);
+
+        // Keep the folder's protected/unprotected state as it was; only the explicit entries change.
+        uint info = N.DaclSecurityInformation | (security.AreAccessRulesProtected ? N.ProtectedDaclSecurityInformation : N.UnprotectedDaclSecurityInformation);
+        int error = N.SetSecurity(handle, info, null, dacl);
+        if (error != 0)
+        {
+            throw new SandboxUnavailableException($"Could not change the ACL of {folder} (Win32 error {error}).");
+        }
     }
 }
