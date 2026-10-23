@@ -222,14 +222,15 @@ public sealed class MarkOfTheWebTests : IDisposable
         var heuristics = new FileHeuristics();
         var internet = MarkOfTheWeb.Parse(Encoding.ASCII.GetBytes(Typical));
         var trustedZone = MarkOfTheWeb.Parse("[ZoneTransfer]\nZoneId=2\n"u8);
-        var exe = _dir.WriteFile("tool.exe", SyntheticPe.Build(new byte[8192]));
-        var doc = _dir.WriteFile("notes.txt", "hello"u8.ToArray());
+        // In memory (same rule code as the handle path), so a real antivirus can't block the synthetic PE.
+        var exe = (Name: "tool.exe", Bytes: SyntheticPe.Build(new byte[8192]));
+        var doc = (Name: "notes.txt", Bytes: "hello"u8.ToArray());
 
         // Every call must really inspect the content (a blocked read would leave only name rules and pass vacuously).
-        HeuristicResult Inspect(string path, HeuristicContext context)
+        HeuristicResult Inspect((string Name, byte[] Bytes) file, HeuristicContext context)
         {
-            var r = heuristics.Analyze(path, context);
-            Assert.True(r.ContentInspected, $"{path}: content not inspected ({r.ContentError}).");
+            var r = heuristics.Analyze(file.Bytes, SyntheticPe.FakeTempPath(file.Name), context);
+            Assert.True(r.ContentInspected, $"{file.Name}: content not inspected ({r.ContentError}).");
             return r;
         }
 
@@ -241,7 +242,10 @@ public sealed class MarkOfTheWebTests : IDisposable
         Assert.Contains(trusted.Findings, f => f.Kind == HeuristicKind.UnsignedExecutable); // control: the PE was parsed
         Assert.DoesNotContain(trusted.Findings, f => f.Kind == HeuristicKind.InternetOrigin);
         Assert.DoesNotContain(Inspect(doc, new HeuristicContext(MarkOfTheWeb: internet)).Findings, f => f.Kind == HeuristicKind.InternetOrigin);
-        Assert.DoesNotContain(Inspect(exe, new HeuristicContext(SyntheticPe.TrustedSignature(), internet)).Findings,
-            f => f.Kind == HeuristicKind.InternetOrigin);
+
+        var signed = Inspect(exe, new HeuristicContext(SyntheticPe.TrustedSignature(), internet));
+        Assert.DoesNotContain(signed.Findings, f => f.Kind == HeuristicKind.InternetOrigin);
+        var tampered = Inspect(exe, new HeuristicContext(SyntheticPe.Tampered(), internet));
+        Assert.Contains(tampered.Findings, f => f.Kind == HeuristicKind.InternetOrigin); // control: a broken signature isn't trusted
     }
 }

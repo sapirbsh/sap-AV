@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using SapAV.Core.Hashing;
+using SapAV.Core.Heuristics;
 using SapAV.Core.Signatures;
 
 namespace SapAV.Core.Tests.TestSupport;
@@ -60,6 +61,13 @@ public enum Requires
 
     /// <summary>The temp volume has an active NTFS change journal (USN), so a file reports a non-zero USN.</summary>
     UsnJournal,
+
+    /// <summary>
+    /// Every <see cref="SyntheticPe.OnDiskSamples"/> file can be written to %TEMP% and read back through the
+    /// heuristics' hardened open. Unmet only when a real antivirus is explicitly detected blocking one
+    /// (ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED); any other failure counts as met, so the test runs and fails loudly.
+    /// </summary>
+    SyntheticPeOnDisk,
 }
 
 /// <summary>Probes each <see cref="Requires"/> once per test process (lazily, at discovery time).</summary>
@@ -102,6 +110,7 @@ internal static class TestRequirements
             : "none of the known Microsoft certificates is in a local certificate store"),
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
         [Requires.UsnJournal] = new(ProbeUsnJournal),
+        [Requires.SyntheticPeOnDisk] = new(ProbeSyntheticPeOnDisk),
     };
 
     /// <summary>Set to 1 to run the tests that write the EICAR test file to disk.</summary>
@@ -321,6 +330,58 @@ internal static class TestRequirements
         {
             DeleteProbeDir(dir);
         }
+    }
+
+    private static string? ProbeSyntheticPeOnDisk()
+    {
+        var dir = ProbeDir();
+        try
+        {
+            foreach (var sample in SyntheticPe.OnDiskSamples)
+            {
+                var path = Path.Combine(dir, sample.Name);
+                Exception? writeError = null;
+                HeuristicResult? result = null;
+                try
+                {
+                    File.WriteAllBytes(path, sample.Bytes);
+                    result = sample.Heuristics().Analyze(path, HeuristicContext.None);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    writeError = ex;
+                }
+
+                if (AntivirusBlockReason(writeError, result) is { } why)
+                {
+                    return $"{sample.Name}: {why}";
+                }
+            }
+
+            return null;
+        }
+        finally
+        {
+            DeleteProbeDir(dir);
+        }
+    }
+
+    /// <summary>
+    /// A skip reason only if a real antivirus was explicitly detected blocking the write or the read; null for
+    /// success and for every other failure (those must surface as test failures, never as skips).
+    /// </summary>
+    internal static string? AntivirusBlockReason(Exception? writeError, HeuristicResult? result)
+    {
+        if (writeError is not null)
+        {
+            return Sha256Hasher.TryClassify(writeError, out var reason) && reason == HashFailureReason.BlockedByAntivirus
+                ? $"a real antivirus blocked writing the synthetic PE to %TEMP%: {writeError.Message}"
+                : null;
+        }
+
+        return result is { ContentInspected: false, ContentFailureReason: HashFailureReason.BlockedByAntivirus }
+            ? $"a real antivirus blocked reading the synthetic PE back: {result.ContentError}"
+            : null;
     }
 
     private static string? ProbeNotepad()

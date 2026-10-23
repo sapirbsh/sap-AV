@@ -1,3 +1,4 @@
+using SapAV.Core.Hashing;
 using SapAV.Core.Models;
 using SapAV.Core.Motw;
 using SapAV.Core.Signatures;
@@ -55,13 +56,16 @@ public sealed record HeuristicContext(SignatureCheckResult? Signature = null, Ma
 /// </summary>
 public sealed record HeuristicResult
 {
-    internal HeuristicResult(IReadOnlyList<HeuristicFinding> findings, int threshold, bool contentInspected, string? contentError)
+    internal HeuristicResult(
+        IReadOnlyList<HeuristicFinding> findings, int threshold, bool contentInspected, string? contentError,
+        HashFailureReason contentFailureReason = HashFailureReason.None)
     {
         Findings = findings;
         Threshold = threshold;
         Score = findings.Sum(f => f.Score);
         ContentInspected = contentInspected;
         ContentError = contentError;
+        ContentFailureReason = contentInspected ? HashFailureReason.None : contentFailureReason;
         Detection = Score >= threshold && findings.Count > 0 ? BuildDetection() : null;
     }
 
@@ -77,6 +81,13 @@ public sealed record HeuristicResult
     public bool ContentInspected { get; }
 
     public string? ContentError { get; }
+
+    /// <summary>
+    /// Why the content wasn't inspected (e.g. <see cref="HashFailureReason.BlockedByAntivirus"/> when a real antivirus
+    /// refused the open or read); <see cref="HashFailureReason.None"/> when it was inspected, or when the reason is
+    /// unknown (the scan worker's wire report carries only <see cref="ContentError"/>).
+    /// </summary>
+    public HashFailureReason ContentFailureReason { get; }
 
     /// <summary>A Suspicious detection (source Heuristic) when <see cref="Score"/> reaches <see cref="Threshold"/>; else null.</summary>
     public Detection? Detection { get; }

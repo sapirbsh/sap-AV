@@ -103,10 +103,10 @@ public sealed class FileHeuristics : IFileHeuristics
         using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
         if (handle is null)
         {
-            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message);
+            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
-        return AnalyzeValidated(handle, path, context, cancellationToken);
+        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -119,23 +119,41 @@ public sealed class FileHeuristics : IFileHeuristics
 
         if (!SecureFile.Validate(handle, out var failure, out _))
         {
-            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message);
+            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
-        return AnalyzeValidated(handle, path, context, cancellationToken);
+        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken);
     }
 
-    private HeuristicResult AnalyzeValidated(SafeFileHandle handle, string path, HeuristicContext context, CancellationToken cancellationToken)
+    /// <summary>
+    /// The same rules on content already in memory: exactly the PE parsing, entropy, padding and overlay code
+    /// the handle path runs, reading <paramref name="content"/> instead of a file. <paramref name="path"/> is only
+    /// used for the name and folder rules and is never opened, so nothing touches the disk (the unit tests use
+    /// this, so a real antivirus can't block their synthetic PE files; the scan pipeline reads by handle).
+    /// The result always has <see cref="HeuristicResult.ContentInspected"/> set.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    internal HeuristicResult Analyze(ReadOnlyMemory<byte> content, string path, HeuristicContext context, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(context);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return AnalyzeValidated(new MemoryContent(content), path, context, cancellationToken);
+    }
+
+    private HeuristicResult AnalyzeValidated(Content content, string path, HeuristicContext context, CancellationToken cancellationToken)
     {
         var findings = NameFindings(path);
         try
         {
-            InspectContent(handle, path, context, findings, cancellationToken);
+            InspectContent(content, path, context, findings, cancellationToken);
             return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: true, null);
         }
-        catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out _))
+        catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out var reason))
         {
-            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: false, ex.Message);
+            return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: false, ex.Message, reason);
         }
     }
 
@@ -160,11 +178,11 @@ public sealed class FileHeuristics : IFileHeuristics
     }
 
     private void InspectContent(
-        SafeFileHandle handle, string path, HeuristicContext context, List<HeuristicFinding> findings, CancellationToken cancellationToken)
+        Content content, string path, HeuristicContext context, List<HeuristicFinding> findings, CancellationToken cancellationToken)
     {
-        long length = RandomAccess.GetLength(handle);
+        long length = content.Length;
         var head = new byte[(int)Math.Min(PeHeaders.HeaderReadSize, length)];
-        int headLength = ReadFully(handle, head, 0);
+        int headLength = ReadFully(content, head, 0);
         var pe = PeHeaders.TryParse(head.AsSpan(0, headLength), length);
 
         bool isExecutable = pe is not null || FileNameRules.ScriptExtensions.Contains(Path.GetExtension(path));
@@ -172,7 +190,7 @@ public sealed class FileHeuristics : IFileHeuristics
 
         if (pe is not null && length > MaxSizeBytes)
         {
-            if (IsPadded(handle, pe, length, cancellationToken) is { } overlayPercent)
+            if (IsPadded(content, pe, length, cancellationToken) is { } overlayPercent)
             {
                 findings.Add(new(HeuristicKind.PaddedOversizedExecutable, PaddingScore,
                     $"executable is {length} bytes, over the {MaxSizeBytes}-byte scan limit, and {overlayPercent}% of it is padding",
@@ -181,7 +199,7 @@ public sealed class FileHeuristics : IFileHeuristics
         }
         else if (pe is not null && !trusted)
         {
-            var entropy = SectionEntropy(handle, pe, cancellationToken);
+            var entropy = SectionEntropy(content, pe, cancellationToken);
             if (entropy is { } bits && bits >= HighEntropyBitsPerByte)
             {
                 findings.Add(new(HeuristicKind.HighEntropyExecutable, HighEntropyScore,
@@ -213,7 +231,7 @@ public sealed class FileHeuristics : IFileHeuristics
     }
 
     /// <summary>Entropy of the PE section data (not headers or overlay), or null if there is too little.</summary>
-    private static double? SectionEntropy(SafeFileHandle handle, PeHeaders pe, CancellationToken cancellationToken)
+    private static double? SectionEntropy(Content content, PeHeaders pe, CancellationToken cancellationToken)
     {
         var entropy = new ShannonEntropy();
         var buffer = ArrayPool<byte>.Shared.Rent(ReadBufferSize);
@@ -225,7 +243,7 @@ public sealed class FileHeuristics : IFileHeuristics
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     int want = (int)Math.Min(ReadBufferSize, size - done);
-                    int read = RandomAccess.Read(handle, buffer.AsSpan(0, want), offset + done);
+                    int read = content.Read(buffer.AsSpan(0, want), offset + done);
                     if (read == 0)
                     {
                         break;
@@ -245,7 +263,7 @@ public sealed class FileHeuristics : IFileHeuristics
     }
 
     /// <summary>The overlay's share of the file in percent if it is padding; otherwise null.</summary>
-    private static int? IsPadded(SafeFileHandle handle, PeHeaders pe, long length, CancellationToken cancellationToken)
+    private static int? IsPadded(Content content, PeHeaders pe, long length, CancellationToken cancellationToken)
     {
         long overlay = length - pe.ImageEnd;
         if (overlay < length / 2 || overlay < PaddingSampleSize)
@@ -259,7 +277,7 @@ public sealed class FileHeuristics : IFileHeuristics
             cancellationToken.ThrowIfCancellationRequested();
             // Evenly spaced through the overlay; i == PaddingSampleCount is the very end of the file.
             long offset = pe.ImageEnd + ((overlay - PaddingSampleSize) * i / PaddingSampleCount);
-            int read = ReadFully(handle, sample, offset);
+            int read = ReadFully(content, sample, offset);
             if (read < PaddingSampleSize || ShannonEntropy.Of(sample) > PaddingMaxEntropy)
             {
                 return null;
@@ -269,12 +287,12 @@ public sealed class FileHeuristics : IFileHeuristics
         return (int)(overlay * 100 / length);
     }
 
-    private static int ReadFully(SafeFileHandle handle, byte[] buffer, long offset)
+    private static int ReadFully(Content content, byte[] buffer, long offset)
     {
         int total = 0;
         while (total < buffer.Length)
         {
-            int read = RandomAccess.Read(handle, buffer.AsSpan(total), offset + total);
+            int read = content.Read(buffer.AsSpan(total), offset + total);
             if (read == 0)
             {
                 break;
@@ -284,5 +302,43 @@ public sealed class FileHeuristics : IFileHeuristics
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Random-access, read-only content for the rules: an open file handle or bytes in memory. Both run the same
+    /// rule code; only the reads differ.
+    /// </summary>
+    private abstract class Content
+    {
+        public abstract long Length { get; }
+
+        /// <summary>Reads up to <c>buffer.Length</c> bytes at <paramref name="offset"/>; 0 at or past the end.</summary>
+        public abstract int Read(Span<byte> buffer, long offset);
+    }
+
+    private sealed class HandleContent(SafeFileHandle handle) : Content
+    {
+        public override long Length => RandomAccess.GetLength(handle);
+
+        public override int Read(Span<byte> buffer, long offset) => RandomAccess.Read(handle, buffer, offset);
+    }
+
+    private sealed class MemoryContent(ReadOnlyMemory<byte> bytes) : Content
+    {
+        public override long Length => bytes.Length;
+
+        public override int Read(Span<byte> buffer, long offset)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(offset); // same contract as RandomAccess.Read
+            if (offset >= bytes.Length)
+            {
+                return 0;
+            }
+
+            var source = bytes.Span[(int)offset..];
+            int count = Math.Min(buffer.Length, source.Length);
+            source[..count].CopyTo(buffer);
+            return count;
+        }
     }
 }

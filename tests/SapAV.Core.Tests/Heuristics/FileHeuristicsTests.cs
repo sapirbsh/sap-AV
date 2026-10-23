@@ -1,3 +1,4 @@
+using SapAV.Core.Hashing;
 using SapAV.Core.Heuristics;
 using SapAV.Core.Mitre;
 using SapAV.Core.Models;
@@ -7,8 +8,20 @@ namespace SapAV.Core.Tests.Heuristics;
 
 /// <summary>
 /// Heuristic rules: positive and negative cases for each, the score threshold, and that heuristics alone are
-/// never Malicious. Test files live under %TEMP%, so the risky-folder rule (Temp) applies to executables here.
+/// never Malicious.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The PE rules are tested <b>in memory</b> (<see cref="AnalyzeInMemory"/>): the same rule code as the handle path,
+/// but a real antivirus never sees a synthetic PE file, so it can't block it. The in-memory path is under a fake
+/// Temp folder (<see cref="SyntheticPe.FakeTempPath"/>), so the risky-folder rule applies to executables.
+/// </para>
+/// <para>
+/// The real handle/I/O path is covered by marker-free non-PE files in %TEMP% (<see cref="AnalyzeOnDisk"/>) and by
+/// <see cref="OnDisk_SyntheticPe_PathAndHandle_MatchInMemory"/>, which is skipped (with the reason) only when a
+/// real antivirus is explicitly detected blocking the synthetic PE files (<see cref="Requires.SyntheticPeOnDisk"/>).
+/// </para>
+/// </remarks>
 public sealed class FileHeuristicsTests : IDisposable
 {
     private readonly TempDirectory _dir = new();
@@ -17,15 +30,27 @@ public sealed class FileHeuristicsTests : IDisposable
     public void Dispose() => _dir.Dispose();
 
     /// <summary>
-    /// Writes and analyses a temp file. Fails loudly if the content wasn't inspected (e.g. a real antivirus blocked the
-    /// open or read): otherwise only the name rules run, and a negative assertion about a content rule would pass vacuously.
+    /// Writes and analyses a temp file (no PE content, so nothing for an antivirus to object to). Fails loudly if
+    /// the content wasn't inspected: otherwise only the name rules run, and a negative assertion would pass vacuously.
     /// </summary>
-    private HeuristicResult Analyze(string name, byte[] content, HeuristicContext? context = null, FileHeuristics? heuristics = null)
+    private HeuristicResult AnalyzeOnDisk(string name, byte[] content, HeuristicContext? context = null)
     {
-        var result = (heuristics ?? _heuristics).Analyze(_dir.WriteFile(name, content), context ?? HeuristicContext.None);
-        Assert.True(result.ContentInspected, $"{name}: content not inspected ({result.ContentError}); the content rules did not run.");
+        var result = _heuristics.Analyze(_dir.WriteFile(name, content), context ?? HeuristicContext.None);
+        AssertInspected(name, result);
         return result;
     }
+
+    /// <summary>Analyses <paramref name="content"/> in memory as if it were <c>%TEMP%\<paramref name="name"/></c>.</summary>
+    private HeuristicResult AnalyzeInMemory(string name, byte[] content, HeuristicContext? context = null, FileHeuristics? heuristics = null)
+    {
+        var result = (heuristics ?? _heuristics).Analyze(content, SyntheticPe.FakeTempPath(name), context ?? HeuristicContext.None);
+        AssertInspected(name, result);
+        return result;
+    }
+
+    private static void AssertInspected(string name, HeuristicResult result) =>
+        Assert.True(result.ContentInspected,
+            $"{name}: content not inspected ({result.ContentFailureReason}: {result.ContentError}); the content rules did not run.");
 
     /// <summary>Unsigned context: a parsed PE then always gets <see cref="HeuristicKind.UnsignedExecutable"/> (a positive control).</summary>
     private static HeuristicContext UnsignedContext => new(SyntheticPe.Unsigned());
@@ -51,7 +76,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void DoubleExtension_AloneIsSuspicious_NeverMalicious()
     {
-        var result = Analyze("invoice.pdf.exe", "not really a program"u8.ToArray());
+        var result = AnalyzeOnDisk("invoice.pdf.exe", "not really a program"u8.ToArray());
 
         Assert.Equal([HeuristicKind.DoubleExtension], Kinds(result));
         var detection = Assert.IsType<Detection>(result.Detection);
@@ -64,7 +89,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void RightToLeftOverride_IsFlagged()
     {
-        var result = Analyze("invoice\u202Efdp.exe", [1, 2, 3]);
+        var result = AnalyzeOnDisk("invoice\u202Efdp.exe", [1, 2, 3]);
 
         Assert.Contains(HeuristicKind.RightToLeftOverride, Kinds(result));
         Assert.True(result.IsSuspicious);
@@ -86,7 +111,7 @@ public sealed class FileHeuristicsTests : IDisposable
         Assert.Equal(expected, FileNameRules.ClassifyFolder(path));
     }
 
-    // --- Entropy / packing ---
+    // --- Entropy / packing (in memory) ---
 
     [Fact]
     public void Entropy_Extremes()
@@ -99,8 +124,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void PackedUnsignedExecutableInTemp_IsSuspicious_WithPackingAsPrimaryTechnique()
     {
-        var result = Analyze("tool.exe", SyntheticPe.Build(SyntheticPe.Random(64 * 1024)),
-            new HeuristicContext(SyntheticPe.Unsigned()));
+        var result = AnalyzeInMemory("tool.exe", SyntheticPe.Build(SyntheticPe.Random(64 * 1024)), UnsignedContext);
 
         Assert.Equal([HeuristicKind.HighEntropyExecutable, HeuristicKind.UnsignedExecutable, HeuristicKind.RiskyFolderExecutable], Kinds(result));
         Assert.Equal(FileHeuristics.HighEntropyScore + FileHeuristics.UnsignedScore + FileHeuristics.RiskyFolderScore, result.Score);
@@ -113,7 +137,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void LowEntropyExecutable_HasNoPackingFinding_AndWeakSignalsStayUnderThreshold()
     {
-        var result = Analyze("tool.exe", SyntheticPe.Build(new byte[64 * 1024]), new HeuristicContext(SyntheticPe.Unsigned()));
+        var result = AnalyzeInMemory("tool.exe", SyntheticPe.Build(new byte[64 * 1024]), UnsignedContext);
 
         Assert.Equal([HeuristicKind.UnsignedExecutable, HeuristicKind.RiskyFolderExecutable], Kinds(result));
         Assert.False(result.IsSuspicious);
@@ -125,7 +149,7 @@ public sealed class FileHeuristicsTests : IDisposable
     {
         // Like an installer: normal sections, compressed payload appended after them.
         var pe = SyntheticPe.Build(new byte[16 * 1024]);
-        var result = Analyze("installer.exe", [.. pe, .. SyntheticPe.Random(256 * 1024)], UnsignedContext);
+        var result = AnalyzeInMemory("installer.exe", [.. pe, .. SyntheticPe.Random(256 * 1024)], UnsignedContext);
 
         Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(result)); // control: the PE was parsed
         Assert.DoesNotContain(HeuristicKind.HighEntropyExecutable, Kinds(result));
@@ -134,7 +158,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void HighEntropyNonExecutable_HasNoFindings()
     {
-        var result = Analyze("photos.zip", SyntheticPe.Random(64 * 1024));
+        var result = AnalyzeOnDisk("photos.zip", SyntheticPe.Random(64 * 1024));
 
         Assert.Empty(result.Findings);
         Assert.True(result.ContentInspected);
@@ -144,13 +168,13 @@ public sealed class FileHeuristicsTests : IDisposable
     public void TrustedSignature_CancelsWeakSignals_ButNotMasquerading()
     {
         var packedBytes = SyntheticPe.Build(SyntheticPe.Random(64 * 1024));
-        var control = Analyze("tool-unsigned.exe", packedBytes, UnsignedContext);
+        var control = AnalyzeInMemory("tool-unsigned.exe", packedBytes, UnsignedContext);
         Assert.Contains(HeuristicKind.HighEntropyExecutable, Kinds(control)); // control: the same bytes do trigger the content rule
 
-        var packed = Analyze("tool.exe", packedBytes, new HeuristicContext(SyntheticPe.TrustedSignature()));
+        var packed = AnalyzeInMemory("tool.exe", packedBytes, new HeuristicContext(SyntheticPe.TrustedSignature()));
         Assert.Empty(packed.Findings);
 
-        var masquerading = Analyze("invoice.pdf.exe", SyntheticPe.Build(new byte[8192]), new HeuristicContext(SyntheticPe.TrustedSignature()));
+        var masquerading = AnalyzeInMemory("invoice.pdf.exe", SyntheticPe.Build(new byte[8192]), new HeuristicContext(SyntheticPe.TrustedSignature()));
         Assert.Equal([HeuristicKind.DoubleExtension], Kinds(masquerading));
         Assert.True(masquerading.IsSuspicious);
     }
@@ -158,27 +182,29 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void BrokenSignature_ScoresMoreThanUnsigned()
     {
-        var result = Analyze("tool.exe", SyntheticPe.Build(new byte[8192]), new HeuristicContext(SyntheticPe.Tampered()));
+        var result = AnalyzeInMemory("tool.exe", SyntheticPe.Build(new byte[8192]), new HeuristicContext(SyntheticPe.Tampered()));
 
         var finding = Assert.Single(result.Findings, f => f.Kind == HeuristicKind.BrokenSignature);
         Assert.Equal(FileHeuristics.BrokenSignatureScore, finding.Score);
+        Assert.True(FileHeuristics.BrokenSignatureScore > FileHeuristics.UnsignedScore);
         Assert.Contains("HashMismatch", finding.Reason);
+        Assert.DoesNotContain(HeuristicKind.UnsignedExecutable, Kinds(result));
     }
 
     [Fact]
     public void ScriptInTemp_IsRiskyFolderExecutable_ByName()
     {
-        Assert.Equal([HeuristicKind.RiskyFolderExecutable], Kinds(Analyze("run.ps1", "Write-Output 1"u8.ToArray())));
-        Assert.Empty(Analyze("notes.txt", "hello"u8.ToArray()).Findings);
+        Assert.Equal([HeuristicKind.RiskyFolderExecutable], Kinds(AnalyzeOnDisk("run.ps1", "Write-Output 1"u8.ToArray())));
+        Assert.Empty(AnalyzeOnDisk("notes.txt", "hello"u8.ToArray()).Findings);
     }
 
-    // --- Padded oversized executables (carried over from the A2 review) ---
+    // --- Padded oversized executables (carried over from the A2 review; in memory) ---
 
     [Fact]
     public void OversizedExecutable_PaddedWithZeros_IsSuspicious()
     {
         var small = new FileHeuristics(maxSizeBytes: 64 * 1024);
-        var result = Analyze("big.exe", SyntheticPe.Build(SyntheticPe.Random(8192), overlayLength: 1024 * 1024), heuristics: small);
+        var result = AnalyzeInMemory("big.exe", SyntheticPe.Build(SyntheticPe.Random(8192), overlayLength: 1024 * 1024), heuristics: small);
 
         var finding = Assert.Single(result.Findings, f => f.Kind == HeuristicKind.PaddedOversizedExecutable);
         Assert.Contains("padding", finding.Reason);
@@ -196,7 +222,7 @@ public sealed class FileHeuristicsTests : IDisposable
             ? SyntheticPe.Build(new byte[8192], 1024 * 1024, (byte)overlayByte)
             : [.. SyntheticPe.Build(new byte[8192]), .. SyntheticPe.Random(1024 * 1024)];
 
-        var kinds = Kinds(Analyze("big.exe", pe, UnsignedContext, small));
+        var kinds = Kinds(AnalyzeInMemory("big.exe", pe, UnsignedContext, small));
 
         Assert.Contains(HeuristicKind.UnsignedExecutable, kinds); // control: the PE headers were parsed
         Assert.Equal(padded, kinds.Contains(HeuristicKind.PaddedOversizedExecutable));
@@ -205,7 +231,7 @@ public sealed class FileHeuristicsTests : IDisposable
     [Fact]
     public void ZeroPaddedExecutable_UnderTheLimit_IsNotPaddingFinding()
     {
-        var result = Analyze("ok.exe", SyntheticPe.Build(new byte[8192], overlayLength: 1024 * 1024), UnsignedContext);
+        var result = AnalyzeInMemory("ok.exe", SyntheticPe.Build(new byte[8192], overlayLength: 1024 * 1024), UnsignedContext);
 
         Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(result)); // control: the PE was parsed
         Assert.DoesNotContain(HeuristicKind.PaddedOversizedExecutable, Kinds(result));
@@ -221,6 +247,65 @@ public sealed class FileHeuristicsTests : IDisposable
         }
     }
 
+    // --- In-memory path ---
+
+    [Fact]
+    public void InMemory_NeverOpensThePath()
+    {
+        // The path names nothing on disk: content rules still run on the bytes, name/folder rules on the path.
+        var missing = _dir.File("missing.pdf.exe");
+        var result = _heuristics.Analyze(SyntheticPe.Build(SyntheticPe.Random(64 * 1024)), missing, UnsignedContext);
+
+        Assert.False(File.Exists(missing));
+        AssertInspected(missing, result);
+        Assert.Equal([HeuristicKind.DoubleExtension, HeuristicKind.HighEntropyExecutable, HeuristicKind.UnsignedExecutable,
+            HeuristicKind.RiskyFolderExecutable], Kinds(result));
+    }
+
+    [Fact]
+    public void InMemory_EmptyAndTruncatedContent_DoNotThrow()
+    {
+        Assert.Empty(AnalyzeInMemory("empty.exe", [], UnsignedContext).Findings);
+
+        // Headers claim 8 KiB of section data that isn't there: parsed as a PE, nothing read out of range.
+        var truncated = SyntheticPe.Build(new byte[8192])[..0x500];
+        Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(AnalyzeInMemory("cut.exe", truncated, UnsignedContext)));
+    }
+
+    // --- On-disk synthetic PE: the real handle/I/O path ---
+
+    public static TheoryData<string> OnDiskPeSamples => new(SyntheticPe.OnDiskSamples.Select(s => s.Name));
+
+    /// <summary>
+    /// The path and handle overloads read a real file and must give exactly the in-memory findings, including the
+    /// sample's content finding (proof the section/overlay reads went through the file). Skipped only when a real
+    /// antivirus is detected blocking the samples; a block that appears after the probe still fails here.
+    /// </summary>
+    [RequiresTheory(Requires.SyntheticPeOnDisk)]
+    [MemberData(nameof(OnDiskPeSamples))]
+    public void OnDisk_SyntheticPe_PathAndHandle_MatchInMemory(string name)
+    {
+        var sample = SyntheticPe.OnDisk(name);
+        var heuristics = sample.Heuristics();
+        var path = _dir.WriteFile(name, sample.Bytes);
+
+        var byPath = heuristics.Analyze(path, UnsignedContext);
+        HeuristicResult byHandle;
+        using (var handle = File.OpenHandle(path))
+        {
+            byHandle = heuristics.Analyze(handle, path, UnsignedContext);
+        }
+
+        var inMemory = heuristics.Analyze(sample.Bytes, path, UnsignedContext);
+
+        AssertInspected(name + " (path)", byPath);
+        AssertInspected(name + " (handle)", byHandle);
+        Assert.Contains(sample.ContentFinding, Kinds(byPath));          // control: the content reads ran
+        Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(byPath)); // control: the PE headers were parsed
+        Assert.Equal(inMemory.Findings, byPath.Findings);
+        Assert.Equal(inMemory.Findings, byHandle.Findings);
+    }
+
     // --- Non-regular targets ---
 
     [Theory]
@@ -231,6 +316,7 @@ public sealed class FileHeuristicsTests : IDisposable
         var result = _heuristics.Analyze(path, HeuristicContext.None);
 
         Assert.False(result.ContentInspected);
+        Assert.Equal(HashFailureReason.NotRegularFile, result.ContentFailureReason);
         Assert.Empty(result.Findings);
     }
 
@@ -253,6 +339,17 @@ public sealed class FileHeuristicsTests : IDisposable
         var result = _heuristics.Analyze(dir, HeuristicContext.None);
 
         Assert.False(result.ContentInspected);
+        Assert.NotEqual(HashFailureReason.None, result.ContentFailureReason);
         Assert.Equal([HeuristicKind.DoubleExtension], Kinds(result));
+    }
+
+    [Fact]
+    public void MissingFile_ReportsNotFound_AndAnInspectedResultHasNoReason()
+    {
+        var missing = _heuristics.Analyze(_dir.File("gone.exe"), HeuristicContext.None);
+        Assert.False(missing.ContentInspected);
+        Assert.Equal(HashFailureReason.NotFound, missing.ContentFailureReason);
+
+        Assert.Equal(HashFailureReason.None, AnalyzeOnDisk("ok.txt", [1]).ContentFailureReason);
     }
 }
