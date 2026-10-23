@@ -14,9 +14,9 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B1): Core 1043 passed + 1 skipped (opt-in on-disk EICAR), Engine 22 passed + 1 skipped (real Event Log test, needs an
-elevated run). Simulated clean machine (after B1): Core 982 passed, 55 skipped,
-0 failed. Build: 0 warnings (Debug and Release).
+Tests (after B2 fixes): Core 1067 passed + 1 skipped (opt-in on-disk EICAR), Engine 88 passed + 3 skipped (elevated / opt-in
+tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
+Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
 ## Section A — Detection engine (done)
 
@@ -66,17 +66,23 @@ pass comes at the end.
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Not started |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
 
-## Next session — start here (stopped 2026-10-21)
+## Current status (2026-10-23)
 
-1. ~~Rerun B1's immediate review~~: done. 2 High fixed (`80f29a9`), Medium/Low recorded in ROADMAP.md. One decision is open: X2 M1, a dedicated `sap-AV` event log.
-   Medium/Low in ROADMAP.md.
-2. Then **B2** (reversible quarantine, with an immediate review), then **B5** (scan-worker sandbox, full review), then B3, then B4.
-3. To do once by hand: from an **elevated** terminal, run `SAPAV_TEST_ALLOW_HKLM=1 dotnet test` (PowerShell: `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`), so the real Event Log test (skipped so far) actually runs.
-4. ~~Check CI~~: **CI is green** (runs 1–16 passed on windows-latest, including the YARA-X download and hash check on the runner; reported by the user 2026-10-22).
+- **B5 is being built** (the scan-worker sandbox). The work so far is on disk and **not committed yet**: the
+  `SapAV.ScanWorker` project, `SapAV.Engine/Sandbox/`, `Core/Scanning/Isolation/`, plus the handle-broker pieces. The first
+  run stalled (a stream timeout) while writing the launcher; it was resumed and commits each milestone once it builds.
+- After B5: its full reviewer pass, then B3 and B4, then the section B tester + reviewer pass.
 
-The working tree is clean, and everything is committed and pushed.
+**Open for the user**
+- Decision: X2 M1, a dedicated `sap-AV` event log that only SYSTEM can write, instead of the Application log
+  (not urgent).
+- Once by hand: from an **elevated** terminal, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test` (PowerShell), so the real
+  Event Log test (skipped so far) actually runs.
+
+**Done since the last update:** B1's review (2 High fixed), B2 built + reviewed (Critical C1 found and fixed, follow-up
+review CLEAN), and CI green on windows-latest (runs 1–16).
 
 ## What's left
 
-- **B:** finish B1–B5 as above, then the section B tester + reviewer pass.
+- **B:** B5 (in progress) → B3 → B4, then the section B tester + reviewer pass.
 - Then C → D → E → F → G, ending with the Phase 1 security review (G5).
