@@ -4,7 +4,7 @@
     B5: the low-privilege scan worker. The engine (SYSTEM) starts it in an AppContainer with no capabilities, inside a
     Job Object, and sends it read-only file handles over anonymous pipes. All file parsing (hash, Authenticode, YARA-X,
     Mark-of-the-Web, heuristics) runs here, never in the engine. Framework-dependent: the shared runtime in
-    Program Files\dotnet is readable by AppContainers (ALL APPLICATION PACKAGES), see SapAV.Engine/Sandbox/README.md.
+    Program Files\dotnet is readable by AppContainers (ALL APPLICATION PACKAGES), measured in SapAV.Engine.Tests/Sandbox.
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>

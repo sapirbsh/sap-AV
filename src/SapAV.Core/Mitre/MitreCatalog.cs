@@ -30,6 +30,7 @@ public static class MitreCatalog
         new(MitreTechniqueIds.DataEncryptedForImpact, "Data Encrypted for Impact"),
         new(MitreTechniqueIds.ReplicationThroughRemovableMedia, "Replication Through Removable Media"),
         new(MitreTechniqueIds.StoredDataManipulation, "Data Manipulation: Stored Data Manipulation"),
+        new(MitreTechniqueIds.ExploitationForDefenseEvasion, "Exploitation for Defense Evasion"),
     }.ToFrozenDictionary(t => t.Id, StringComparer.Ordinal);
 
     /// <summary>All techniques in the catalog.</summary>

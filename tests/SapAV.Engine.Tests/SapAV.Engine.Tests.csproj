@@ -21,6 +21,8 @@
   <ItemGroup>
     <!-- Raw junction writer shared with SapAV.Core.Tests (restore-redirection tests). -->
     <Compile Include="..\SapAV.Core.Tests\TestSupport\RawJunction.cs" Link="TestSupport\RawJunction.cs" />
+    <!-- The runtime-assembled EICAR string (never stored whole), for the opt-in on-disk end-to-end test (B5). -->
+    <Compile Include="..\SapAV.Core.Tests\TestSupport\AntivirusTestString.cs" Link="TestSupport\AntivirusTestString.cs" />
   </ItemGroup>
 
   <ItemGroup>

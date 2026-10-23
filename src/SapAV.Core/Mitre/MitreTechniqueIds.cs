@@ -22,4 +22,7 @@ public static class MitreTechniqueIds
     public const string DataEncryptedForImpact = "T1486";
     public const string ReplicationThroughRemovableMedia = "T1091";
     public const string StoredDataManipulation = "T1565.001";
+
+    /// <summary>A file that crashes or hangs the sandboxed scan worker (B5): built to break or evade the scanner.</summary>
+    public const string ExploitationForDefenseEvasion = "T1211";
 }

@@ -37,6 +37,12 @@ public enum Requires
     /// its profile and ACL entry again. Expected to work on Windows 10/11 and GitHub Actions windows-latest.
     /// </summary>
     AppContainer,
+
+    /// <summary>
+    /// Opt-in (<c>SAPAV_TEST_EICAR_ON_DISK=1</c>, same as SapAV.Core.Tests): the EICAR test file can be written to %TEMP%
+    /// and read back (no real antivirus removes it). Off by default because a real antivirus alerts on it.
+    /// </summary>
+    EicarFileOnDisk,
 }
 
 internal static class TestRequirements
@@ -55,6 +61,7 @@ internal static class TestRequirements
         [Requires.Junctions] = new(ProbeJunctions),
         [Requires.SecondVolume] = new(ProbeSecondVolume),
         [Requires.AppContainer] = new(ProbeAppContainer),
+        [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
     };
 
     public static IReadOnlyCollection<Requires> All => Probes.Keys;
@@ -143,6 +150,42 @@ internal static class TestRequirements
         return string.Equals(Path.GetPathRoot(Path.GetFullPath(folder)), Path.GetPathRoot(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase)
             ? $"{SecondVolumeVariable}={folder} is on the same drive as %TEMP%"
             : null;
+    }
+
+    public const string EicarOnDiskVariable = "SAPAV_TEST_EICAR_ON_DISK";
+
+    private static string? ProbeEicarOnDisk()
+    {
+        if (Environment.GetEnvironmentVariable(EicarOnDiskVariable)?.Trim() != "1")
+        {
+            return $"opt-in: set {EicarOnDiskVariable}=1 to write the EICAR test file to %TEMP% (a real antivirus may alert)";
+        }
+
+        var dir = Path.Combine(Path.GetTempPath(), "sapav-tests", "probe-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "probe.txt");
+            var bytes = SapAV.Core.Tests.TestSupport.Eicar.Bytes();
+            File.WriteAllBytes(path, bytes);
+            Thread.Sleep(1000); // give a real-time scanner the chance to act
+            return File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes) ? null : "the EICAR test file was changed on disk (by an antivirus?)";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"an antivirus blocked or removed the EICAR test file: {ex.Message}";
+        }
+        finally
+        {
+            try
+            {
+                TempDir.DeleteTree(dir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // best effort
+            }
+        }
     }
 
     private static string? ProbeAppContainer()

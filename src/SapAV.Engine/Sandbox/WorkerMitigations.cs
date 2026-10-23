@@ -2,12 +2,12 @@ namespace SapAV.Engine.Sandbox;
 
 /// <summary>
 /// Process mitigation policies for the worker (PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, two 64-bit words), limited to
-/// what the .NET runtime, WinVerifyTrust and YARA-X tolerate. Measured on Windows 11 26200 / .NET 10 (see
-/// <c>Sandbox/README.md</c>); left out on purpose:
+/// what the .NET runtime, WinVerifyTrust and YARA-X tolerate. Measured on Windows 11 26200 / .NET 10 (the default set
+/// passes AppContainerSandboxTests and the end-to-end broker tests); left out on purpose:
 /// <list type="bullet">
 /// <item>PROHIBIT_DYNAMIC_CODE (ACG): the JIT writes executable code.</item>
 /// <item>BLOCK_NON_MICROSOFT_BINARIES: the worker's own assemblies and <c>yara_x_capi.dll</c> are not Microsoft-signed.</item>
-/// <item>WIN32K_SYSTEM_CALL_DISABLE: user32 is loaded during start (by the runtime host / crypt32), which then fails.</item>
+/// <item>WIN32K_SYSTEM_CALL_DISABLE: user32 is loaded during start; measured: the worker dies with STATUS_DLL_INIT_FAILED.</item>
 /// <item>STRICT_CONTROL_FLOW_GUARD and CET strict mode: not every loaded module is CFG/CET-compatible.</item>
 /// </list>
 /// </summary>

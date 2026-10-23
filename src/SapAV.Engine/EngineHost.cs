@@ -1,6 +1,9 @@
 using SapAV.Engine.Alerts;
 using SapAV.Engine.EventLogging;
+using Microsoft.Extensions.Options;
+using SapAV.Core.Scanning;
 using SapAV.Engine.Quarantine;
+using SapAV.Engine.Sandbox;
 
 namespace SapAV.Engine;
 
@@ -36,6 +39,23 @@ public static class EngineHost
         builder.Services.AddSingleton<QuarantineManager>();
         builder.Services.AddSingleton<IQuarantineService>(sp => sp.GetRequiredService<QuarantineManager>());
         builder.Services.AddHostedService<QuarantineStartupService>();
+
+        // Scanning (B5): files are parsed only in sandboxed worker processes; the broker opens them and passes
+        // read-only handles. Sandbox:Mode = InProcess is for debugging only (logged as a warning).
+        builder.Services.Configure<SandboxOptions>(builder.Configuration.GetSection(SandboxOptions.SectionName));
+        builder.Services.AddSingleton<IScanRulesSource>(sp => new DirectoryScanRulesSource(sp.GetRequiredService<IOptions<SandboxOptions>>().Value));
+        builder.Services.AddSingleton<IScanBroker>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<SandboxOptions>>().Value;
+            var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Sandbox");
+            var source = sp.GetRequiredService<IScanRulesSource>();
+            var online = sp.GetService<IOnlineHashLookup>();
+            return options.Mode == SandboxMode.InProcess
+                ? new InProcessScanBroker(source, logger, online)
+                : new SandboxedScanBroker(options, source, logger, sp.GetRequiredService<TimeProvider>(), online);
+        });
+        builder.Services.AddSingleton<IFileScanner>(sp => sp.GetRequiredService<IScanBroker>());
+        builder.Services.AddHostedService<ScanBrokerStartupService>();
         builder.Services.AddHostedService<Worker>();
         return builder;
     }

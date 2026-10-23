@@ -39,4 +39,10 @@
       <ContentWithTargetPath Include="@(_ScanWorkerFile)" TargetPath="ScanWorker\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
+
+  <ItemGroup>
+    <!-- Default rule package for console runs (D3 moves it to the protected %ProgramData%\sap-AV folder). -->
+    <None Include="..\..\data\rules\**\*.yar" Link="data\rules\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\data\hashes\blocklist.txt" Link="data\hashes\blocklist.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
