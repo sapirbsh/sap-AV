@@ -37,7 +37,14 @@ public static class EngineHost
         // Quarantine (B2): store opened + recovered at startup; the pipe (B4) and scan queue (B3) use IQuarantineService.
         builder.Services.Configure<QuarantineOptions>(builder.Configuration.GetSection(QuarantineOptions.SectionName));
         builder.Services.AddSingleton<IQuarantineKeyProvider, DpapiQuarantineKeyProvider>();
-        builder.Services.AddSingleton<QuarantineManager>();
+        builder.Services.AddSingleton(sp =>
+        {
+            var quarantine = sp.GetRequiredService<IOptions<QuarantineOptions>>();
+            var engineFolders = ScanJobService.ExcludedFolders(sp.GetRequiredService<IOptions<ScanJobOptions>>().Value,
+                sp.GetRequiredService<IOptions<SandboxOptions>>().Value, quarantine.Value);
+            return new QuarantineManager(quarantine, sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<ILogger<QuarantineManager>>(),
+                sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IQuarantineKeyProvider>(), engineFolders);
+        });
         builder.Services.AddSingleton<IQuarantineService>(sp => sp.GetRequiredService<QuarantineManager>());
         builder.Services.AddHostedService<QuarantineStartupService>();
 

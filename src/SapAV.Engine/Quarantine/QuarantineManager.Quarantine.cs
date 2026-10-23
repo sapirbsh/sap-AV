@@ -22,7 +22,8 @@ public sealed partial class QuarantineManager
     {
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsEligible(report, out var scannedPath, out var refusal) || !TryGetStore(out var store, out var key, out refusal))
+        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, scannedPath, out refusal)
+            || !TryGetStore(out var store, out var key, out refusal))
         {
             return Task.FromResult(refusal);
         }
@@ -38,7 +39,8 @@ public sealed partial class QuarantineManager
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsEligible(report, out var scannedPath, out var refusal) || !TryGetStore(out var store, out var key, out refusal))
+        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, scannedPath, out refusal)
+            || !TryGetStore(out var store, out var key, out refusal))
         {
             return Task.FromResult(refusal);
         }
@@ -93,6 +95,48 @@ public sealed partial class QuarantineManager
         scannedPath = normalized!;
         refusal = null!;
         return true;
+    }
+
+    /// <summary>Review B2 follow-up Medium: the engine's own folders (data, store, install, rules) are never quarantined.</summary>
+    private bool IsEngineFolder(FileScanReport report, string scannedPath, out QuarantineResult refusal)
+    {
+        if (_engineFolders.Contains(scannedPath) || _engineFolders.Contains(report.Identity?.FinalPath))
+        {
+            refusal = new QuarantineResult(QuarantineStatus.EngineFolder, "The file is in one of sap-AV's own folders; it is never quarantined.");
+            return true;
+        }
+
+        refusal = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Review B2 M4: the neutralised copy needs <paramref name="length"/> more bytes in the store (the raw file is moved,
+    /// or copied and deleted). Refused if that takes the store over its quota or its drive under the free-space floor.
+    /// </summary>
+    private QuarantineResult? CheckSpace(QuarantineStore store, long length)
+    {
+        long used = 0;
+        try
+        {
+            foreach (var file in new DirectoryInfo(store.RootPath).EnumerateFiles("*", new EnumerationOptions { AttributesToSkip = 0, RecurseSubdirectories = false }))
+            {
+                used += file.Length;
+            }
+
+            long free = new DriveInfo(Path.GetPathRoot(store.RootPath)!).AvailableFreeSpace;
+            string? why =
+                used + length > _options.MaxStoreBytes
+                    ? $"the store holds {used} bytes and this file needs {length} more, over the {_options.MaxStoreBytes}-byte quota"
+                : free - length < _options.MinFreeSpaceBytes
+                    ? $"the store's drive has {free} bytes free; quarantining {length} bytes would go below the {_options.MinFreeSpaceBytes}-byte floor"
+                : null;
+            return why is null ? null : new QuarantineResult(QuarantineStatus.StoreFull, $"The quarantine store is full: {why}.");
+        }
+        catch (Exception ex) when (IsIoFailure(ex) || ex is ArgumentException)
+        {
+            return new QuarantineResult(QuarantineStatus.StoreFull, $"The quarantine store's size or free space could not be read ({ex.GetType().Name}).");
+        }
     }
 
     private bool TryGetStore(out QuarantineStore store, out byte[] key, out QuarantineResult refusal)
@@ -190,6 +234,11 @@ public sealed partial class QuarantineManager
             // E.g. a byte-range lock held by another process (ERROR_LOCK_VIOLATION) while hashing.
             bool locked = (ex.HResult & 0xFFFF) is N.ErrorLockViolation or N.ErrorSharingViolation;
             return new(locked ? QuarantineStatus.Locked : QuarantineStatus.Failed, $"Can't read the file: {ex.Message}");
+        }
+
+        if (CheckSpace(store, report.Hash.Length!.Value) is { } full)
+        {
+            return full;
         }
 
         // The path lock doesn't see other spellings of the same file: lock the file object itself.

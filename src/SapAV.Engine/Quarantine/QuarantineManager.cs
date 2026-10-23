@@ -47,6 +47,7 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
     private readonly TimeProvider _time;
     private readonly IQuarantineKeyProvider _keys;
     private readonly QuarantineAccessPolicy _policy;
+    private readonly Scanning.FolderSet _engineFolders;
     private readonly KeyedLocks _locks = new();
     private readonly Lock _initLock = new();
     private QuarantineStore? _store;
@@ -57,7 +58,8 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
         IAlertSink alerts,
         ILogger<QuarantineManager> logger,
         TimeProvider time,
-        IQuarantineKeyProvider keys)
+        IQuarantineKeyProvider keys,
+        Scanning.FolderSet? engineFolders = null)
     {
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _alerts = alerts ?? throw new ArgumentNullException(nameof(alerts));
@@ -67,6 +69,9 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
         _policy = _options.AdditionalTrustedSids.Count == 0
             ? QuarantineAccessPolicy.Default
             : new QuarantineAccessPolicy(_options.AdditionalTrustedSids);
+
+        // Review B2 follow-up Medium: never quarantine the engine's own data (rules match themselves), store or install folders.
+        _engineFolders = new Scanning.FolderSet([.. Scanning.EngineDataFolders.Defaults(), _options.EffectiveRoot, .. engineFolders?.Folders ?? []]);
     }
 
     /// <summary>Test seam: called at each <see cref="QuarantineStep"/>; throwing simulates a crash there.</summary>

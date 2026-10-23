@@ -18,6 +18,15 @@ public sealed class QuarantineOptions
     public long MaxFileSizeBytes { get; set; } = Core.Hashing.Sha256Hasher.DefaultMaxSizeBytes;
 
     /// <summary>
+    /// Quota for everything in the store (review B2 M4): a quarantine that would take the store over it is refused with
+    /// StoreFull, so mass-dropped unique files can't fill the drive. Default 4 GiB.
+    /// </summary>
+    public long MaxStoreBytes { get; set; } = 4L * 1024 * 1024 * 1024;
+
+    /// <summary>Free space the store's drive must keep after a quarantine (default 2 GiB); below it, StoreFull.</summary>
+    public long MinFreeSpaceBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
     /// Test seam only (internal, so configuration binding can't set it): extra SIDs trusted like SYSTEM and
     /// Administrators, so a non-elevated test process can use a store on a temp root.
     /// </summary>

@@ -145,12 +145,14 @@ internal sealed class QuarantineTestContext : IDisposable
 {
     private readonly TempDir _temp;
 
-    public QuarantineTestContext(Action<QuarantineStep>? hook = null, bool forceCrossVolume = false, string? filesParent = null)
+    public QuarantineTestContext(
+        Action<QuarantineStep>? hook = null, bool forceCrossVolume = false, string? filesParent = null, Action<QuarantineOptions>? configure = null)
     {
         _temp = new TempDir();
         StoreRoot = System.IO.Path.Combine(_temp.Path, "store");
         Files = Directory.CreateDirectory(System.IO.Path.Combine(filesParent ?? _temp.Path, filesParent is null ? "files" : Guid.NewGuid().ToString("N"))).FullName;
         ForceCrossVolume = forceCrossVolume;
+        Configure = configure;
         Manager = Create(hook);
         Manager.Initialize();
     }
@@ -162,6 +164,15 @@ internal sealed class QuarantineTestContext : IDisposable
     public string Files { get; }
 
     public bool ForceCrossVolume { get; }
+
+    /// <summary>Applied to the options of every manager this context creates.</summary>
+    public Action<QuarantineOptions>? Configure { get; }
+
+    private QuarantineOptions Configured(QuarantineOptions options)
+    {
+        Configure?.Invoke(options);
+        return options;
+    }
 
     public byte[] Key { get; } = RandomNumberGenerator.GetBytes(32);
 
@@ -184,7 +195,7 @@ internal sealed class QuarantineTestContext : IDisposable
 
     /// <summary>A manager on this context's store (not initialised).</summary>
     public QuarantineManager Create(Action<QuarantineStep>? hook = null) =>
-        new(Options.Create(new QuarantineOptions { Root = StoreRoot, AdditionalTrustedSids = [CurrentUser] }),
+        new(Options.Create(Configured(new QuarantineOptions { Root = StoreRoot, AdditionalTrustedSids = [CurrentUser] })),
             Alerts, Log, Time, new FixedKeyProvider(Key))
         {
             StepHook = hook,

@@ -70,13 +70,15 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var time = services.GetRequiredService<TimeProvider>();
         var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning");
         var broker = services.GetRequiredService<IScanBroker>();
+        var alerts = services.GetRequiredService<Alerts.IAlertDispatcher>();
         var handler = new ScanVerdictHandler(
-            services.GetRequiredService<Alerts.IAlertDispatcher>(),
+            alerts,
             services.GetRequiredService<Quarantine.IQuarantineService>(),
             new AutoQuarantinePolicy(options.ProtectedFolders),
             new AutoQuarantineLimiter(time, options.AutoQuarantineMaxPerWindow, options.AutoQuarantineWindow),
             time, logger);
-        return new ScanJobService(options, broker, ExcludedFolders(options, sandbox, quarantine), handler, null, time, logger);
+        var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
+        return new ScanJobService(options, broker, ExcludedFolders(options, sandbox, quarantine), handler, preflight, time, logger);
     }
 
     /// <summary>The folders this service never scans.</summary>
