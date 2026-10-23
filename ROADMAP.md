@@ -310,6 +310,26 @@ M1, L1, L6 and L7 are fixed in B2/A5.
   - **Phase 2 USB (Low):** FAT/exFAT may not report `FileIdInfo`, so quarantine refuses those files (fails closed). Verify.
   - Tests: add an explicit object-manager link test (junction to `\RPC Control` + symlink).
 
+**Carried over from the B5 review (Medium/Low).** H1 (worker process/thread DACL, name-derived AppContainer SID),
+M1 (worker keeping duplicated handles), M4 partially (no ACL grant as SYSTEM), L1 and L3 are fixed in B5.
+- **X2 / B3 (M2):** worker free text (reasons, notes, YARA descriptions, signer) is sanitized but can still carry up to
+  ~256 KiB of scanned file content. Since the Application log is user-readable, a compromised worker could leak content
+  of files the engine read as SYSTEM. Build Event Log/alert text from engine-side templates + validated identifiers
+  (rule id, MITRE id, enum kinds), and keep worker free text out of the Event Log or cap it hard. On-demand scans
+  (C1) should use the requesting user's access.
+- **B3 / D1 (M3):** a compromised worker can fake a Malicious verdict for files only SYSTEM/TrustedInstaller may change
+  (System32, Program Files), and auto-quarantine would move them. Auto-quarantine refuses protected locations unless
+  the user confirms, and rate-limits with burst alerts.
+- **Installer / D3 (M4 rest, M5):** the worker folder and exe must be owned by an admin or TrustedInstaller with no
+  non-admin write ACEs, or the SYSTEM engine refuses to launch it. The installer sets the AppContainer ACL. Optionally
+  pin the worker exe hash or check its signature.
+- **C2 / E (L2):** pipe handles are inheritable only during the worker CreateProcess under `LaunchLock`. Any other
+  engine `CreateProcess` with inheritance must run under the same lock, or there must be none.
+- **B5 follow-up (L4):** a compromised long-lived worker could crash on another file twice to get it flagged
+  Suspicious (T1211). Count a failure only when the worker was freshly started for that file. Suspicious only, never
+  quarantine.
+- **B5 follow-up:** profile/ACE cleanup in `SandboxTestSupport.cs` was not reviewed. Check it at the section B review.
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |
