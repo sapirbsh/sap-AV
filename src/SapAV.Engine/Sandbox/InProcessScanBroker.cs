@@ -44,6 +44,14 @@ internal sealed class InProcessScanBroker : IScanBroker, IDisposable
         return await scanner.ScanAsync(item, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile file, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        var scanner = _scanner ?? await LoadAsync(cancellationToken).ConfigureAwait(false);
+        return await scanner.ScanOpenedAsync(item, file, openNotes, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RulesLoadSummary?> ReloadRulesAsync(CancellationToken cancellationToken = default)
     {
         await LoadAsync(cancellationToken, force: true).ConfigureAwait(false);

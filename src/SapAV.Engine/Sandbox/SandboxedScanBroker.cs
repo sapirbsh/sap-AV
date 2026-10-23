@@ -94,6 +94,18 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             return failureReport!;
         }
 
+        return await ScanOpenedAsync(item, opened, notes, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(opened);
+        ArgumentNullException.ThrowIfNull(openNotes);
+        cancellationToken.ThrowIfCancellationRequested();
+        var notes = new List<ScanNote>(openNotes);
+
         string key = FailureKey(item, opened);
         if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
         {

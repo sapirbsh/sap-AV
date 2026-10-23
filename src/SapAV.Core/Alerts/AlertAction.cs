@@ -21,4 +21,10 @@ public enum AlertAction
 
     /// <summary>The item was restored from quarantine (B2).</summary>
     Restored,
+
+    /// <summary>
+    /// Not quarantined automatically (protected location such as Windows or Program Files, a SYSTEM/TrustedInstaller-owned
+    /// file, or the auto-quarantine rate limit): the user has to confirm the quarantine (B3).
+    /// </summary>
+    NeedsUserConfirmation,
 }

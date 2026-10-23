@@ -113,7 +113,27 @@ public sealed class FileScanner : IFileScanner
         }
 
         AfterOpenHook?.Invoke(opened.Handle);
+        return await ScanOpenedCoreAsync(item, opened, notes, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Scans a file the caller opened with <see cref="ScanFileOpener.Open"/> (B3: the scan job keeps that handle for the
+    /// quarantine decision). Same contract as <see cref="ScanAsync"/>: Identity comes from <paramref name="opened"/> and the
+    /// shared-fallback change-journal check runs here. The handle is not closed.
+    /// </summary>
+    /// <param name="openNotes">The notes <see cref="ScanFileOpener.Open"/> added while opening.</param>
+    public Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(opened);
+        ArgumentNullException.ThrowIfNull(openNotes);
+        cancellationToken.ThrowIfCancellationRequested();
+        return ScanOpenedCoreAsync(item, opened, [.. openNotes], cancellationToken);
+    }
+
+    private async Task<FileScanReport> ScanOpenedCoreAsync(ScanItem item, OpenedScanFile opened, List<ScanNote> notes, CancellationToken cancellationToken)
+    {
         // Identity: which file object this scan judged (B2: the quarantine acts only on this exact object).
         var report = await ScanOpenAsync(item, opened.Handle, notes, cancellationToken).ConfigureAwait(false) with { Identity = opened.Identity };
 

@@ -25,4 +25,10 @@ public static class MitreTechniqueIds
 
     /// <summary>A file that crashes or hangs the sandboxed scan worker (B5): built to break or evade the scanner.</summary>
     public const string ExploitationForDefenseEvasion = "T1211";
+
+    /// <summary>
+    /// Impair Defenses: Disable or Modify Tools. Used by the engine-health alerts (B3) when protection is degraded
+    /// (no YARA rules loaded, quarantine store full), whether by accident or by an attacker.
+    /// </summary>
+    public const string DisableOrModifyTools = "T1562.001";
 }

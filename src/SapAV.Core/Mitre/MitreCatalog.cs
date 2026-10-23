@@ -31,6 +31,7 @@ public static class MitreCatalog
         new(MitreTechniqueIds.ReplicationThroughRemovableMedia, "Replication Through Removable Media"),
         new(MitreTechniqueIds.StoredDataManipulation, "Data Manipulation: Stored Data Manipulation"),
         new(MitreTechniqueIds.ExploitationForDefenseEvasion, "Exploitation for Defense Evasion"),
+        new(MitreTechniqueIds.DisableOrModifyTools, "Impair Defenses: Disable or Modify Tools"),
     }.ToFrozenDictionary(t => t.Id, StringComparer.Ordinal);
 
     /// <summary>All techniques in the catalog.</summary>

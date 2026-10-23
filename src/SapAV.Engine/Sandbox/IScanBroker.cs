@@ -1,3 +1,4 @@
+using SapAV.Core.Models;
 using SapAV.Core.Scanning;
 
 namespace SapAV.Engine.Sandbox;
@@ -10,6 +11,14 @@ namespace SapAV.Engine.Sandbox;
 /// </summary>
 public interface IScanBroker : IFileScanner
 {
+    /// <summary>
+    /// Scans a file the caller already opened with <see cref="ScanFileOpener"/> (B3: the scan job keeps the handle for
+    /// the quarantine decision, so it acts on exactly the scanned object). Same contract as <see cref="IFileScanner.ScanAsync"/>;
+    /// Identity comes from <paramref name="file"/>; the change-journal check is done here. The handle is not closed.
+    /// </summary>
+    /// <param name="openNotes">The notes <see cref="ScanFileOpener.Open"/> added while opening.</param>
+    Task<FileScanReport> ScanOpenedAsync(ScanItem item, OpenedScanFile file, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default);
+
     /// <summary>Re-reads the rules directory and blocklist and loads them into every worker.</summary>
     /// <returns>What was loaded, or null if no worker could load it (see the log).</returns>
     Task<RulesLoadSummary?> ReloadRulesAsync(CancellationToken cancellationToken = default);

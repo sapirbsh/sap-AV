@@ -25,4 +25,19 @@ public enum AlertType
 
     /// <summary>Information: the user restored an item from quarantine (B2). Verdict = the item's verdict.</summary>
     QuarantineRestored,
+
+    // Engine health (B3). FilePath = what the alert is about (a file, the rules folder, the store); Verdict = the worst
+    // verdict involved, or Suspicious ("needs attention") when no file verdict applies.
+
+    /// <summary>Summary: alerts that were aggregated, rate-limited or dropped (alert queue full) since the last summary.</summary>
+    AlertsSuppressed,
+
+    /// <summary>More Malicious files than the auto-quarantine rate limit allows: the rest wait for the user to confirm.</summary>
+    AutoQuarantineBurst,
+
+    /// <summary>No YARA rules are loaded, or rule files failed to load: YARA can't detect (everything) until fixed.</summary>
+    ScanRulesDegraded,
+
+    /// <summary>The quarantine store is over its quota or the drive is below the free-space floor: nothing more is quarantined.</summary>
+    QuarantineStoreFull,
 }

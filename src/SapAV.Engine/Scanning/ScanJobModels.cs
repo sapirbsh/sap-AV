@@ -1,0 +1,107 @@
+using SapAV.Core.Models;
+
+namespace SapAV.Engine.Scanning;
+
+/// <summary>
+/// "Scan these files and folders" (B3). Folders are walked recursively; junctions, symlinks and other name-surrogate
+/// reparse points are skipped. Engine-internal only: B4 builds requests from pipe input after C1's ScanPathPolicy.
+/// </summary>
+/// <param name="Paths">Fully qualified file or folder paths (at least one).</param>
+/// <param name="Trigger">Why the scan runs (Custom, Quick, Full, ...).</param>
+/// <param name="TimeBudget">Overrides <see cref="ScanJobOptions.TimeBudget"/> for this job.</param>
+public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Trigger, TimeSpan? TimeBudget = null)
+{
+    /// <exception cref="ArgumentException">No paths, or a path that isn't fully qualified.</exception>
+    internal void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(Paths);
+        if (Paths.Count == 0)
+        {
+            throw new ArgumentException("A scan job needs at least one path.", nameof(Paths));
+        }
+
+        foreach (var path in Paths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || path.Contains('\0') || !Path.IsPathFullyQualified(path))
+            {
+                throw new ArgumentException($"Scan paths must be fully qualified: '{path}'.", nameof(Paths));
+            }
+        }
+
+        if (!Enum.IsDefined(Trigger))
+        {
+            throw new ArgumentOutOfRangeException(nameof(Trigger), Trigger, "Undefined scan trigger.");
+        }
+
+        if (TimeBudget is { } budget && budget <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(TimeBudget), budget, "The time budget must be positive.");
+        }
+    }
+}
+
+/// <summary>What the job did with a file after the scan.</summary>
+public enum ScanFileAction
+{
+    /// <summary>Nothing to do (Clean, Suspicious, not scanned), or nothing allowed (Suspicious and PUP are never auto-quarantined).</summary>
+    None,
+
+    Quarantined,
+
+    /// <summary>Quarantine was tried and refused or failed; the file is in place (see <see cref="ScanJobFileResult.Detail"/>).</summary>
+    QuarantineFailed,
+
+    /// <summary>Malicious, but auto-quarantine is not allowed here (protected location, owner, rate limit): the user decides.</summary>
+    NeedsUserConfirmation,
+
+    /// <summary>Malicious, but the quarantine store is full (quota or free-space floor).</summary>
+    StoreFull,
+}
+
+/// <summary>One file's outcome in a job.</summary>
+/// <param name="Path">The scanned path.</param>
+/// <param name="Status">Scan status (anything but Scanned = no verdict).</param>
+/// <param name="Verdict">The verdict, if scanned.</param>
+/// <param name="Action">What happened after the scan.</param>
+/// <param name="Detail">Why (for NotScanned, refusals and failures), engine text only.</param>
+/// <param name="Sha256">The SHA-256, if computed.</param>
+/// <param name="QuarantineItemId">The quarantine item, when quarantined.</param>
+/// <param name="AlertId">The alert raised for the file, if any.</param>
+public sealed record ScanJobFileResult(
+    string Path, ScanStatus Status, Verdict? Verdict, ScanFileAction Action, string? Detail, string? Sha256,
+    string? QuarantineItemId, Guid? AlertId);
+
+/// <summary>Exact counters of a job (results lists may be capped; these never are).</summary>
+public sealed record ScanJobCounters(
+    long Clean, long Suspicious, long Malicious, long NotScanned, long Excluded, long Quarantined, long NeedsUserConfirmation,
+    long QuarantineFailed);
+
+/// <summary>A progress snapshot (B4 streams these).</summary>
+/// <param name="FilesFound">Files enumerated so far.</param>
+/// <param name="FilesTotal">Total files, or null while still enumerating.</param>
+/// <param name="FilesDone">Files handled (scanned, not scanned, or excluded).</param>
+/// <param name="BytesTotal">Total bytes (from enumeration), or null while still enumerating.</param>
+/// <param name="CurrentFile">A file being scanned right now, if any.</param>
+/// <param name="Eta">Estimated time left from the smoothed throughput, or null while unknown.</param>
+public sealed record ScanJobProgress(
+    Guid JobId, ScanJobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
+    string? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, ScanJobCounters Counters);
+
+/// <summary>A job-level warning (rules missing, store full, budget, ...), engine text only.</summary>
+public sealed record ScanJobWarning(DateTimeOffset Timestamp, string Message);
+
+/// <summary>A state change of a job.</summary>
+public sealed record ScanJobStateChange(Guid JobId, ScanJobState From, ScanJobState To, DateTimeOffset Timestamp);
+
+/// <summary>Result of <see cref="IScanJobService.Start"/>.</summary>
+public enum ScanJobStartResult
+{
+    Started,
+    NotFound,
+
+    /// <summary>The job isn't in the Created state.</summary>
+    AlreadyStarted,
+
+    /// <summary><see cref="ScanJobOptions.MaxConcurrentJobs"/> jobs are running.</summary>
+    TooManyJobs,
+}

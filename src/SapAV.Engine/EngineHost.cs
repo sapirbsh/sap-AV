@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using SapAV.Core.Scanning;
 using SapAV.Engine.Quarantine;
 using SapAV.Engine.Sandbox;
+using SapAV.Engine.Scanning;
 
 namespace SapAV.Engine;
 
@@ -56,6 +57,11 @@ public static class EngineHost
         });
         builder.Services.AddSingleton<IFileScanner>(sp => sp.GetRequiredService<IScanBroker>());
         builder.Services.AddHostedService<ScanBrokerStartupService>();
+
+        // Scan jobs (B3): bounded queue, dedicated background-mode threads, pause/resume/cancel. The pipe (B4) drives it.
+        builder.Services.Configure<ScanJobOptions>(builder.Configuration.GetSection(ScanJobOptions.SectionName));
+        builder.Services.AddSingleton<ScanJobService>();
+        builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
         builder.Services.AddHostedService<Worker>();
         return builder;
     }

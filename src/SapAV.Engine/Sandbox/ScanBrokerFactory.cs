@@ -45,11 +45,16 @@ internal sealed class UnavailableScanBroker(string reason, TimeProvider time) : 
         cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>();
         using var opened = ScanFileOpener.Open(item, notes, time, out var failure);
-        if (opened is null)
-        {
-            return Task.FromResult(failure!);
-        }
+        return opened is null ? Task.FromResult(failure!) : ScanOpenedAsync(item, opened, notes, cancellationToken);
+    }
 
+    public Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(opened);
+        cancellationToken.ThrowIfCancellationRequested();
+        var notes = new List<ScanNote>(openNotes);
         notes.Add(new(ScanNoteLevel.Warning, $"Not scanned (Error): {item.Path}: {reason}"));
         return Task.FromResult(new FileScanReport(ScanResult.NotScanned(item, ScanStatus.Error, time.GetUtcNow()),
             HashResult.NotHashed(HashFailureReason.IoError, reason), null, null, null, null, notes.AsReadOnly())

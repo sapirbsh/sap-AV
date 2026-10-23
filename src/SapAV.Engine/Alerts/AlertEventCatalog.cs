@@ -19,6 +19,10 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 ///   1002   | SuspiciousFile           | Warning     | File with a Suspicious verdict
 ///   1003   | PotentiallyUnwantedFile  | Warning     | PUP / hack tool (threat pack, section E)
 ///   3001   | QuarantineRestored       | Information | User restored an item from quarantine (B2)
+///   9001   | AlertsSuppressed         | Warning     | Summary of aggregated / rate-limited / dropped alerts (B3)
+///   9002   | AutoQuarantineBurst      | Warning     | Auto-quarantine rate limit hit; the rest need the user (B3)
+///   9003   | ScanRulesDegraded        | Warning     | No YARA rules loaded, or rule files failed (B3)
+///   9004   | QuarantineStoreFull      | Error       | Quarantine quota or free-space floor reached (B3)
 /// </code>
 /// Ranges: 1000-1999 file detections, 2000-2999 system-change detections (persistence, Defender tampering,
 /// honeytokens, process chains), 3000-3999 user / remediation actions, 9000-9999 engine health.
@@ -34,6 +38,10 @@ public static class AlertEventCatalog
     public const int SuspiciousFileEventId = 1002;
     public const int PotentiallyUnwantedFileEventId = 1003;
     public const int QuarantineRestoredEventId = 3001;
+    public const int AlertsSuppressedEventId = 9001;
+    public const int AutoQuarantineBurstEventId = 9002;
+    public const int ScanRulesDegradedEventId = 9003;
+    public const int QuarantineStoreFullEventId = 9004;
 
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> is not a defined value.</exception>
     public static AlertEventDefinition For(AlertType type) => type switch
@@ -42,6 +50,10 @@ public static class AlertEventCatalog
         AlertType.SuspiciousFile => new(SuspiciousFileEventId, EventLogEntryType.Warning),
         AlertType.PotentiallyUnwantedFile => new(PotentiallyUnwantedFileEventId, EventLogEntryType.Warning),
         AlertType.QuarantineRestored => new(QuarantineRestoredEventId, EventLogEntryType.Information),
+        AlertType.AlertsSuppressed => new(AlertsSuppressedEventId, EventLogEntryType.Warning),
+        AlertType.AutoQuarantineBurst => new(AutoQuarantineBurstEventId, EventLogEntryType.Warning),
+        AlertType.ScanRulesDegraded => new(ScanRulesDegradedEventId, EventLogEntryType.Warning),
+        AlertType.QuarantineStoreFull => new(QuarantineStoreFullEventId, EventLogEntryType.Error),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Undefined alert type."),
     };
 }
