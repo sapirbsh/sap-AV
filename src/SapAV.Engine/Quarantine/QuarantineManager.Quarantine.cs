@@ -22,7 +22,7 @@ public sealed partial class QuarantineManager
     {
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, scannedPath, out refusal)
+        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, out refusal)
             || !TryGetStore(out var store, out var key, out refusal))
         {
             return Task.FromResult(refusal);
@@ -39,7 +39,7 @@ public sealed partial class QuarantineManager
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, scannedPath, out refusal)
+        if (!IsEligible(report, out var scannedPath, out var refusal) || IsEngineFolder(report, out refusal)
             || !TryGetStore(out var store, out var key, out refusal))
         {
             return Task.FromResult(refusal);
@@ -98,9 +98,11 @@ public sealed partial class QuarantineManager
     }
 
     /// <summary>Review B2 follow-up Medium: the engine's own folders (data, store, install, rules) are never quarantined.</summary>
-    private bool IsEngineFolder(FileScanReport report, string scannedPath, out QuarantineResult refusal)
+    private bool IsEngineFolder(FileScanReport report, out QuarantineResult refusal)
     {
-        if (_engineFolders.Contains(scannedPath) || _engineFolders.Contains(report.Identity?.FinalPath))
+        // B3 review H1: the exact requested path and the handle's final path, never the GetFullPath form (scannedPath), which
+        // drops trailing dots/spaces: C:\ProgramData\sap-AV.\x is not inside C:\ProgramData\sap-AV.
+        if (_engineFolders.Contains(report.Result.Item.Path) || _engineFolders.Contains(report.Identity?.FinalPath))
         {
             refusal = new QuarantineResult(QuarantineStatus.EngineFolder, "The file is in one of sap-AV's own folders; it is never quarantined.");
             return true;

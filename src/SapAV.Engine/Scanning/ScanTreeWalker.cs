@@ -1,3 +1,4 @@
+using SapAV.Core.Hashing;
 using SapAV.Engine.Scanning.Native;
 
 namespace SapAV.Engine.Scanning;
@@ -53,8 +54,17 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
         }
     }
 
-    private void WalkRoot(string root, Action<ScanTreeEntry> emit, CancellationToken cancellationToken)
+    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken)
     {
+        // B3 review H1: walk in the exact \\?\ form. A plain path would drop trailing dots/spaces, so a folder "x." could
+        // not be listed (its files never scanned) and "evil.exe." would be read as "evil.exe".
+        if (ExactPath.ToExtended(requested) is not { } root)
+        {
+            emit(new(requested, ScanTreeEntryKind.File)); // not a usable path: the opener reports why
+            return;
+        }
+
+        string shown = ExactPath.ForOpening(root);
         FileAttributes attributes;
         try
         {
@@ -62,25 +72,25 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            emit(new(root, ScanTreeEntryKind.File)); // missing or unreadable: the opener reports why
+            emit(new(shown, ScanTreeEntryKind.File)); // missing or unreadable: the opener reports why
             return;
         }
 
         if (excluded.Contains(root))
         {
-            emit(new(root, ScanTreeEntryKind.Excluded));
+            emit(new(shown, ScanTreeEntryKind.Excluded));
             return;
         }
 
         if (!attributes.HasFlag(FileAttributes.Directory))
         {
-            emit(IsLink(root, attributes) ? new(root, ScanTreeEntryKind.SkippedLink) : new(root, ScanTreeEntryKind.File, SafeLength(root)));
+            emit(IsLink(root, attributes) ? new(shown, ScanTreeEntryKind.SkippedLink) : new(shown, ScanTreeEntryKind.File, SafeLength(root)));
             return;
         }
 
         if (IsLink(root, attributes))
         {
-            emit(new(root, ScanTreeEntryKind.SkippedLink));
+            emit(new(shown, ScanTreeEntryKind.SkippedLink));
             return;
         }
 
@@ -105,7 +115,7 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
             {
-                emit(new(directory, ScanTreeEntryKind.Unreadable, Detail: ex.GetType().Name));
+                emit(new(ExactPath.ForOpening(directory), ScanTreeEntryKind.Unreadable, Detail: ex.GetType().Name));
             }
 
             // Push in reverse so subfolders are visited in listing order.
@@ -118,15 +128,16 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
 
     private void Classify(FileSystemInfo entry, List<string> subdirectories, Action<ScanTreeEntry> emit)
     {
-        string path = entry.FullName;
+        string path = entry.FullName; // extended form (inherited from the root): exact names
+        string shown = ExactPath.ForOpening(path);
         var attributes = entry.Attributes;
         if (IsLink(path, attributes))
         {
-            emit(new(path, ScanTreeEntryKind.SkippedLink));
+            emit(new(shown, ScanTreeEntryKind.SkippedLink));
         }
         else if (excluded.Contains(path))
         {
-            emit(new(path, ScanTreeEntryKind.Excluded));
+            emit(new(shown, ScanTreeEntryKind.Excluded));
         }
         else if (attributes.HasFlag(FileAttributes.Directory))
         {
@@ -134,7 +145,7 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
         }
         else
         {
-            emit(new(path, ScanTreeEntryKind.File, entry is FileInfo file ? file.Length : 0));
+            emit(new(shown, ScanTreeEntryKind.File, entry is FileInfo file ? file.Length : 0));
         }
     }
 

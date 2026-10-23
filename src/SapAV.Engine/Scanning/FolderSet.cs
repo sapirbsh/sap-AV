@@ -1,7 +1,7 @@
 namespace SapAV.Engine.Scanning;
 
 /// <summary>
-/// A set of folders compared by normalised full path (<see cref="Path.GetFullPath(string)"/>, trailing separator,
+/// A set of folders compared by exact full path (only "." / ".." resolved; trailing dots and spaces kept; trailing separator;
 /// case-insensitive). <see cref="Contains"/> is true for the folder itself and everything below it.
 /// </summary>
 /// <remarks>
@@ -27,28 +27,26 @@ public sealed class FolderSet
         return normalized is not null && _folders.Any(f => normalized.StartsWith(f, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>The full path with exactly one trailing separator, or null if it isn't a usable path.</summary>
+    /// <summary>The exact full path with one trailing separator, or null if it isn't a fully qualified drive or UNC path.</summary>
     internal static string? Normalize(string? path)
     {
-        if (string.IsNullOrWhiteSpace(path) || path.Contains('\0'))
+        if (string.IsNullOrWhiteSpace(path))
         {
             return null;
         }
 
-        try
-        {
-            var full = Path.GetFullPath(path);
-            if (full.StartsWith(@"\\?\", StringComparison.Ordinal) && full.Length > 6 && full[5] == ':')
-            {
-                full = full[4..]; // \\?\C:\... -> C:\...
-            }
-
-            return Path.TrimEndingDirectorySeparator(full) + Path.DirectorySeparatorChar;
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        // B3 review H1: never Path.GetFullPath here; it strips trailing dots/spaces, so C:\ProgramData\sap-AV.\ (a different
+        // folder an attacker can create through \\?\) would compare equal to the excluded C:\ProgramData\sap-AV\. Only "." /
+        // ".." components and separators are resolved; names are compared exactly (case-insensitively). \\?\C:\x and C:\x
+        // are the same string here (comparison only; nothing is opened by this form).
+        var exact = Core.Hashing.ExactPath.ToExtended(path);
+        if (exact is null)
         {
             return null;
         }
+
+        var plain = Core.Hashing.ExactPath.StripPrefix(exact);
+        return plain.EndsWith('\\') ? plain : plain + '\\';
     }
 }
 

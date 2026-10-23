@@ -52,7 +52,18 @@ internal static class SecureFile
         string fullPath;
         try
         {
-            fullPath = Path.GetFullPath(path);
+            // B3 review H1: a plain path drops trailing dots/spaces (evil.exe. would open evil.exe next to it). Such names are
+            // opened in the exact \\?\ form (\\?\ input is already exact and kept as is); a name that can't be made exact is
+            // refused, never approximated.
+            if (ExactPath.NeedsExtended(path) && !path.StartsWith(@"\\?\", StringComparison.Ordinal))
+            {
+                fullPath = ExactPath.ToExtended(path) ?? throw new ArgumentException(
+                    "The path has a name ending in a dot or space and can't be opened exactly.", nameof(path));
+            }
+            else
+            {
+                fullPath = Path.GetFullPath(path);
+            }
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {

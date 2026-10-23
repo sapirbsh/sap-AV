@@ -1,3 +1,4 @@
+using SapAV.Core.Hashing;
 using SapAV.Core.Models;
 using SapAV.Core.Scanning;
 using SapAV.Core.Text;
@@ -55,6 +56,12 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
                 return null; // e.g. reached through an 8.3 name: the final path is an engine folder
             }
 
+            if (DifferentFile(item, opened) is { } different)
+            {
+                logger.LogWarning("Scan of {Path}: {Why}", path, different);
+                return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null);
+            }
+
             item = Canonical(item, opened);
 
             step = "scan";
@@ -78,34 +85,65 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
     }
 
     /// <summary>
+    /// The requested path, exact (only "." / ".." resolved, trailing dots and spaces kept) with 8.3 parts expanded, in the
+    /// drive / UNC form the handle's final path uses; null if it can't be computed.
+    /// </summary>
+    private static string? ExactLongPath(string path)
+    {
+        var exact = ExactPath.ToExtended(path);
+        if (exact is null)
+        {
+            return null;
+        }
+
+        return ExactPath.StripPrefix(Native.ScanNative.TryGetLongPath(exact) ?? exact);
+    }
+
+    /// <summary>
+    /// B3 review H1: the open must have reached the file that was asked for. If the handle's final file name differs from
+    /// the requested name (after 8.3 expansion), something translated the name, e.g. a plain <c>evil.exe.</c> opening the
+    /// harmless <c>evil.exe</c> next to it, and judging that file would hide the real one. Null when the names agree (or the
+    /// file system can't report a final path; the quarantine refuses those anyway).
+    /// </summary>
+    internal static string? DifferentFile(ScanItem item, OpenedScanFile? opened)
+    {
+        string? finalPath = opened?.Identity?.FinalPath;
+        if (finalPath is null)
+        {
+            return null;
+        }
+
+        string? requested = ExactLongPath(item.Path);
+        string requestedName = requested is null ? Path.GetFileName(item.Path) : requested[(requested.LastIndexOf('\\') + 1)..];
+        string finalName = finalPath[(finalPath.LastIndexOf('\\') + 1)..];
+        return string.Equals(requestedName, finalName, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : $"Not scanned (Error): opening '{requestedName}' reached a different file ('{finalName}'); it was not judged.";
+    }
+
+    /// <summary>
     /// Review B2 follow-up Low: <c>Path.GetFullPath</c> doesn't expand 8.3 names (e.g. <c>C:\Users\RUNNER~1\...</c>), so
-    /// the quarantine would see a "redirect" for a plain short-name spelling. If the requested path with its 8.3 parts
-    /// expanded is exactly the handle's final path, the job continues with the final path (same object, same folders, only
-    /// the canonical spelling). Anything else (a junction on the way, a different file) keeps the requested path, so the
-    /// quarantine's redirect check still refuses it.
+    /// the quarantine would see a "redirect" for a plain short-name spelling. If the exact requested path with its 8.3 parts
+    /// expanded is the handle's final path, the job continues with the final path (same object, same folders, only the
+    /// canonical spelling; in <c>\\?\</c> form if a name ends in a dot or space, so it stays exact). Anything else (a
+    /// junction on the way) keeps the requested path, so the quarantine's redirect check still refuses it.
     /// </summary>
     internal static ScanItem Canonical(ScanItem item, OpenedScanFile? opened)
     {
         string? finalPath = opened?.Identity?.FinalPath;
-        if (finalPath is null || string.Equals(item.Path, finalPath, StringComparison.Ordinal))
+        if (finalPath is null)
         {
             return item;
         }
 
-        string full;
-        try
-        {
-            full = Path.GetFullPath(item.Path);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        string? longPath = string.Equals(item.Path, finalPath, StringComparison.Ordinal) ? finalPath : ExactLongPath(item.Path);
+        if (longPath is null || !string.Equals(longPath, finalPath, StringComparison.OrdinalIgnoreCase))
         {
             return item;
         }
 
-        string? longPath = Native.ScanNative.TryGetLongPath(full);
-        return longPath is not null && string.Equals(longPath, finalPath, StringComparison.OrdinalIgnoreCase)
-            ? item with { Path = finalPath }
-            : item;
+        string canonical = ExactPath.NeedsExtended(finalPath) ? ExactPath.ToExtended(finalPath) ?? item.Path : finalPath;
+        return item with { Path = canonical };
     }
 
     private static ScanJobFileResult ToResult(FileScanReport report, ScanVerdictOutcome outcome)

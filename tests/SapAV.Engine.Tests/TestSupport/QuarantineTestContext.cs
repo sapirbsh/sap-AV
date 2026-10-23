@@ -112,12 +112,14 @@ internal sealed class TempDir : IDisposable
                     return;
                 }
 
-                foreach (var file in Directory.EnumerateFiles(Path, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
+                // Extended form, so names ending in a dot or space (B3 H1 tests) are deleted exactly.
+                string root = @"\\?\" + Path;
+                foreach (var file in Directory.EnumerateFiles(root, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
                 {
                     File.SetAttributes(file, FileAttributes.Normal);
                 }
 
-                DeleteTree(Path);
+                DeleteTree(root);
                 return;
             }
             catch (DirectoryNotFoundException)
