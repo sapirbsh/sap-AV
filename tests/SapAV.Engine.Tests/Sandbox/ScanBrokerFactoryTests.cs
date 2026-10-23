@@ -12,11 +12,13 @@ public sealed class ScanBrokerFactoryTests : IDisposable
 
     public void Dispose() => TempDir.DeleteTree(_dir);
 
-    [Fact]
-    public async Task InProcess_AsAService_IsRefused_AndFilesAreNotScanned()
+    [Theory]
+    [InlineData(true, false)] // under the service control manager
+    [InlineData(false, true)] // as LocalSystem from a console (e.g. psexec -s)
+    public async Task InProcess_AsAServiceOrLocalSystem_IsRefused_AndFilesAreNotScanned(bool service, bool system)
     {
         var broker = ScanBrokerFactory.Create(new SandboxOptions { Mode = SandboxMode.InProcess }, new FakeRulesSource(),
-            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: true);
+            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: service, runningAsSystem: system);
         var path = Path.Combine(_dir, "f.txt");
         File.WriteAllText(path, "content");
 
@@ -33,9 +35,9 @@ public sealed class ScanBrokerFactoryTests : IDisposable
     public void InProcess_InAConsoleRun_IsAllowed_AndAppContainerIsTheDefault()
     {
         var inProcess = ScanBrokerFactory.Create(new SandboxOptions { Mode = SandboxMode.InProcess }, new FakeRulesSource(),
-            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: false);
+            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: false, runningAsSystem: false);
         using var sandboxed = (SandboxedScanBroker)ScanBrokerFactory.Create(new SandboxOptions(), new FakeRulesSource(),
-            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: true);
+            NullLogger.Instance, TimeProvider.System, online: null, runningAsService: true, runningAsSystem: false);
 
         Assert.IsType<InProcessScanBroker>(inProcess);
         Assert.Equal(SandboxMode.AppContainer, sandboxed.Status.Mode);

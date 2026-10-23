@@ -120,6 +120,11 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             {
                 response = await ScanInWorkerAsync(slot, worker, item, opened, cancellationToken).ConfigureAwait(false);
             }
+            catch (WorkerRequestException ex) when (ex.Kind == WorkerFailureKind.Unavailable)
+            {
+                _lastError = ex.Message; // the worker is to blame (or unknown), not the file: not counted
+                return NotScanned(item, opened, notes, ex.Message);
+            }
             catch (WorkerRequestException ex)
             {
                 return FileFailed(item, opened, notes, key, ex.Kind.ToString(), ex.Message);
@@ -251,7 +256,6 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         // MOTW: the broker opens the stream relative to its own handle; the worker can't (no access to user files).
         using var stream = NativeFile.OpenStreamRelative(opened.Handle, ":Zone.Identifier", out int streamError);
         IntPtr remoteFile = IntPtr.Zero, remoteStream = IntPtr.Zero;
-        int before = worker.HandleCount;
         WorkerResponse response;
         try
         {
@@ -280,15 +284,21 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             }
         }
 
-        // Review M1: a (compromised) worker could duplicate the brokered handle before the broker closes it, keeping the
-        // file readable and writer-blocked. Cheap trigger: the handle count grew over the request; then the precise check
-        // (does any worker handle name the same file or stream object?). Legitimate growth (crypto caches) never matches.
-        int after = worker.HandleCount;
-        if ((before < 0 || after < 0 || after > before) && worker.HoldsCopyOf(opened.Handle, stream))
+        // Review M-A: a (compromised) worker could keep its own copy of a brokered handle, so the file stays readable and
+        // writer-blocked after the answer. The broker's handles are the only legitimate ones on these file objects, so
+        // once the worker's copies are closed the kernel's system-wide handle count on each object must be exactly 1.
+        // Counting the worker's own handles could be gamed (close a dummy to stay flat) and enumerating them races.
+        switch (BrokeredHandles.Check(opened.Handle, stream))
         {
-            slot.Discard($"worker {slot.Index} kept a copy of the brokered file handle (handles {before} -> {after})");
-            throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation,
-                "The scan worker kept a copy of the file handle after answering; it was killed and its answer discarded.");
+            case BrokeredHandleState.StillHeld:
+                slot.Discard($"worker {slot.Index} kept a copy of a brokered file handle");
+                throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation,
+                    "The scan worker kept a copy of the file handle after answering; it was killed and its answer discarded.");
+
+            case BrokeredHandleState.Unknown:
+                slot.Discard($"worker {slot.Index}: the brokered handles could not be checked");
+                throw new WorkerRequestException(WorkerFailureKind.Unavailable,
+                    "The brokered file handles could not be checked after the scan; the worker was replaced and its answer discarded.");
         }
 
         return response;

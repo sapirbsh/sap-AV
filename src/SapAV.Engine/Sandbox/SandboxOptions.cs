@@ -54,8 +54,8 @@ public sealed class SandboxOptions
 
     /// <summary>
     /// The AppContainer profile name. Null (the default) = <c>sap-AV.ScanWorker.&lt;per-install random suffix&gt;</c>
-    /// (<see cref="Sandbox.AppContainerName"/>): the SID follows from the name alone, so a guessable name would let any
-    /// user create a profile with the worker's SID.
+    /// (<see cref="Sandbox.AppContainerName"/>), so installs and test runs don't share a profile. Not a secret: the worker's
+    /// process and thread DACL is what keeps other containers with the same SID out.
     /// </summary>
     public string? AppContainerName { get; set; }
 

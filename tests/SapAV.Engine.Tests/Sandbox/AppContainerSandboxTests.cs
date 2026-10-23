@@ -62,7 +62,7 @@ public sealed class AppContainerSandboxTests(AppContainerFixture fixture) : ICla
     }
 
     [RequiresFact(Requires.AppContainer)]
-    public async Task ProcessAndThreadDacl_GrantNoContainerUserOrWorldSid_AndTheUserCantOpenTheWorker()
+    public async Task ProcessAndThreadDacl_GrantNoContainerUserOrWorldSid_AndANonElevatedBrokerAccountCantOpenItByPid()
     {
         using var worker = await StartAsync();
         using var self = System.Security.Principal.WindowsIdentity.GetCurrent();
@@ -84,7 +84,8 @@ public sealed class AppContainerSandboxTests(AppContainerFixture fixture) : ICla
 
         if (!new System.Security.Principal.WindowsPrincipal(self).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
         {
-            // Same account as the broker here, yet it can't open the worker by PID (to read memory or steal handles).
+            // Same (non-admin) account as the broker, yet it can't open the worker by PID (to read memory or steal handles).
+            // Elevated runs (CI) skip this part: Administrators are in the DACL by design.
             using var byPid = System.Diagnostics.Process.GetProcessById(worker.ProcessId);
             Assert.Throws<System.ComponentModel.Win32Exception>(() => byPid.Handle);
         }

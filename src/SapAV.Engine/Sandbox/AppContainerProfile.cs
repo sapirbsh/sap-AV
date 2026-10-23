@@ -7,7 +7,8 @@ namespace SapAV.Engine.Sandbox;
 /// <summary>
 /// The scan worker's AppContainer profile (name: <see cref="AppContainerName"/>), created with <b>no capabilities</b>:
 /// no network (internetClient, privateNetworkClientServer, ...), no library or device access. Its SID is derived from
-/// the name, so it is the same every run (and why the name carries a per-install secret suffix).
+/// the name, so it is the same every run. The name carries a per-install suffix to avoid collisions; it is not a
+/// secret (see <see cref="AppContainerName"/>): the process/thread DACL is what keeps other containers out.
 /// </summary>
 internal static class AppContainerProfile
 {

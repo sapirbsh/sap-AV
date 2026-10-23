@@ -6,10 +6,12 @@ using SapAV.Engine.Quarantine;
 namespace SapAV.Engine.Sandbox;
 
 /// <summary>
-/// The worker's AppContainer profile name (review H1, defence in depth). An AppContainer SID is derived from the name
-/// alone, so with a fixed name any user could create a profile with the same SID. The default name therefore carries
-/// a per-install random suffix: <c>sap-AV.ScanWorker.&lt;32 hex&gt;</c>, generated once and kept where only the engine
-/// can read it.
+/// The worker's AppContainer profile name: <c>sap-AV.ScanWorker.&lt;32 hex&gt;</c>, with a per-install random suffix
+/// generated once. The suffix is <b>not a secret</b>: an AppContainer SID is visible in the object namespace (e.g. the
+/// container's named-object directory) while a worker runs. What protects the worker is the explicit process/thread
+/// DACL (<see cref="WorkerObjectSecurity"/>, no AppContainer SID in it) together with the lowbox double access check
+/// (an AppContainer token needs both a user/group grant and a package grant). The suffix only keeps two installs, or a
+/// test run, from sharing one profile, and stops a profile with a well-known name being prepared in advance.
 /// </summary>
 /// <remarks>
 /// <list type="bullet">

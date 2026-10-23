@@ -3,7 +3,7 @@ using SapAV.Engine.Tests.TestSupport;
 
 namespace SapAV.Engine.Tests.Sandbox;
 
-/// <summary>Review H1 (defence in depth): the default AppContainer name carries a per-install random suffix.</summary>
+/// <summary>Review H1 follow-up: the default AppContainer name carries a per-install random suffix (collision avoidance).</summary>
 public sealed class AppContainerNameTests : IDisposable
 {
     private readonly string _dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "sapav-tests", Guid.NewGuid().ToString("N"))).FullName;
@@ -21,7 +21,7 @@ public sealed class AppContainerNameTests : IDisposable
         Assert.True(AppContainerName.IsValidName(first), first);
         Assert.True(first.Length <= 64, "AppContainer names are limited to 64 characters");
         Assert.Equal(first, AppContainerName.FromDirectory(a)); // same install, same SID
-        Assert.NotEqual(first, AppContainerName.FromDirectory(b)); // another install can't predict it
+        Assert.NotEqual(first, AppContainerName.FromDirectory(b)); // another install gets its own profile
         Assert.Single(Directory.GetFiles(a)); // no temp files left
     }
 

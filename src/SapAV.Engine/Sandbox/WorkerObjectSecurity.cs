@@ -16,6 +16,13 @@ namespace SapAV.Engine.Sandbox;
 /// WRITE_DAC, so the creating account can't widen it later either). No user, logon, Everyone, Authenticated Users,
 /// ALL APPLICATION PACKAGES or AppContainer SID. The broker keeps working through the full-access handles CreateProcess
 /// returns; the worker uses its own pseudo-handles, which no DACL restricts.
+/// <para>
+/// Not done, measured: also setting this as the worker token's default DACL (for threads and objects the worker creates
+/// later) breaks WinVerifyTrust inside the container (catalog and embedded signatures come back UnsignedOrInvalid),
+/// because crypt32 re-opens objects the worker itself created. Later worker threads therefore keep the token's default
+/// DACL, which includes the AppContainer SID; the lowbox double access check plus the per-install profile name limit
+/// who could hold that SID.
+/// </para>
 /// </remarks>
 internal static class WorkerObjectSecurity
 {
@@ -83,7 +90,10 @@ internal static class WorkerObjectSecurity
         }
     }
 
-    /// <summary>True if every allow entry is SYSTEM, Administrators or OWNER RIGHTS (READ_CONTROL only), and the DACL is protected.</summary>
+    /// <summary>
+    /// True if the DACL is protected, every entry is a plain allow/deny ACE, and every allow entry is SYSTEM,
+    /// Administrators or OWNER RIGHTS (READ_CONTROL only). Any other ACE type fails closed.
+    /// </summary>
     public static bool IsLockedDown(RawSecurityDescriptor sd)
     {
         if (sd.DiscretionaryAcl is null || (sd.ControlFlags & ControlFlags.DiscretionaryAclProtected) == 0)
@@ -95,9 +105,19 @@ internal static class WorkerObjectSecurity
         var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         foreach (var ace in sd.DiscretionaryAcl)
         {
-            if (ace is not CommonAce common || common.AceQualifier != AceQualifier.AccessAllowed)
+            if (ace is not CommonAce common)
+            {
+                return false; // fail closed: object, callback or compound ACEs are never expected here
+            }
+
+            if (common.AceQualifier == AceQualifier.AccessDenied)
             {
                 continue; // deny entries never widen access
+            }
+
+            if (common.AceQualifier != AceQualifier.AccessAllowed)
+            {
+                return false; // audit/alarm qualifiers in a DACL: unexpected, fail closed
             }
 
             bool allowed = common.SecurityIdentifier == system || common.SecurityIdentifier == admins

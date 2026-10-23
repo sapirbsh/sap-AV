@@ -36,6 +36,16 @@ internal static class TestHooks
 
     private static readonly List<IntPtr> KeptCopies = [];
 
+    // Opened at worker start (when hooks are on), so closing it later hides a kept copy from a naive count check.
+    private static ManualResetEvent? s_dummy = Enabled ? new ManualResetEvent(false) : null;
+
+    /// <summary>Keeps a copy and closes the pre-opened dummy: the process handle count doesn't change.</summary>
+    public static void KeepCopyCloseDummy(long handle)
+    {
+        KeepCopy(handle);
+        Interlocked.Exchange(ref s_dummy, null)?.Dispose();
+    }
+
     /// <summary>Simulates a compromised parser that keeps its own copy of a brokered handle.</summary>
     public static void KeepCopy(long handle)
     {

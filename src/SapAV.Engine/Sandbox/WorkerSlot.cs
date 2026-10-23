@@ -50,6 +50,13 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
             // the file about to be scanned is not blamed.
             Lost($"worker {Index} (pid {chatty.ProcessId}) wrote data nobody asked for");
         }
+        else if (_worker is not null && time.GetUtcNow() - _startedAt >= options.MaxWorkerLifetime)
+        {
+            // An idle worker ages too: the lifetime is enforced before use, not only after a file.
+            logger.LogDebug("Recycling scan worker {Index}: lifetime reached while idle.", Index);
+            Kill();
+            Recycles++;
+        }
 
         if (_worker is null)
         {

@@ -51,7 +51,8 @@ public static class EngineHost
             var source = sp.GetRequiredService<IScanRulesSource>();
             var online = sp.GetService<IOnlineHashLookup>();
             return ScanBrokerFactory.Create(options, source, logger, sp.GetRequiredService<TimeProvider>(), online,
-                runningAsService: Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService());
+                runningAsService: Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService(),
+                runningAsSystem: AppContainerName.IsLocalSystem());
         });
         builder.Services.AddSingleton<IFileScanner>(sp => sp.GetRequiredService<IScanBroker>());
         builder.Services.AddHostedService<ScanBrokerStartupService>();

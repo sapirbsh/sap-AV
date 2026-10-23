@@ -82,6 +82,9 @@ public enum WorkerTestFault
 
     /// <summary>The worker duplicates the brokered file handle and keeps the copy (review M1).</summary>
     KeepHandleCopy,
+
+    /// <summary>As <see cref="KeepHandleCopy"/>, but also closes a dummy handle so the worker's handle count stays flat (review M-A).</summary>
+    KeepHandleCopyCloseDummy,
 }
 
 /// <summary>Scan one file. The handles are values <b>in the worker's handle table</b>, duplicated there by the broker.</summary>

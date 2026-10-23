@@ -194,11 +194,13 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
         Assert.NotSame(worker, broker.Slots[0].Worker);
     }
 
-    [Fact]
-    public async Task WorkerKeepingACopyOfTheFileHandle_IsKilled_AnswerDiscarded_FileReleased()
+    [Theory]
+    [InlineData(nameof(WorkerTestFault.KeepHandleCopy))]
+    [InlineData(nameof(WorkerTestFault.KeepHandleCopyCloseDummy))] // keeps the worker's own handle count flat
+    public async Task WorkerKeepingACopyOfTheFileHandle_IsKilled_AnswerDiscarded_FileReleased(string fault)
     {
         using var broker = Broker();
-        var item = File(nameof(WorkerTestFault.KeepHandleCopy) + ".bin", "sapav-b5-marker");
+        var item = File(fault + ".bin", "sapav-b5-marker");
 
         var report = await broker.ScanAsync(item);
 

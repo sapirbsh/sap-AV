@@ -76,6 +76,7 @@ internal static class WorkerFolderAccess
 
             using var handle = OpenExpected(folder, expectedFolder);
             lock (DaclGate)
+            using (CrossProcessGate.Acquire())
             {
                 var security = ReadDacl(handle, folder);
                 if (Grants(security, AllApplicationPackages) || Grants(security, appContainerSid))
@@ -102,6 +103,7 @@ internal static class WorkerFolderAccess
         string folder = WorkerFolder(workerExe);
         using var handle = OpenExpected(folder, expectedFolder);
         lock (DaclGate)
+        using (CrossProcessGate.Acquire())
         {
             var security = ReadDacl(handle, folder);
             security.PurgeAccessRules(appContainerSid);
@@ -187,6 +189,49 @@ internal static class WorkerFolderAccess
         if (error != 0)
         {
             throw new SandboxUnavailableException($"Could not change the ACL of {folder} (Win32 error {error}).");
+        }
+    }
+}
+
+/// <summary>
+/// The DACL read-modify-write is also serialized across processes (two test runs, or a console engine next to a test
+/// run, granting on the same folder). Only used on the non-SYSTEM path: as SYSTEM nothing is ever changed, so a user
+/// squatting on the mutex name can at most delay a developer's console run.
+/// </summary>
+internal static class CrossProcessGate
+{
+    private const string Name = @"Local\sap-AV.WorkerFolderDacl";
+
+    /// <exception cref="SandboxUnavailableException">Not acquired within 30 seconds.</exception>
+    public static IDisposable Acquire()
+    {
+        var mutex = new Mutex(initiallyOwned: false, Name);
+        try
+        {
+            if (!mutex.WaitOne(TimeSpan.FromSeconds(30)))
+            {
+                throw new SandboxUnavailableException($"Timed out waiting for {Name} to change the scan worker folder's ACL.");
+            }
+        }
+        catch (AbandonedMutexException)
+        {
+            // the previous holder died mid-change; we own it now and the DACL is re-read under it
+        }
+        catch
+        {
+            mutex.Dispose();
+            throw;
+        }
+
+        return new Releaser(mutex);
+    }
+
+    private sealed class Releaser(Mutex mutex) : IDisposable
+    {
+        public void Dispose()
+        {
+            mutex.ReleaseMutex();
+            mutex.Dispose();
         }
     }
 }

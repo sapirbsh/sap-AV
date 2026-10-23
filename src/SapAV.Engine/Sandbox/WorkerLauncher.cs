@@ -59,7 +59,7 @@ internal sealed class WorkerLauncher(SandboxOptions options, ILogger logger)
                 string name = AppContainerName.Resolve(options);
                 var sid = AppContainerProfile.Ensure(name);
                 var grant = WorkerFolderAccess.Ensure(exe, sid);
-                logger.LogInformation("Scan worker sandbox: AppContainer {Name} ({Sid}); worker folder access {Grant}.",
+                logger.LogDebug("Scan worker sandbox: AppContainer {Name} ({Sid}); worker folder access {Grant}.",
                     name, sid.Value, grant);
                 _sid = sid;
             }

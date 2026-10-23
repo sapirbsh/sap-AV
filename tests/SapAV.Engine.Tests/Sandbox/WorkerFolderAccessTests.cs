@@ -23,13 +23,13 @@ public sealed class WorkerFolderAccessTests
             Assert.All(containers, c => Assert.True(WorkerFolderAccess.Grants(security, c.Sid), $"{c.Sid} lost its grant"));
 
             // Revoking half of them concurrently must leave the other half intact.
-            await Task.WhenAll(containers.Take(4).Select(c => Task.Run(c.Dispose)));
+            await Task.WhenAll(containers.Take(4).Select(c => Task.Run(() => c.Dispose())));
             security = new DirectoryInfo(Path.GetDirectoryName(TestAppContainer.WorkerExe)!).GetAccessControl(AccessControlSections.Access);
             Assert.All(containers.Skip(4), c => Assert.True(WorkerFolderAccess.Grants(security, c.Sid), $"{c.Sid} lost its grant"));
         }
         finally
         {
-            foreach (var c in containers.Skip(4))
+            foreach (var c in containers) // every one, even if an assertion failed early (Dispose is idempotent)
             {
                 c?.Dispose();
             }
