@@ -31,22 +31,31 @@ internal static class WorkerFolderAccess
     private const FileSystemRights Needed = FileSystemRights.ReadAndExecute;
     private const InheritanceFlags Inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
 
+    /// <summary>
+    /// Grant and revoke are a read-modify-write of one DACL; without this, two concurrent callers (test classes in
+    /// parallel, the requirement probe) can each write back a DACL missing the other's entry, or re-add a revoked one.
+    /// </summary>
+    private static readonly object DaclGate = new();
+
     /// <exception cref="SandboxUnavailableException">The folder is refused, or the ACL can't be read or changed.</exception>
     public static FolderGrantResult Ensure(string workerExe, SecurityIdentifier appContainerSid)
     {
         var folder = CheckedFolder(workerExe);
         try
         {
-            var info = new DirectoryInfo(folder);
-            var security = info.GetAccessControl(AccessControlSections.Access);
-            if (Grants(security, AllApplicationPackages) || Grants(security, appContainerSid))
+            lock (DaclGate)
             {
-                return FolderGrantResult.AlreadyGranted;
-            }
+                var info = new DirectoryInfo(folder);
+                var security = info.GetAccessControl(AccessControlSections.Access);
+                if (Grants(security, AllApplicationPackages) || Grants(security, appContainerSid))
+                {
+                    return FolderGrantResult.AlreadyGranted;
+                }
 
-            security.AddAccessRule(new FileSystemAccessRule(appContainerSid, Needed, Inherit, PropagationFlags.None, AccessControlType.Allow));
-            info.SetAccessControl(security);
-            return FolderGrantResult.Granted;
+                security.AddAccessRule(new FileSystemAccessRule(appContainerSid, Needed, Inherit, PropagationFlags.None, AccessControlType.Allow));
+                info.SetAccessControl(security);
+                return FolderGrantResult.Granted;
+            }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or InvalidOperationException or PrivilegeNotHeldException)
         {
@@ -58,9 +67,12 @@ internal static class WorkerFolderAccess
     public static void Revoke(string workerExe, SecurityIdentifier appContainerSid)
     {
         var info = new DirectoryInfo(CheckedFolder(workerExe));
-        var security = info.GetAccessControl(AccessControlSections.Access);
-        security.PurgeAccessRules(appContainerSid);
-        info.SetAccessControl(security);
+        lock (DaclGate)
+        {
+            var security = info.GetAccessControl(AccessControlSections.Access);
+            security.PurgeAccessRules(appContainerSid);
+            info.SetAccessControl(security);
+        }
     }
 
     /// <summary>True if the folder's DACL (explicit or inherited) allows <paramref name="sid"/> ReadAndExecute on itself and its files.</summary>

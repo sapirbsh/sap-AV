@@ -135,7 +135,9 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
     [Fact]
     public async Task Hang_TimesOut_KillsTheWorker_AndTheNextFileScans()
     {
-        using var broker = Broker(configure: o => o.RequestTimeout = TimeSpan.FromSeconds(2));
+        // The hang is the explicit test hook, so the timeout is deterministic; 8 s leaves room for the fresh worker that
+        // scans the next file (cold JIT of the whole pipeline) on a slow CI runner.
+        using var broker = Broker(configure: o => o.RequestTimeout = TimeSpan.FromSeconds(8));
         await broker.ScanAsync(File("warmup.txt"));
         int hungPid = broker.Slots[0].Worker!.ProcessId;
 
@@ -145,7 +147,7 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
 
         Assert.Equal(ScanStatus.Error, report.Result.Status);
         Assert.Contains(report.Notes, n => n.Message.Contains("TimedOut", StringComparison.Ordinal));
-        Assert.InRange(watch.Elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(20));
+        Assert.InRange(watch.Elapsed, TimeSpan.FromSeconds(7.5), TimeSpan.FromSeconds(60));
         Assert.True(ProcessGone(hungPid), "the hung worker must be killed");
 
         Assert.Equal(Verdict.Clean, (await broker.ScanAsync(File("after.txt"))).Result.Verdict);
