@@ -168,7 +168,7 @@ public sealed class FileScannerSingleHandleTests : IDisposable
         Assert.Equal(10, new FileInfo(path).Length);
     }
 
-    [Fact]
+    [RequiresFact(Requires.SyntheticPeOnDisk)]
     public async Task HandleOverloads_GiveTheSameResultsAsThePathOverloads()
     {
         var path = _dir.WriteFile("same.exe", SyntheticPe.Build(SyntheticPe.Random(8192)));
