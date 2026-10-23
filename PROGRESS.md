@@ -65,6 +65,7 @@ pass comes at the end.
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | Being built |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | Not started |
+| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
 
 ## Current status — paused 2026-10-23, start here next session
 
@@ -87,10 +88,10 @@ pass comes at the end.
 - Leftover worker processes from the stopped test run were killed; none are running.
 
 **Open for the user**
-- Decision: X2 M1, a dedicated `sap-AV` event log that only SYSTEM can write (not urgent).
-- Once by hand: in an **elevated** PowerShell, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`.
+- ~~Decision X2 M1~~: **decided 2026-10-24: dedicated `sap-AV` event log** (only SYSTEM + the installer write), built as new step **B6**.
+- Once by hand: in an **elevated** PowerShell, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`. The 2026-10-24 attempt did not run the Event Log test: the Engine project was mid-edit by the B3 agent and didn't compile. Rerun after B6 (which changes that test).
 
 ## What's left
 
-- **B:** finish B5 → B3 → B4, then the section B tester + reviewer pass.
+- **B:** B3 (in progress) → B4 → B6, then the section B tester + reviewer pass.
 - Then C → D → E → F → G, ending with the Phase 1 security review (G5).

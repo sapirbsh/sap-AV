@@ -14,7 +14,7 @@ Owners: `engine-dev` (SapAV.Engine), `detection-dev` (detection logic in SapAV.C
   A4–A7 · B1+B3 · C2+C3 · C5+C6 · D1+D2 · E1–E4 · E5+E6 · F2–F5 · G3a+G3b · G4a+G4b. Steps with an immediate review are never batched past their review.
 - **Exception — immediate review:** steps that run privileged code as SYSTEM, touch quarantine, write or remove Registry
   entries, delete files, or touch the pipe get their own **reviewer** pass right after the step, before the next step starts:
-  - **B:** B1 (Event Log source registration), B2 (quarantine), B4 (pipe server), B5 (privilege separation: full review)
+  - **B:** B1 (Event Log source registration), B2 (quarantine), B4 (pipe server), B5 (privilege separation: full review), B6 (dedicated event log + CustomSD)
   - **C:** C1 (pipe-supplied scan paths, `ScanPathPolicy`)
   - **D:** D3 (`%ProgramData%\sap-AV` ACL, API key), D5 (Block & remove: Registry/task/service changes)
   - **E:** E5 (Defender access as SYSTEM), E8/E10 (ETW sessions as SYSTEM), E11 (Remove threat: kill/Registry/Defender writes),
@@ -253,9 +253,8 @@ section A: single-handle pipeline, crash-safe YARA content access, YARA import a
 
 **Carried over from the B1 review (Medium/Low).** H1 (the ILogger EventLog provider auto-registering a source),
 H2 (a write re-creating a removed source) and M2/L1/L2/L3/L6/L7 are fixed in B1.
-- **X2 — decision needed (M1):** anyone on the machine can write Application-log events with source `sap-AV` (fake 1001
-  alerts, or floods that push real ones out). Options: a dedicated `sap-AV` event log whose CustomSD lets only SYSTEM write,
-  or a manifest-based ETW channel. Until decided, document that SIEMs must not trust these events on source + ID alone.
+- **X2 — decided 2026-10-24 (M1): dedicated `sap-AV` event log.** Today anyone on the machine can write Application-log
+  events with source `sap-AV` (fake 1001 alerts, or floods that push real ones out). Fix, built as **B6** (see below).
 - **Service installer / D3 (M3):** the message DLL `System.Diagnostics.EventLog.Messages.dll` is registered from the
   engine folder. The installer must refuse unless that folder is admin-only (Program Files), or point
   `MessageResourceFile` at a protected path.
@@ -358,6 +357,7 @@ M1 (worker keeping duplicated handles), M4 partially (no ACL grant as SYSTEM), L
 | B3 | engine-dev | Scan job framework: bounded queue, background-priority worker threads, progress + ETA, pause/resume/cancel. **Carried over from the A2 review:** opening a file is synchronous and can't be cancelled (slow shares, held oplocks), so hashing runs on dedicated low-priority worker threads, not the shared thread pool. Benchmark sync vs `FileOptions.Asynchronous` reads on local disk and pick one | Pause stops progress; cancel ends cleanly; ETA computed from throughput |
 | B4 | engine-dev | Named-pipe protocol v1 (JSON): start/pause/resume/cancel scan, progress events, results, item actions. Bad client messages are caught (`JsonException` **and** the `ArgumentException`s thrown by model validation) and must not kill the connection handler. **Carried over from the A1 review:** every path received over the pipe goes through `ScanPathPolicy` (see C1) before a scan is started. Don't register `JsonStringEnumConverter` (or any enum converter) in the pipe's `JsonSerializerOptions`: options-level converters override the models' `StrictEnumConverter<T>` attribute and would re-allow numbers and any letter case. If enum-keyed dictionaries are needed, add `ReadAsPropertyName`/`WriteAsPropertyName` to `StrictEnumConverter<T>` first. Set `AllowDuplicateProperties = false` in the pipe options, so `{"Status":"Locked", …, "Status":"Scanned"}` can't turn a skipped file into Clean | Round-trip serialization tests + in-process pipe test; malformed message → error reply, connection stays up |
 | B5 | engine-dev | **Privilege separation (full reviewer pass):** all file parsing (hashing, YARA, heuristics, Authenticode, MOTW, and later the Pre-Flight PE/archive parsing, G3a) runs in a separate low-privilege **scan worker** process, never in the SYSTEM engine. The worker runs with an AppContainer (preferred) or a restricted token at Low integrity: no network capability, no write access to user files, in a Job Object with memory/CPU/process-count limits, kill-on-job-close and no child processes. The SYSTEM engine only **brokers**: it opens each file with the hardened open (A2), duplicates a read-only handle into the worker, and receives results over a private pipe that only that worker may connect to. Worker output is untrusted input: validated with the same strict JSON/model rules, with size caps. A worker crash, hang or timeout → that file is NotScanned (Error), the worker is restarted with backoff, and a file that crashes the worker repeatedly is flagged Suspicious. Known risks to solve: whether WinVerifyTrust catalog lookups work inside an AppContainer (CryptSvc/catroot access), and loading `libyara.dll` (its folder needs ACLs for "ALL APPLICATION PACKAGES"). If Authenticode can't run sandboxed, it runs in a separate restricted worker, never in the engine. B3's scan jobs dispatch to this worker; C, D and E build on it | Worker token: integrity level / AppContainer SID, no network, Job limits; the engine-side handle is read-only; a deliberately crashing test parser → NotScanned + restart, the engine keeps running; a worker sending malformed or oversized results is rejected; the EICAR end-to-end scan goes through the worker; the worker can't open a user file by path |
+| B6 | engine-dev | **Dedicated `sap-AV` event log (immediate review; decision X2 M1, 2026-10-24):** `--install-eventlog-source` creates a custom log named `sap-AV` (not Application) with source `sap-AV`, and sets the log's `CustomSD` so that only SYSTEM can write (plus Administrators, for the elevated installer), and Administrators + Event Log Readers can read. Normal users can't write events to it, so they can't forge or flood alerts. Migration: an existing Application-log `sap-AV` source is moved (uninstall + reinstall into the new log; `RegisteredInOtherLog` handled explicitly). `--uninstall-eventlog-source` removes the log too. The writer (`ReportEvent` path, never auto-registering) targets the new log; event IDs are unchanged. Also: the installer refuses unless the message DLL's folder is admin-only (B1 M3) | Installer creates the log with the expected CustomSD (read back and compared); a non-admin token can't `ReportEvent` into it (elevated + `SAPAV_TEST_ALLOW_HKLM=1` test, cleaned up); migration from an Application-log source; uninstall removes both; existing writer/sink tests still pass |
 
 **C. Scan modes (engine-dev, detection-dev for judgement)**
 
@@ -487,7 +487,10 @@ Every alert carries exactly one primary technique ID (more allowed as secondary)
 YARA rules may override with their own `mitre` meta value.
 
 ### X2. Windows Event Log (engine-dev)
-- Every alert is written to the Application log with source **"sap-AV"**, registered by the service installer (needs admin; the service runs as LocalSystem).
+- Every alert is written to a **dedicated event log named "sap-AV"** (source "sap-AV"), not the Application log. Its
+  CustomSD lets only SYSTEM (and the elevated installer) write; readers are Administrators and Event Log Readers.
+  Registered by the service installer (needs admin; the service runs as LocalSystem). Decided 2026-10-24, built in B6.
+  (Until B6, alerts go to the Application log.)
 - Structured payload (JSON in the message, stable field names) for SIEM collection: timestamp, alert type, verdict, file path,
   SHA-256, signer, MITRE ID, reason(s), MOTW URL, action taken.
 - Fixed event IDs per alert type (defined in B1, `src/SapAV.Engine/Alerts/AlertEventCatalog.cs`):
