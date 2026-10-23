@@ -30,6 +30,13 @@ public enum Requires
     /// than %TEMP%, for the real cross-volume quarantine test. Tests create and remove only a subfolder there.
     /// </summary>
     SecondVolume,
+
+    /// <summary>
+    /// The real scan worker starts in a throwaway AppContainer (profile, read/execute grant on the test output's ScanWorker
+    /// folder, Job Object) and loads rules. Needs AppContainer support and WRITE_DAC on the build output; the probe removes
+    /// its profile and ACL entry again. Expected to work on Windows 10/11 and GitHub Actions windows-latest.
+    /// </summary>
+    AppContainer,
 }
 
 internal static class TestRequirements
@@ -47,6 +54,7 @@ internal static class TestRequirements
             : $"opt-in: set {AllowHklmVariable}=1 to let the test register and remove a throwaway Event Log source"),
         [Requires.Junctions] = new(ProbeJunctions),
         [Requires.SecondVolume] = new(ProbeSecondVolume),
+        [Requires.AppContainer] = new(ProbeAppContainer),
     };
 
     public static IReadOnlyCollection<Requires> All => Probes.Keys;
@@ -135,6 +143,24 @@ internal static class TestRequirements
         return string.Equals(Path.GetPathRoot(Path.GetFullPath(folder)), Path.GetPathRoot(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase)
             ? $"{SecondVolumeVariable}={folder} is on the same drive as %TEMP%"
             : null;
+    }
+
+    private static string? ProbeAppContainer()
+    {
+        try
+        {
+            using var container = new TestAppContainer("Probe");
+            using var worker = container.Start();
+            var response = WorkerTestClient.LoadRulesAsync(worker).GetAwaiter().GetResult();
+            worker.Kill();
+            return response.Kind == SapAV.Core.Scanning.Isolation.WorkerResponseKind.RulesLoaded
+                ? null
+                : $"the sandboxed worker answered {response.Kind}: {response.Error}";
+        }
+        catch (Exception ex)
+        {
+            return $"the scan worker can't run in an AppContainer here: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     private static string? ProbeElevated()
