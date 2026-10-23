@@ -328,7 +328,26 @@ M1 (worker keeping duplicated handles), M4 partially (no ACL grant as SYSTEM), L
 - **B5 follow-up (L4):** a compromised long-lived worker could crash on another file twice to get it flagged
   Suspicious (T1211). Count a failure only when the worker was freshly started for that file. Suspicious only, never
   quarantine.
-- **B5 follow-up:** profile/ACE cleanup in `SandboxTestSupport.cs` was not reviewed. Check it at the section B review.
+- **B5 follow-up review (H1 confirmed closed, no Critical/High).** These are done as the first commit of B3:
+  - (Medium, M-A) The M1 handle-copy check can be bypassed. A worker can keep the handle count flat by closing a dummy
+    handle, the enumeration has a TOCTOU, and section views aren't seen. Fix: after `CloseInWorker`,
+    `NtQueryObject(ObjectBasicInformation)` on the broker's own file/stream handles must report a system-wide HandleCount
+    of exactly 1, else discard the worker. Add a test fault that duplicates the handle and closes a dummy.
+  - (Low) Refuse `Sandbox:Mode=InProcess` whenever running as LocalSystem, not only under services.exe.
+  - (Low) Also enforce `MaxWorkerLifetime` in `EnsureReadyAsync` (idle workers).
+  - (Low) `WorkerObjectSecurity.IsLockedDown` fails open on non-CommonAce ACEs: return false for any other ACE type.
+  - (Low) A failed handle enumeration discards the worker without counting it against the file.
+  - (Low) Log the AppContainer profile name/SID at Debug, not Information.
+  - (Low) Tests: `WorkerFolderAccessTests` disposes every container in `finally`. The fixture purges stale
+    `sap-AV.ScanWorker.Test.*` profiles and their S-1-15-2-* ACEs (keeping S-1-15-2-1/-2). Use a named mutex for the
+    DACL gate across concurrent test runs. Fix the misleading "non-admin account" test name.
+  - (Low, docs) The per-install suffix is not secret: AppContainer SIDs are visible in the object namespace while a
+    worker runs. Fix the comments in `AppContainerName`/`AppContainerProfile`: the protection is the explicit DACL plus
+    the lowbox double access check, and the suffix only avoids collisions. Optional: set the worker token's
+    TokenDefaultDacl to SYSTEM + Administrators before resume, and test the DACL of every worker thread.
+- **D3 (Medium, M-B):** a standard user can pre-create `%ProgramData%\sap-AV\Sandbox`, so it is UntrustedOwner and the
+  sandbox, and with it **all scanning**, is unavailable (worse than B2 M3). The installer creates the folder with the
+  protected ACL, and startup raises an Event Log alert whenever the sandbox is unavailable.
 
 **B. Engine infrastructure (engine-dev)**
 
