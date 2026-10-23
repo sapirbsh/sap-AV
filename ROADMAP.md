@@ -501,6 +501,13 @@ YARA rules may override with their own `mitre` meta value.
   | 1002 | SuspiciousFile | Warning | File with a Suspicious verdict |
   | 1003 | PotentiallyUnwantedFile | Warning | PUP / hack tool (section E) |
   | 3001 | QuarantineRestored | Information | User restored an item from quarantine (B2) |
+  | 9001 | AlertsSuppressed | Warning | Summary of alerts held back by aggregation/rate limits (B3) |
+  | 9002 | AutoQuarantineBurst | Warning | Auto-quarantine rate limit hit (B3) |
+  | 9003 | ScanRulesDegraded | Warning | Zero rules loaded, rule-file errors or a failed rule load (B3; counts only, no worker text) |
+  | 9004 | QuarantineStoreFull | Error | Quarantine store over quota or below the free-space floor (B3) |
+
+  `AlertAction.NeedsUserConfirmation` (B3) marks a Malicious file that auto-quarantine refused (protected location,
+  SYSTEM/TrustedInstaller owner, or unknown owner).
 
   Reserved ranges: 1000–1999 file detections · 2000–2999 system-change detections (persistence, Defender tampering,
   honeytokens, process chains) · 3000–3999 user/remediation actions · 9000–9999 engine health. The engine's own ILogger
