@@ -11,7 +11,7 @@ public interface IAlertDispatcher
     /// Queues <paramref name="alert"/> unless it is aggregated (same type + hash + path already alerted in this window),
     /// over the per-window limit, or the queue is full; those are counted for the next summary. Never blocks.
     /// </summary>
-    /// <param name="health">Engine-health alerts skip the per-window limit (still one per type + path per window).</param>
+    /// <param name="health">Engine-health alerts skip the per-window limit, as Malicious alerts do (still one per type + path per window).</param>
     /// <returns>True if queued.</returns>
     bool Post(Alert alert, bool health = false);
 
@@ -44,7 +44,7 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
 
     private DateTimeOffset _windowStart;
     private int _passed;
-    private long _duplicates, _rateLimited, _dropped;
+    private long _duplicates, _rateLimited, _dropped, _malicious;
     private Alert? _worst;
 
     public AlertDispatcher(IAlertSink sink, TimeProvider time, ILogger<AlertDispatcher> logger, TimeSpan window, int maxPerWindow, int capacity)
@@ -73,6 +73,10 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
     public bool Post(Alert alert, bool health = false)
     {
         ArgumentNullException.ThrowIfNull(alert);
+
+        // Review M3: a flood of Suspicious alerts must not crowd out a Malicious one, so Malicious and health alerts skip the
+        // total cap (they still get per-key aggregation and the key limit).
+        bool uncapped = health || alert.Verdict == Verdict.Malicious;
         Pending? summary;
         bool accepted;
         lock (_lock)
@@ -84,7 +88,7 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
                 _duplicates++;
                 accepted = false;
             }
-            else if ((!health && _passed >= _maxPerWindow) || _seen.Count >= MaxKeysPerWindow)
+            else if ((!uncapped && _passed >= _maxPerWindow) || _seen.Count >= MaxKeysPerWindow)
             {
                 _rateLimited++;
                 accepted = false;
@@ -92,13 +96,13 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
             else
             {
                 _seen.Add(key);
-                _passed += health ? 0 : 1;
+                _passed += uncapped ? 0 : 1;
                 accepted = true;
             }
 
             if (!accepted)
             {
-                TrackLocked(alert);
+                SuppressedLocked(alert);
             }
         }
 
@@ -120,7 +124,7 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
         lock (_lock)
         {
             _dropped++;
-            TrackLocked(alert);
+            SuppressedLocked(alert);
         }
 
         return false;
@@ -183,6 +187,7 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
             _duplicates += summary.Duplicates;
             _rateLimited += summary.RateLimited;
             _dropped += summary.Dropped;
+            _malicious += summary.Malicious;
             TrackLocked(summary.Worst);
         }
     }
@@ -239,9 +244,9 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
         var worst = _worst;
         string reason = $"{total} alert(s) were not written to the Event Log: {_duplicates} repeat(s) of an alert already raised for the " +
             $"same file and SHA-256, {_rateLimited} over the limit of {_maxPerWindow} alerts per {_window}, {_dropped} because the alert " +
-            "queue was full. Scan results keep every file.";
-        var pending = new Pending(null!, _duplicates, _rateLimited, _dropped, worst);
-        _duplicates = _rateLimited = _dropped = 0;
+            $"queue was full; {_malicious} of them Malicious. Scan results keep every file.";
+        var pending = new Pending(null!, _duplicates, _rateLimited, _dropped, _malicious, worst);
+        _duplicates = _rateLimited = _dropped = _malicious = 0;
         _worst = null;
         var now = _time.GetUtcNow();
         var verdict = worst.Verdict == Verdict.Malicious ? Verdict.Malicious : Verdict.Suspicious;
@@ -251,6 +256,16 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
                 AlertType.AlertsSuppressed, verdict, worst.FilePath, null, null, null, worst.TechniqueId, [], [reason], null,
                 AlertAction.None, worst.Trigger, EngineInfo.Version),
         };
+    }
+
+    private void SuppressedLocked(Alert alert)
+    {
+        if (alert.Verdict == Verdict.Malicious && alert.Type != AlertType.AlertsSuppressed)
+        {
+            _malicious++;
+        }
+
+        TrackLocked(alert);
     }
 
     private void TrackLocked(Alert alert)
@@ -265,5 +280,5 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
         string.Join('|', alert.Type.ToString(), alert.Sha256 ?? string.Empty, alert.FilePath.ToUpperInvariant());
 
     /// <summary>A built summary and the counts it took (restored if it can't be queued).</summary>
-    private readonly record struct Pending(Alert Alert, long Duplicates, long RateLimited, long Dropped, Alert Worst);
+    private readonly record struct Pending(Alert Alert, long Duplicates, long RateLimited, long Dropped, long Malicious, Alert Worst);
 }

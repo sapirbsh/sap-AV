@@ -1,3 +1,4 @@
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Models;
@@ -6,25 +7,33 @@ using SapAV.Engine.Scanning.Native;
 
 namespace SapAV.Engine.Scanning;
 
-/// <summary>Reads a file's owner from its handle. Fake it in tests (a test can't create SYSTEM-owned files unelevated).</summary>
-internal interface IFileOwnerReader
+/// <summary>Reads a file's owner and DACL from its handle. Fake it in tests (a test can't create SYSTEM-owned files unelevated).</summary>
+internal interface IFileSecurityReader
 {
-    SecurityIdentifier? GetOwner(SafeFileHandle handle);
+    RawSecurityDescriptor? Read(SafeFileHandle handle);
 }
 
-internal sealed class HandleOwnerReader : IFileOwnerReader
+internal sealed class HandleSecurityReader : IFileSecurityReader
 {
-    public static HandleOwnerReader Instance { get; } = new();
+    public static HandleSecurityReader Instance { get; } = new();
 
-    public SecurityIdentifier? GetOwner(SafeFileHandle handle) => ScanNative.TryGetOwner(handle);
+    public RawSecurityDescriptor? Read(SafeFileHandle handle) => ScanNative.TryGetOwnerAndDacl(handle);
 }
 
 /// <summary>
 /// Where scan jobs may quarantine on their own (review B5 M3). A compromised worker could report any file Malicious, so
-/// files only SYSTEM or TrustedInstaller may change are never moved automatically: Windows, Program Files (both views),
-/// configured extra folders, and any file owned by SYSTEM or TrustedInstaller. Those are flagged "needs user confirmation"
-/// instead. An owner that can't be read counts as protected (fail closed). Only <see cref="Verdict.Malicious"/> is ever
-/// eligible: Suspicious, and the PUP / HackTool category (E1), never are.
+/// files a normal user can't change are never moved automatically; they are flagged "needs user confirmation" instead:
+/// <list type="bullet">
+/// <item>anything under Windows, Program Files (both views) or a configured protected folder (requested or final path; a
+/// path that can't be normalised counts as protected, review L1);</item>
+/// <item>files owned by SYSTEM or TrustedInstaller;</item>
+/// <item>review M4: files no non-admin principal may modify or delete, i.e. the owner is SYSTEM / Administrators /
+/// TrustedInstaller and no allow ACE grants write, delete, WRITE_DAC or WRITE_OWNER to anyone else (Users, Authenticated
+/// Users, Everyone, INTERACTIVE, a user). An Administrators-owned file in a user's folder that the user can modify (the
+/// usual inherited ACL) stays eligible.</item>
+/// </list>
+/// Owner or DACL unreadable = protected (fail closed). Only <see cref="Verdict.Malicious"/> is ever eligible: Suspicious,
+/// and the PUP / HackTool category (E1), never are.
 /// </summary>
 internal sealed class AutoQuarantinePolicy
 {
@@ -33,13 +42,22 @@ internal sealed class AutoQuarantinePolicy
 
     public static readonly SecurityIdentifier LocalSystem = new(WellKnownSidType.LocalSystemSid, null);
 
-    private readonly FolderSet _protected;
-    private readonly IFileOwnerReader _owners;
+    public static readonly SecurityIdentifier Administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
 
-    public AutoQuarantinePolicy(IEnumerable<string> extraProtectedFolders, IFileOwnerReader? owners = null)
+    /// <summary>OWNER RIGHTS and CREATOR OWNER stand for the (admin) owner here, not for another principal.</summary>
+    private static readonly SecurityIdentifier OwnerRights = new("S-1-3-4");
+    private static readonly SecurityIdentifier CreatorOwner = new(WellKnownSidType.CreatorOwnerSid, null);
+
+    /// <summary>FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE.</summary>
+    private const int ModifyMask = 0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+
+    private readonly FolderSet _protected;
+    private readonly IFileSecurityReader _security;
+
+    public AutoQuarantinePolicy(IEnumerable<string> extraProtectedFolders, IFileSecurityReader? security = null)
     {
         _protected = new FolderSet(DefaultProtectedFolders().Concat(extraProtectedFolders));
-        _owners = owners ?? HandleOwnerReader.Instance;
+        _security = security ?? HandleSecurityReader.Instance;
     }
 
     public FolderSet ProtectedFolders => _protected;
@@ -58,27 +76,64 @@ internal sealed class AutoQuarantinePolicy
         report.Result.Status == ScanStatus.Scanned && report.Result.Verdict == Verdict.Malicious;
 
     /// <summary>Why the file must not be auto-quarantined (it needs the user), or null if it may be.</summary>
-    /// <param name="opened">The scan's handle (for the owner); null = no handle, which is refused.</param>
+    /// <param name="opened">The scan's handle (for owner and DACL); null = no handle, which is refused.</param>
     public string? ProtectedReason(FileScanReport report, OpenedScanFile? opened)
     {
         string path = report.Result.Item.Path;
         string? finalPath = report.Identity?.FinalPath;
+        if (FolderSet.Normalize(path) is null || (finalPath is not null && FolderSet.Normalize(finalPath) is null))
+        {
+            return "the file's location could not be checked against the protected folders";
+        }
+
         if (_protected.Contains(path) || _protected.Contains(finalPath))
         {
             return "the file is in a protected system folder (Windows or Program Files)";
         }
 
-        if (opened is null)
-        {
-            return "the scan has no open handle to the file";
-        }
+        return opened is null ? "the scan has no open handle to the file" : JudgeSecurity(_security.Read(opened.Handle));
+    }
 
-        var owner = _owners.GetOwner(opened.Handle);
-        return owner is null ? "the file's owner could not be read"
+    /// <summary>The refusal for a file's owner and DACL, or null if a non-admin principal may change it.</summary>
+    internal static string? JudgeSecurity(RawSecurityDescriptor? descriptor)
+    {
+        var owner = descriptor?.Owner;
+        return owner is null ? "the file's owner and permissions could not be read"
             : owner == LocalSystem ? "the file is owned by SYSTEM"
             : owner == TrustedInstaller ? "the file is owned by TrustedInstaller"
+            : !NonAdminCanModify(descriptor!) ? "only SYSTEM, Administrators or TrustedInstaller may change or delete the file"
             : null;
     }
+
+    /// <summary>True if a non-admin owner, a NULL DACL, or an allow ACE for a non-admin SID lets someone else modify or delete it.</summary>
+    internal static bool NonAdminCanModify(RawSecurityDescriptor descriptor)
+    {
+        if (descriptor.Owner is not { } owner || !IsAdmin(owner))
+        {
+            return true; // a user owner can always rewrite the DACL
+        }
+
+        if (descriptor.DiscretionaryAcl is not { } dacl)
+        {
+            return true; // NULL DACL: everyone has full access
+        }
+
+        foreach (var ace in dacl)
+        {
+            if (ace is QualifiedAce { AceQualifier: AceQualifier.AccessAllowed } allow
+                && (allow.AceFlags & AceFlags.InheritOnly) == 0
+                && (allow.AccessMask & ModifyMask) != 0
+                && !IsAdmin(allow.SecurityIdentifier))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAdmin(SecurityIdentifier sid) =>
+        sid == LocalSystem || sid == Administrators || sid == TrustedInstaller || sid == OwnerRights || sid == CreatorOwner;
 }
 
 /// <summary>Sliding-window limit on automatic quarantines (review B5 M3); thread-safe.</summary>

@@ -21,6 +21,7 @@ internal static unsafe class ScanNative
     private const int ThreadModeBackgroundEnd = 0x00020000;
     private const int SeFileObject = 1;
     private const uint OwnerSecurityInformation = 0x1;
+    private const uint DaclSecurityInformation = 0x4;
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
@@ -53,10 +54,14 @@ internal static unsafe class ScanNative
         return reopened;
     }
 
-    /// <summary>The owner SID of the open file (needs READ_CONTROL, which GENERIC_READ includes), or null if it can't be read.</summary>
-    public static SecurityIdentifier? TryGetOwner(SafeFileHandle handle)
+    /// <summary>
+    /// The owner and DACL of the open file as a self-relative descriptor (needs READ_CONTROL, which GENERIC_READ includes),
+    /// or null if they can't be read.
+    /// </summary>
+    public static System.Security.AccessControl.RawSecurityDescriptor? TryGetOwnerAndDacl(SafeFileHandle handle)
     {
-        int status = GetSecurityInfo(handle, SeFileObject, OwnerSecurityInformation, out IntPtr owner, out _, out _, out _, out IntPtr descriptor);
+        int status = GetSecurityInfo(handle, SeFileObject, OwnerSecurityInformation | DaclSecurityInformation,
+            out _, out _, out _, out _, out IntPtr descriptor);
         if (status != 0)
         {
             return null;
@@ -64,7 +69,10 @@ internal static unsafe class ScanNative
 
         try
         {
-            return owner == IntPtr.Zero ? null : new SecurityIdentifier(owner);
+            int length = (int)GetSecurityDescriptorLength(descriptor);
+            var bytes = new byte[length];
+            Marshal.Copy(descriptor, bytes, 0, length);
+            return new System.Security.AccessControl.RawSecurityDescriptor(bytes, 0);
         }
         finally
         {
@@ -94,14 +102,19 @@ internal static unsafe class ScanNative
     /// <summary>The path with every 8.3 component expanded to its long name (links are not resolved), or null on failure.</summary>
     public static string? TryGetLongPath(string path)
     {
-        char* buffer = stackalloc char[1024];
-        uint length = GetLongPathNameW(path, buffer, 1024);
-        if (length is 0 or >= 1024)
+        // Review L4: ask for the needed length first, so long paths (up to 32,767 characters) work too.
+        uint needed = GetLongPathNameW(path, null, 0);
+        if (needed == 0 || needed > short.MaxValue)
         {
             return null;
         }
 
-        return new string(buffer, 0, (int)length);
+        var buffer = new char[needed];
+        fixed (char* p = buffer)
+        {
+            uint length = GetLongPathNameW(path, p, needed);
+            return length is 0 || length >= needed ? null : new string(p, 0, (int)length);
+        }
     }
 
     /// <summary>
@@ -142,6 +155,9 @@ internal static unsafe class ScanNative
 
     [DllImport("kernel32.dll", ExactSpelling = true)]
     private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
 
     [DllImport("kernel32.dll", EntryPoint = "GetLongPathNameW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern uint GetLongPathNameW(string shortPath, char* longPath, uint bufferLength);

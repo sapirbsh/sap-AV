@@ -1,4 +1,4 @@
-using System.Security.Principal;
+using System.Security.AccessControl;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Alerts;
@@ -33,11 +33,11 @@ public sealed class ScanVerdictHandlerTests : IDisposable
         _quarantine.Dispose();
     }
 
-    private void UseHandler(IEnumerable<string>? protectedFolders = null, IFileOwnerReader? owners = null, int maxPerWindow = 20,
+    private void UseHandler(IEnumerable<string>? protectedFolders = null, IFileSecurityReader? security = null, int maxPerWindow = 20,
         IQuarantineService? quarantine = null, IAlertDispatcher? alerts = null)
     {
         _jobs.Handler = new ScanVerdictHandler(alerts ?? _dispatcher, quarantine ?? _quarantine.Manager,
-            new AutoQuarantinePolicy(protectedFolders ?? [], owners), new AutoQuarantineLimiter(TimeProvider.System, maxPerWindow, TimeSpan.FromMinutes(10)),
+            new AutoQuarantinePolicy(protectedFolders ?? [], security), new AutoQuarantineLimiter(TimeProvider.System, maxPerWindow, TimeSpan.FromMinutes(10)),
             TimeProvider.System, NullLogger.Instance);
     }
 
@@ -99,18 +99,30 @@ public sealed class ScanVerdictHandlerTests : IDisposable
     }
 
     [Theory]
-    [InlineData("S-1-5-18")] // SYSTEM
-    [InlineData("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")] // TrustedInstaller
-    public async Task Malicious_OwnedBySystemOrTrustedInstaller_IsNotAutoQuarantined(string ownerSid)
+    [InlineData("O:SYD:(A;;FA;;;WD)", false)] // owned by SYSTEM: protected even if others may write
+    [InlineData("O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:(A;;FA;;;WD)", false)] // TrustedInstaller
+    [InlineData("O:BAD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)", false)] // review M4: Administrators-owned, users read only
+    [InlineData("O:BAD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", true)] // Administrators-owned but users may modify it
+    public async Task AutoQuarantine_DependsOnWhetherANonAdminMayModifyTheFile(string sddl, bool quarantined)
     {
-        UseHandler(owners: new FixedOwner(new SecurityIdentifier(ownerSid)));
-        var path = _jobs.Write("mal-system-owned.dll", "x");
+        UseHandler(security: new FixedSecurity(sddl));
+        var path = _jobs.Write("mal-owned.dll", "x");
 
         var job = await RunAsync();
 
-        Assert.Equal(ScanFileAction.NeedsUserConfirmation, Assert.Single(job.Results).Action);
-        Assert.True(File.Exists(path));
+        Assert.Equal(quarantined ? ScanFileAction.Quarantined : ScanFileAction.NeedsUserConfirmation, Assert.Single(job.Results).Action);
+        Assert.Equal(!quarantined, File.Exists(path));
     }
+
+    [Theory]
+    [InlineData("O:BAD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-3-4)", false)] // OWNER RIGHTS = the admin owner
+    [InlineData("O:BAD:(A;OIIO;FA;;;BU)", false)] // inherit-only: doesn't apply to this file
+    [InlineData("O:BAD:(A;;0x10000;;;AU)", true)] // DELETE for Authenticated Users
+    [InlineData("O:BAD:(A;;GW;;;IU)", true)] // GENERIC_WRITE for INTERACTIVE
+    [InlineData("O:S-1-5-21-1-2-3-1001D:(A;;FA;;;SY)", true)] // a user owner can rewrite the DACL
+    [InlineData("O:BA", true)] // NULL DACL: everyone has full access
+    public void NonAdminCanModify_ReadsTheDacl(string sddl, bool expected) =>
+        Assert.Equal(expected, AutoQuarantinePolicy.NonAdminCanModify(new RawSecurityDescriptor(sddl)));
 
     [Fact]
     public void Policy_RealWindowsBinary_IsProtected_AndOwnerReadsFromTheHandle()
@@ -121,7 +133,8 @@ public sealed class ScanVerdictHandlerTests : IDisposable
         var report = FakeScanBroker.Judge(new ScanItem(cmd, ScanTrigger.CustomScan), opened, TimeProvider.System);
 
         Assert.Contains("protected system folder", policy.ProtectedReason(report, opened), StringComparison.Ordinal);
-        Assert.Equal(AutoQuarantinePolicy.TrustedInstaller, HandleOwnerReader.Instance.GetOwner(opened.Handle));
+        Assert.Equal(AutoQuarantinePolicy.TrustedInstaller, HandleSecurityReader.Instance.Read(opened.Handle)!.Owner);
+        Assert.Contains("TrustedInstaller", AutoQuarantinePolicy.JudgeSecurity(HandleSecurityReader.Instance.Read(opened.Handle)), StringComparison.Ordinal);
 
         var mine = _jobs.Write("mine.txt");
         using var own = ScanFileOpener.Open(new ScanItem(mine, ScanTrigger.CustomScan), [], TimeProvider.System, out _)!;
@@ -173,6 +186,42 @@ public sealed class ScanVerdictHandlerTests : IDisposable
     }
 
     [Fact]
+    public void Policy_PathThatCantBeNormalised_IsProtected()
+    {
+        var item = new ScanItem(@"\\?\C:\Users\x\..\Windows\evil.exe", ScanTrigger.CustomScan); // verbatim ".." in \\?\ form
+        var report = new FileScanReport(new ScanResult(item, [], DateTimeOffset.UnixEpoch, SampleAlerts.Sha),
+            HashResult.Hashed(SampleAlerts.Sha, 1), null, null, null, null, []);
+
+        Assert.Contains("could not be checked", new AutoQuarantinePolicy([]).ProtectedReason(report, null), StringComparison.Ordinal); // review L1
+    }
+
+    [Fact]
+    public void Limiter_SlidingWindow_RollsOver_AndTheBurstAlertReArmsPerWindow()
+    {
+        var time = new ManualTime();
+        var limiter = new AutoQuarantineLimiter(time, maxPerWindow: 2, TimeSpan.FromMinutes(10));
+
+        Assert.True(limiter.TryAcquire(out _));
+        time.Now += TimeSpan.FromMinutes(5);
+        Assert.True(limiter.TryAcquire(out _));
+        Assert.False(limiter.TryAcquire(out bool first));
+        Assert.True(first); // first refusal of the burst: raise the alert
+        Assert.False(limiter.TryAcquire(out bool again));
+        Assert.False(again); // same window: no second alert
+
+        time.Now += TimeSpan.FromMinutes(5); // the first slot (t=0) leaves the window, the second (t=5) stays
+        Assert.True(limiter.TryAcquire(out _));
+        Assert.False(limiter.TryAcquire(out bool stillSame));
+        Assert.False(stillSame); // burst alert was 5 min ago: not re-armed yet
+
+        time.Now += TimeSpan.FromMinutes(10);
+        Assert.True(limiter.TryAcquire(out _));
+        Assert.True(limiter.TryAcquire(out _));
+        Assert.False(limiter.TryAcquire(out bool rearmed));
+        Assert.True(rearmed); // a new burst in a new window alerts again
+    }
+
+    [Fact]
     public async Task BlockedAlertSink_DoesNotBlockScanning()
     {
         using var blocked = new BlockingAlertSink();
@@ -192,9 +241,9 @@ public sealed class ScanVerdictHandlerTests : IDisposable
         Assert.Contains(blocked.Alerts, a => a.Type == AlertType.AlertsSuppressed); // what didn't fit is summarised
     }
 
-    private sealed class FixedOwner(SecurityIdentifier owner) : IFileOwnerReader
+    private sealed class FixedSecurity(string sddl) : IFileSecurityReader
     {
-        public SecurityIdentifier? GetOwner(SafeFileHandle handle) => owner;
+        public RawSecurityDescriptor? Read(SafeFileHandle handle) => new(sddl);
     }
 
     private sealed class UnavailableQuarantine : IQuarantineService

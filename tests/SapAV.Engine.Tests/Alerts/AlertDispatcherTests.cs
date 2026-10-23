@@ -40,7 +40,7 @@ public sealed class AlertDispatcherTests
         var time = new ManualTime();
         using var dispatcher = Dispatcher(sink, time, maxPerWindow: 2);
 
-        var results = Enumerable.Range(0, 4).Select(i => dispatcher.Post(SampleAlerts.Create(path: $@"C:\x\{i}.exe"))).ToArray();
+        var results = Enumerable.Range(0, 4).Select(i => dispatcher.Post(SampleAlerts.Create(AlertType.SuspiciousFile, path: $@"C:\x\{i}.exe"))).ToArray();
         Assert.Equal([true, true, false, false], results);
         Assert.True(dispatcher.Post(ScanAlerts.RulesDegraded(@"C:\rules", "no rules", Core.Models.ScanTrigger.CustomScan, time.Now), health: true));
 
@@ -50,6 +50,28 @@ public sealed class AlertDispatcherTests
 
         Assert.Equal(5, sink.Alerts.Count); // 2 + health + summary + later
         Assert.Contains("2 over the limit", Assert.Single(sink.Alerts, a => a.Type == AlertType.AlertsSuppressed).Reasons[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MaliciousAlerts_SkipTheTotalCap_ButStillAggregate_AndTheSummaryCountsMaliciousOnes()
+    {
+        var sink = new RecordingAlertSink();
+        using var dispatcher = new AlertDispatcher(sink, new ManualTime(), NullLogger<AlertDispatcher>.Instance, TimeSpan.FromMinutes(10), 200, 1024);
+
+        for (int i = 0; i < 201; i++)
+        {
+            dispatcher.Post(SampleAlerts.Create(AlertType.SuspiciousFile, path: $@"C:\flood\{i}.exe"));
+        }
+
+        Assert.True(dispatcher.Post(SampleAlerts.Create(AlertType.MaliciousFile, path: @"C:\x\real.exe"))); // review M3
+        Assert.False(dispatcher.Post(SampleAlerts.Create(AlertType.MaliciousFile, path: @"C:\x\real.exe"))); // same key: aggregated
+        Assert.True(dispatcher.Drain(JobWait.Timeout));
+
+        Assert.Equal(200, sink.Alerts.Count(a => a.Type == AlertType.SuspiciousFile));
+        Assert.Single(sink.Alerts, a => a.Type == AlertType.MaliciousFile);
+        var summary = Assert.Single(sink.Alerts, a => a.Type == AlertType.AlertsSuppressed);
+        Assert.Contains("2 alert(s)", summary.Reasons[0], StringComparison.Ordinal);
+        Assert.Contains("1 of them Malicious", summary.Reasons[0], StringComparison.Ordinal);
     }
 
     [Fact]
