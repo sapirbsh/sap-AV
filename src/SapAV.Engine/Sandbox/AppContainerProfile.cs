@@ -5,14 +5,12 @@ using SapAV.Engine.Sandbox.Native;
 namespace SapAV.Engine.Sandbox;
 
 /// <summary>
-/// The scan worker's AppContainer profile (default name <c>sap-AV.ScanWorker</c>), created with <b>no capabilities</b>:
+/// The scan worker's AppContainer profile (name: <see cref="AppContainerName"/>), created with <b>no capabilities</b>:
 /// no network (internetClient, privateNetworkClientServer, ...), no library or device access. Its SID is derived from
-/// the name, so it is the same every run.
+/// the name, so it is the same every run (and why the name carries a per-install secret suffix).
 /// </summary>
 internal static class AppContainerProfile
 {
-    public const string DefaultName = "sap-AV.ScanWorker";
-
     /// <summary>Creates the profile if needed and returns its AppContainer SID (<c>S-1-15-2-...</c>).</summary>
     /// <exception cref="SandboxUnavailableException">The profile can't be created or derived.</exception>
     public static SecurityIdentifier Ensure(string name)

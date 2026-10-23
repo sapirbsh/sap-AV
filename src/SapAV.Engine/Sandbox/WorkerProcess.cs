@@ -100,9 +100,24 @@ internal sealed class WorkerProcess : IDisposable
         {
             var info = Launch(spec, job, requests.ClientSafePipeHandle, responses.ClientSafePipeHandle);
             var process = new SafeProcessHandle(info.hProcess, ownsHandle: true);
-            var worker = new WorkerProcess(process, (int)info.dwProcessId, job, requests, responses);
+            var worker = new WorkerProcess(process, (int)info.dwProcessId, job, requests, responses)
+            {
+                InitialThread = new SafeWaitHandle(info.hThread, ownsHandle: true),
+            };
             try
             {
+                // Review H1: the creation attributes set the protected SYSTEM + Administrators DACL. If Windows added
+                // anything (or ignored them), set it again by handle; VerifyBeforeResume refuses the worker otherwise.
+                // (The creation DACL gives the creator only READ_CONTROL via OWNER RIGHTS, so a non-admin broker can
+                // read it but not change it: that is exactly the lock-down.)
+                foreach (var (handle, what) in new (SafeHandle, string)[] { (worker.Process, "process"), (worker.InitialThread, "thread") })
+                {
+                    if (!WorkerObjectSecurity.IsLockedDown(WorkerObjectSecurity.Read(handle)))
+                    {
+                        WorkerObjectSecurity.Apply(handle, what);
+                    }
+                }
+
                 worker.VerifyBeforeResume(spec);
                 if (SandboxNative.ResumeThread(info.hThread) == uint.MaxValue)
                 {
@@ -113,10 +128,6 @@ internal sealed class WorkerProcess : IDisposable
             {
                 worker.Dispose();
                 throw;
-            }
-            finally
-            {
-                SandboxNative.CloseHandle(info.hThread);
             }
 
             requests.DisposeLocalCopyOfClientHandle();
@@ -259,14 +270,39 @@ internal sealed class WorkerProcess : IDisposable
         _requests.Dispose();
         _responses.Dispose();
         _job.Dispose(); // KILL_ON_JOB_CLOSE as well
+        InitialThread?.Dispose();
         Process.Dispose();
     }
+
+    /// <summary>
+    /// A SYNCHRONIZE-only copy of the broker's process handle, so a caller can wait for the exit after this object is
+    /// disposed (the process DACL rightly refuses opening the worker by PID).
+    /// </summary>
+    internal WaitHandle ExitWaitHandle()
+    {
+        if (!SandboxNative.DuplicateHandle(SandboxNative.GetCurrentProcess(), Process.DangerousGetHandle(),
+                new SafeProcessHandle(SandboxNative.GetCurrentProcess(), ownsHandle: false), out IntPtr copy, 0x00100000 /* SYNCHRONIZE */, false, 0))
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "DuplicateHandle(SYNCHRONIZE)");
+        }
+
+        return new ManualResetEvent(false) { SafeWaitHandle = new SafeWaitHandle(copy, ownsHandle: true) };
+    }
+
+    /// <summary>The worker's first thread (kept so its DACL can be checked).</summary>
+    internal SafeWaitHandle? InitialThread { get; private init; }
 
     private void VerifyBeforeResume(WorkerLaunchSpec spec)
     {
         if (!SandboxNative.IsProcessInJob(Process, _job, out bool inJob) || !inJob)
         {
             throw new SandboxUnavailableException("The scan worker is not in its Job Object.");
+        }
+
+        if (!WorkerObjectSecurity.IsLockedDown(WorkerObjectSecurity.Read(Process))
+            || !WorkerObjectSecurity.IsLockedDown(WorkerObjectSecurity.Read(InitialThread!)))
+        {
+            throw new SandboxUnavailableException("The scan worker's process or thread DACL is not limited to SYSTEM and Administrators.");
         }
 
         if (spec.Isolation != WorkerIsolation.AppContainer)
@@ -342,6 +378,7 @@ internal sealed class WorkerProcess : IDisposable
         var allocations = new List<IntPtr>();
         IntPtr attributeList = IntPtr.Zero;
         IntPtr environmentBlock = IntPtr.Zero;
+        IntPtr objectSecurity = IntPtr.Zero;
         try
         {
             int attributeCount = spec.Isolation == WorkerIsolation.AppContainer ? 5 : 4;
@@ -385,6 +422,18 @@ internal sealed class WorkerProcess : IDisposable
             }
 
             environmentBlock = Marshal.StringToHGlobalUni(environment);
+
+            // Review H1: process and initial thread get a protected SYSTEM + Administrators DACL (WorkerObjectSecurity).
+            var descriptor = WorkerObjectSecurity.DescriptorBytes();
+            IntPtr descriptorPtr = Alloc(allocations, descriptor.Length);
+            Marshal.Copy(descriptor, 0, descriptorPtr, descriptor.Length);
+            objectSecurity = Alloc(allocations, sizeof(SandboxNative.SecurityAttributes));
+            *(SandboxNative.SecurityAttributes*)objectSecurity = new SandboxNative.SecurityAttributes
+            {
+                nLength = (uint)sizeof(SandboxNative.SecurityAttributes),
+                lpSecurityDescriptor = descriptorPtr,
+                bInheritHandle = 0,
+            };
             var startup = new SandboxNative.StartupInfoEx
             {
                 StartupInfo = new SandboxNative.StartupInfo { cb = (uint)sizeof(SandboxNative.StartupInfoEx) },
@@ -406,7 +455,7 @@ internal sealed class WorkerProcess : IDisposable
                 SetInheritable(responseClient, true);
                 try
                 {
-                    if (!SandboxNative.CreateProcess(exe, (commandLine + "\0").ToCharArray(), IntPtr.Zero, IntPtr.Zero, inheritHandles: true,
+                    if (!SandboxNative.CreateProcess(exe, (commandLine + "\0").ToCharArray(), objectSecurity, objectSecurity, inheritHandles: true,
                             flags, environmentBlock, Path.GetDirectoryName(exe), ref startup, out var info))
                     {
                         int error = Marshal.GetLastPInvokeError();

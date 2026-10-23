@@ -62,6 +62,35 @@ public sealed class AppContainerSandboxTests(AppContainerFixture fixture) : ICla
     }
 
     [RequiresFact(Requires.AppContainer)]
+    public async Task ProcessAndThreadDacl_GrantNoContainerUserOrWorldSid_AndTheUserCantOpenTheWorker()
+    {
+        using var worker = await StartAsync();
+        using var self = System.Security.Principal.WindowsIdentity.GetCurrent();
+        var forbidden = new[] { fixture.Container.Sid.Value, "S-1-15-2-1", "S-1-15-2-2", self.User!.Value, "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4" };
+
+        foreach (var (what, handle) in new (string, System.Runtime.InteropServices.SafeHandle)[] { ("process", worker.Process), ("thread", worker.InitialThread!) })
+        {
+            var sd = WorkerObjectSecurity.Read(handle);
+            Assert.True((sd.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) != 0, $"{what} DACL inherits");
+            var sids = sd.DiscretionaryAcl!.Cast<System.Security.AccessControl.KnownAce>().Select(a => a.SecurityIdentifier.Value).ToArray();
+            Assert.Contains("S-1-5-18", sids);
+            Assert.All(sids, sid =>
+            {
+                Assert.DoesNotContain(sid, forbidden);
+                Assert.False(sid.StartsWith("S-1-15-", StringComparison.Ordinal), $"{what} DACL grants package SID {sid}");
+                Assert.False(sid.StartsWith("S-1-5-5-", StringComparison.Ordinal), $"{what} DACL grants logon SID {sid}");
+            });
+        }
+
+        if (!new System.Security.Principal.WindowsPrincipal(self).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+        {
+            // Same account as the broker here, yet it can't open the worker by PID (to read memory or steal handles).
+            using var byPid = System.Diagnostics.Process.GetProcessById(worker.ProcessId);
+            Assert.Throws<System.ComponentModel.Win32Exception>(() => byPid.Handle);
+        }
+    }
+
+    [RequiresFact(Requires.AppContainer)]
     public async Task JobLimits_AndMitigations_AreApplied_AndTheWorkerCantStartAChild()
     {
         using var worker = await StartAsync();

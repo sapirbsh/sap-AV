@@ -266,6 +266,34 @@ internal static class SandboxNative
     [DllImport("advapi32.dll", SetLastError = true, ExactSpelling = true)]
     public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
 
+    // ---- Object security (worker process / thread DACL) ----
+    public const int SeKernelObject = 6;
+    public const uint DaclSecurityInformation = 0x00000004;
+    public const uint ProtectedDaclSecurityInformation = 0x80000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SecurityAttributes
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        public int bInheritHandle;
+    }
+
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    public static extern int SetSecurityInfo(
+        SafeHandle handle, int objectType, uint securityInformation, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    public static extern int GetSecurityInfo(
+        SafeHandle handle, int objectType, uint securityInformation, IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl,
+        out IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    public static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    public static extern IntPtr LocalFree(IntPtr memory);
+
     // ---- Mitigation policies as applied (tests) ----
     public const int ProcessStrictHandleCheckPolicy = 3;
     public const int ProcessExtensionPointDisablePolicy = 6;

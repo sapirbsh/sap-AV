@@ -46,8 +46,12 @@ public sealed class SandboxOptions
     /// <summary>The worker exe; default <c>ScanWorker\SapAV.ScanWorker.exe</c> next to the engine.</summary>
     public string? WorkerPath { get; set; }
 
-    /// <summary>The AppContainer profile name.</summary>
-    public string AppContainerName { get; set; } = AppContainerProfile.DefaultName;
+    /// <summary>
+    /// The AppContainer profile name. Null (the default) = <c>sap-AV.ScanWorker.&lt;per-install random suffix&gt;</c>
+    /// (<see cref="Sandbox.AppContainerName"/>): the SID follows from the name alone, so a guessable name would let any
+    /// user create a profile with the worker's SID.
+    /// </summary>
+    public string? AppContainerName { get; set; }
 
     /// <summary>YARA rules directory; default <c>data\rules</c> next to the engine (D3 moves it to the protected ProgramData folder).</summary>
     public string? RulesDirectory { get; set; }
@@ -90,6 +94,5 @@ public sealed class SandboxOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxFailuresPerFile, 1, nameof(MaxFailuresPerFile));
         ArgumentOutOfRangeException.ThrowIfNegative(RestartBackoffInitial.Ticks, nameof(RestartBackoffInitial));
         ArgumentOutOfRangeException.ThrowIfLessThan(RestartBackoffMax, RestartBackoffInitial, nameof(RestartBackoffMax));
-        ArgumentException.ThrowIfNullOrWhiteSpace(AppContainerName, nameof(AppContainerName));
     }
 }

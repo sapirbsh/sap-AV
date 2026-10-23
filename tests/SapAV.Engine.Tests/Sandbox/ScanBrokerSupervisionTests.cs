@@ -140,6 +140,7 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
         using var broker = Broker(configure: o => o.RequestTimeout = TimeSpan.FromSeconds(8));
         await broker.ScanAsync(File("warmup.txt"));
         int hungPid = broker.Slots[0].Worker!.ProcessId;
+        using var hungExit = broker.Slots[0].Worker!.ExitWaitHandle();
 
         var watch = Stopwatch.StartNew();
         var report = await broker.ScanAsync(File("hang.bin"));
@@ -148,7 +149,7 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
         Assert.Equal(ScanStatus.Error, report.Result.Status);
         Assert.Contains(report.Notes, n => n.Message.Contains("TimedOut", StringComparison.Ordinal));
         Assert.InRange(watch.Elapsed, TimeSpan.FromSeconds(7.5), TimeSpan.FromSeconds(60));
-        Assert.True(ProcessGone(hungPid), "the hung worker must be killed");
+        Assert.True(hungExit.WaitOne(TimeSpan.FromSeconds(10)), "the hung worker must be killed");
 
         Assert.Equal(Verdict.Clean, (await broker.ScanAsync(File("after.txt"))).Result.Verdict);
         Assert.NotEqual(hungPid, broker.Slots[0].Worker!.ProcessId);
@@ -249,18 +250,5 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() => new SandboxOptions { MaxFailuresPerFile = 0 }.Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() => new SandboxOptions { WorkerMemoryLimitMegabytes = 1 }.Validate());
         new SandboxOptions().Validate();
-    }
-
-    private static bool ProcessGone(int pid)
-    {
-        try
-        {
-            using var p = Process.GetProcessById(pid);
-            return p.WaitForExit(5000);
-        }
-        catch (ArgumentException)
-        {
-            return true;
-        }
     }
 }
