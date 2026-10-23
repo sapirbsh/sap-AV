@@ -55,6 +55,8 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
                 return null; // e.g. reached through an 8.3 name: the final path is an engine folder
             }
 
+            item = Canonical(item, opened);
+
             step = "scan";
             var report = opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, jobToken).ConfigureAwait(false);
             bytesScanned(report.Hash.Length ?? 0);
@@ -73,6 +75,37 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
             return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None,
                 $"Not scanned (Error): the {step} step failed ({ex.GetType().Name}).", null, null, null);
         }
+    }
+
+    /// <summary>
+    /// Review B2 follow-up Low: <c>Path.GetFullPath</c> doesn't expand 8.3 names (e.g. <c>C:\Users\RUNNER~1\...</c>), so
+    /// the quarantine would see a "redirect" for a plain short-name spelling. If the requested path with its 8.3 parts
+    /// expanded is exactly the handle's final path, the job continues with the final path (same object, same folders, only
+    /// the canonical spelling). Anything else (a junction on the way, a different file) keeps the requested path, so the
+    /// quarantine's redirect check still refuses it.
+    /// </summary>
+    internal static ScanItem Canonical(ScanItem item, OpenedScanFile? opened)
+    {
+        string? finalPath = opened?.Identity?.FinalPath;
+        if (finalPath is null || string.Equals(item.Path, finalPath, StringComparison.Ordinal))
+        {
+            return item;
+        }
+
+        string full;
+        try
+        {
+            full = Path.GetFullPath(item.Path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return item;
+        }
+
+        string? longPath = Native.ScanNative.TryGetLongPath(full);
+        return longPath is not null && string.Equals(longPath, finalPath, StringComparison.OrdinalIgnoreCase)
+            ? item with { Path = finalPath }
+            : item;
     }
 
     private static ScanJobFileResult ToResult(FileScanReport report, ScanVerdictOutcome outcome)

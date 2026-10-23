@@ -60,12 +60,23 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         Excluded = excluded;
     }
 
-    /// <summary>The DI constructor.</summary>
-    public ScanJobService(
-        IOptions<ScanJobOptions> options, IOptions<SandboxOptions> sandbox, IOptions<Quarantine.QuarantineOptions> quarantine,
-        IScanBroker broker, ILogger<ScanJobService> logger, TimeProvider time)
-        : this(options.Value, broker, ExcludedFolders(options.Value, sandbox.Value, quarantine.Value), null, null, time, logger)
+    /// <summary>The engine's service, as registered in <see cref="EngineHost"/>.</summary>
+    internal static ScanJobService Create(IServiceProvider services)
     {
+        var options = services.GetRequiredService<IOptions<ScanJobOptions>>().Value;
+        options.Validate();
+        var sandbox = services.GetRequiredService<IOptions<SandboxOptions>>().Value;
+        var quarantine = services.GetRequiredService<IOptions<Quarantine.QuarantineOptions>>().Value;
+        var time = services.GetRequiredService<TimeProvider>();
+        var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning");
+        var broker = services.GetRequiredService<IScanBroker>();
+        var handler = new ScanVerdictHandler(
+            services.GetRequiredService<Alerts.IAlertDispatcher>(),
+            services.GetRequiredService<Quarantine.IQuarantineService>(),
+            new AutoQuarantinePolicy(options.ProtectedFolders),
+            new AutoQuarantineLimiter(time, options.AutoQuarantineMaxPerWindow, options.AutoQuarantineWindow),
+            time, logger);
+        return new ScanJobService(options, broker, ExcludedFolders(options, sandbox, quarantine), handler, null, time, logger);
     }
 
     /// <summary>The folders this service never scans.</summary>

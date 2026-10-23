@@ -91,6 +91,19 @@ internal static unsafe class ScanNative
             : null;
     }
 
+    /// <summary>The path with every 8.3 component expanded to its long name (links are not resolved), or null on failure.</summary>
+    public static string? TryGetLongPath(string path)
+    {
+        char* buffer = stackalloc char[1024];
+        uint length = GetLongPathNameW(path, buffer, 1024);
+        if (length is 0 or >= 1024)
+        {
+            return null;
+        }
+
+        return new string(buffer, 0, (int)length);
+    }
+
     /// <summary>
     /// IsReparseTagNameSurrogate: the tag redirects to another name (symlink, junction / mount point, AF_UNIX, ...).
     /// Cloud-file and dedup tags are not surrogates: the data is still "this" file.
@@ -129,4 +142,7 @@ internal static unsafe class ScanNative
 
     [DllImport("kernel32.dll", ExactSpelling = true)]
     private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetLongPathNameW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern uint GetLongPathNameW(string shortPath, char* longPath, uint bufferLength);
 }

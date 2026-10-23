@@ -60,7 +60,13 @@ public static class EngineHost
 
         // Scan jobs (B3): bounded queue, dedicated background-mode threads, pause/resume/cancel. The pipe (B4) drives it.
         builder.Services.Configure<ScanJobOptions>(builder.Configuration.GetSection(ScanJobOptions.SectionName));
-        builder.Services.AddSingleton<ScanJobService>();
+        builder.Services.AddSingleton<IAlertDispatcher>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<ScanJobOptions>>().Value;
+            return new AlertDispatcher(sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<TimeProvider>(),
+                sp.GetRequiredService<ILogger<AlertDispatcher>>(), options.AlertWindow, options.MaxAlertsPerWindow, options.AlertQueueCapacity);
+        });
+        builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
         builder.Services.AddHostedService<Worker>();
         return builder;

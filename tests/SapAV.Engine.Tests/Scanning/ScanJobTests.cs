@@ -236,6 +236,31 @@ public sealed class ScanJobTests
     }
 
     [Fact]
+    public void ShortNameSpelling_BecomesTheFinalPath_ButAJunctionSpellingDoesNot()
+    {
+        using var h = new ScanJobHarness();
+        var path = h.Write(@"Long Folder Name\file with long name.txt");
+        string shortPath = ShortPath(path);
+        using var opened = SapAV.Core.Scanning.ScanFileOpener.Open(new ScanItem(shortPath, ScanTrigger.CustomScan), [], TimeProvider.System, out _)!;
+
+        var canonical = ScanFilePipeline.Canonical(new ScanItem(shortPath, ScanTrigger.CustomScan), opened);
+        Assert.Equal(opened.Identity!.FinalPath, canonical.Path); // with or without 8.3 names on this volume
+
+        var elsewhere = new ScanItem(Path.Combine(h.Base, "other", "file with long name.txt"), ScanTrigger.CustomScan);
+        Assert.Same(elsewhere, ScanFilePipeline.Canonical(elsewhere, opened)); // a different spelling is never rewritten
+    }
+
+    private static string ShortPath(string path)
+    {
+        var buffer = new char[1024];
+        uint length = GetShortPathNameW(path, buffer, (uint)buffer.Length);
+        return length is > 0 and < 1024 ? new string(buffer, 0, (int)length) : path;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint GetShortPathNameW(string longPath, char[] shortPath, uint length);
+
+    [Fact]
     public async Task Service_RefusesMoreThanMaxConcurrentJobs()
     {
         using var h = new ScanJobHarness();

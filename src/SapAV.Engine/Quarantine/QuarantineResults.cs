@@ -47,6 +47,9 @@ public enum QuarantineStatus
 
     /// <summary>The move, copy or removal failed; the original is still in place (see Reason).</summary>
     Failed,
+
+    /// <summary>The store is over its quota or its drive is low on space (review B2 M4). The file is left in place.</summary>
+    StoreFull,
 }
 
 /// <summary>Result of a quarantine attempt.</summary>
