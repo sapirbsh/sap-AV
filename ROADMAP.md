@@ -348,6 +348,27 @@ M1 (worker keeping duplicated handles), M4 partially (no ACL grant as SYSTEM), L
   sandbox, and with it **all scanning**, is unavailable (worse than B2 M3). The installer creates the folder with the
   protected ACL, and startup raises an Event Log alert whenever the sandbox is unavailable.
 
+**Carried over from the B3 review (Medium/Low).** H1 (trailing dot/space names bypassing exclusions and scanning),
+M3, M4, L1 and L4 are fixed in B3.
+- **C1 / C6 (M1):** walker TOCTOU. A folder's reparse tag is read by path at classify time, but the folder is listed by
+  path later; a swap to a junction or directory symlink in between escapes the tree (with Developer Mode, even a
+  symlink to `\\host\share`, giving machine-account NTLM). List folders relative to handles: open with
+  BACKUP_SEMANTICS|OPEN_REPARSE_POINT, check the tag and FileRemoteProtocolInfo on the handle, list via
+  `FileIdExtdDirectoryInfo`, and open children relative to the parent with OBJ_DONT_REPARSE.
+- **C6 (M2):** any user can register a Cloud Files sync root; listing a placeholder folder as SYSTEM triggers the user's
+  provider, which can return an endless tree or stall. Don't descend into unpopulated folders
+  (RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS; count them as offline). Add a max depth (e.g. 256) and max entries per job.
+- **D3 (M5):** excluded folders are trusted even if a user controls them (pre-created `%ProgramData%\sap-AV`, or an engine
+  running from a user-writable folder). Exclude a folder only if its owner is SYSTEM/Administrators/TrustedInstaller
+  and no non-admin can write to it; otherwise scan it and raise a health alert.
+- **D1 (L2):** 20 cheap detections can use up the auto-quarantine window, so the real payload only gets
+  NeedsUserConfirmation. That's the rate-limit trade-off; document it, and consider prioritising by verdict source.
+- **X2 / B6 / B4 (L3):** worker text still partly reaches outputs: alerts carry 4×200 characters of reasons + signer + URL,
+  and `ScanJobFileResult.Detail` carries worker note text (up to 512 characters) to pipe clients.
+- **B4 (L5):** Created-but-never-started jobs are never trimmed; B4 must cap them.
+- **D1 (L6):** a writer holding a writable mapped view gets around deny-writers sharing (a scan race on the attacker's
+  own file, an evasion, not a quarantine abuse).
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |
