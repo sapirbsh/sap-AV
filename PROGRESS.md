@@ -7,14 +7,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B5 done, B6 being built |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B5 done, B6 built (review running) |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B4 fixes): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 259 passed + 5 skipped (elevated / opt-in
+Tests (after B6): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 298 passed + 5 skipped (elevated / opt-in
 tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
@@ -65,7 +65,7 @@ pass comes at the end.
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Done** (`009d580`…`3b12c01`; review fixes `96a44de`, `d6b7cb2`, `866958e`, `88bac75`) |
-| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Being built |
+| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | **Built** (`6f44479`, `f28b0d1`); immediate review running |
 
 ## Current status (2026-10-25)
 
@@ -79,7 +79,10 @@ junction swap during a paused scan (H3); a symlinked root could make SYSTEM auth
 name; folder walks are bound to handles (junction swaps can't redirect, which also closes B3 M1); client roots never
 follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
 
-**Now: B6** (dedicated `sap-AV` event log), then the section B tester + reviewer pass.
+**B6 is built** (`6f44479`, `f28b0d1`): a dedicated `sap-AV` log only SYSTEM + Administrators can write (Event Log Readers
+read), migration from the Application log, and the installer refuses a message DLL in a user-writable folder (so it works
+once D3 installs under Program Files, not from a dev build). **Now:** B6's immediate review, then the section B tester
++ reviewer pass.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
@@ -92,8 +95,10 @@ follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
 - All Medium/Low findings are recorded in `ROADMAP.md` under the step they belong to.
 
 **Open for the user**
-- Once by hand, after B6: in an **elevated** PowerShell, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`, so the real
-  Event Log test actually runs. (The 2026-10-24 attempt ran while B3 was mid-edit, so the Engine tests didn't compile.)
+- **Ready now:** in an **elevated** PowerShell in `C:Projectssap-AV`, run
+  `$env:SAPAV_TEST_ALLOW_HKLM='1'; dotnet test tests/SapAV.Engine.Tests --filter "FullyQualifiedName~RealEventLogTests"`.
+  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused). It cleans up
+  after itself (only a throwaway .evtx file and a "log cleared" record remain).
 - Decision X2 M1 is made (dedicated `sap-AV` event log, step B6). No other decisions are pending.
 
 ## What's left

@@ -542,7 +542,8 @@ YARA rules may override with their own `mitre` meta value.
 - Every alert is written to a **dedicated event log named "sap-AV"** (source "sap-AV"), not the Application log. Its
   CustomSD lets only SYSTEM (and the elevated installer) write; readers are Administrators and Event Log Readers.
   Registered by the service installer (needs admin; the service runs as LocalSystem). Decided 2026-10-24, built in B6.
-  (Until B6, alerts go to the Application log.)
+  (Built in B6: `6f44479`, `f28b0d1`. CustomSD `O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x1;;;S-1-5-32-573)`; 20 MB, overwrite
+  as needed. An unmigrated Application-log source is skipped with a health warning, never written to.)
 - Structured payload (JSON in the message, stable field names) for SIEM collection: timestamp, alert type, verdict, file path,
   SHA-256, signer, MITRE ID, reason(s), MOTW URL, action taken.
 - Fixed event IDs per alert type (defined in B1, `src/SapAV.Engine/Alerts/AlertEventCatalog.cs`):
