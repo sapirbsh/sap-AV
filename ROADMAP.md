@@ -378,6 +378,13 @@ M3, M4, L1 and L4 are fixed in B3.
 **Carried over from the B4 review (Low).** H1 (accept loop killed by an early close), H2 (instance count reaching 0 →
 pipe-name takeover), H3 (junction swap during a walk), M1 (slot exhaustion before Hello), M2 (SYSTEM following
 symlinks in client roots → SMB/NTLM coercion), M3 (jobs keyed by SID only) and L1, L5, L6, L7 are fixed in B4.
+- **B4 follow-up (residual from the fixes):**
+  - Admin jobs still open files with `ScanFileOpener` (a following `CreateFileW`); only their roots are opened safely.
+    Switch admin jobs to `SafeScanOpen` too.
+  - The pipe-instance owner check on its own isn't exercised by a test (the test attacker pipe is caught by the DACL
+    comparison).
+  - A client that arrives while every slot is in use is dropped without an error frame.
+  - B3 M1 (walker TOCTOU) is closed for all jobs by `SafeTree` (handle-bound walk).
 - **B4 follow-up (L2):** ScanGet halves the page and re-serializes it up to ~8 times (≤ 4 MiB each) per request.
   Estimate the size while building the page and serialize once.
 - **C1 (L3):** the excluded-folder result, the DifferentFile message (with the final file name) and open-failure statuses

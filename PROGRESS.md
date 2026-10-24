@@ -7,14 +7,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 built, review fixes in progress |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B5 done, B6 being built |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B4): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 243 passed + 5 skipped (elevated / opt-in
+Tests (after B4 fixes): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 259 passed + 5 skipped (elevated / opt-in
 tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
@@ -64,8 +64,8 @@ pass comes at the end.
 | B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Built** (`009d580`…`3b12c01`); review NOT CLEAN (3 High), fixes in progress |
-| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Done** (`009d580`…`3b12c01`; review fixes `96a44de`, `d6b7cb2`, `866958e`, `88bac75`) |
+| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Being built |
 
 ## Current status (2026-10-25)
 
@@ -75,7 +75,11 @@ scans run with the requester's access, per-user job isolation, quarantine/restor
 output, and a client library for the GUI (F1). B4's immediate review came back **NOT CLEAN** (3 High, 3 Medium, no Critical): a user could stop the pipe server
 for good (H1), take over the pipe name after draining all instances (H2), or list another user's folders through a
 junction swap during a paused scan (H3); a symlinked root could make SYSTEM authenticate to an attacker's SMB server (M2).
-All are being fixed now; Low findings are in ROADMAP.md. Then **B6**, then the section B tester + reviewer pass.
+**All fixed** (`96a44de`, `d6b7cb2`, `866958e`, `88bac75`): the server survives early-close floods and always holds the pipe
+name; folder walks are bound to handles (junction swaps can't redirect, which also closes B3 M1); client roots never
+follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
+
+**Now: B6** (dedicated `sap-AV` event log), then the section B tester + reviewer pass.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
