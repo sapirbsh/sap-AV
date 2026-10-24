@@ -215,6 +215,31 @@ public sealed class PipeAuthorizationTests
     }
 
     [Fact]
+    public async Task AnElevatedSessionsJobs_AreHiddenFromTheSameUsersNonElevatedProcesses()
+    {
+        using var h = new HandlerHarness(configure: o => o.MaxPendingJobsPerUser = 4);
+        var sid = FakeClientIdentity.NewUserSid();
+        var elevated = h.Session(new FakeClientIdentity(sid, isAdmin: true));
+        var limited = h.Session(new FakeClientIdentity(sid, isAdmin: false));
+        var adminJob = await h.CreateAsync(elevated);
+        var userJob = await h.CreateAsync(limited);
+
+        foreach (var kind in new[] { PipeRequestKind.ScanStart, PipeRequestKind.ScanCancel, PipeRequestKind.Subscribe })
+        {
+            Assert.Equal(PipeStatus.NotFound, (await h.SendAsync(limited, kind, new JobRequest(adminJob))).Status);
+        }
+
+        Assert.Equal(PipeStatus.NotFound, (await h.SendAsync(limited, PipeRequestKind.ScanGet, new ScanGetRequest(adminJob))).Status);
+        var limitedList = (ScanListReply)(await h.SendAsync(limited, PipeRequestKind.ScanList)).Body!;
+        var elevatedList = (ScanListReply)(await h.SendAsync(elevated, PipeRequestKind.ScanList)).Body!;
+
+        Assert.Equal([userJob], limitedList.Jobs.Select(j => j.JobId));
+        Assert.Equal(2, elevatedList.Jobs.Count);
+        Assert.All(elevatedList.Jobs, j => Assert.True(j.OwnedByCaller));
+        Assert.Equal(ScanJobState.Created, h.Jobs.Service.Get(adminJob)!.State);
+    }
+
+    [Fact]
     public async Task EngineCreatedJobs_AreVisibleToAdminsOnly()
     {
         using var h = new HandlerHarness();

@@ -6,7 +6,9 @@ namespace SapAV.Engine.Pipe;
 
 /// <summary>
 /// Who created which scan job over the pipe, and the per-user job caps (B4, review B3 L5). A client sees and controls only
-/// jobs created by its own user SID, unless it is an administrator; jobs the engine created itself (no owner) are visible
+/// jobs created by its own user SID (and, for a job an administrator created, only from an administrator client: a
+/// non-elevated process of the same user can't see or control it, review B4 M3), unless it is an administrator; jobs the
+/// engine created itself (no owner) are visible
 /// to administrators only.
 /// </summary>
 internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions options, TimeProvider time)
@@ -14,7 +16,11 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
     private readonly Lock _lock = new();
     private readonly Dictionary<Guid, Owner> _owners = [];
 
-    private sealed record Owner(SecurityIdentifier User, object Session, DateTimeOffset CreatedAt, ClientScanAccess? Access);
+    /// <param name="CreatorIsAdmin">Review B4 M3: an elevated session's jobs stay hidden from the same user's non-elevated processes.</param>
+    private sealed record Owner(SecurityIdentifier User, bool CreatorIsAdmin, object Session, DateTimeOffset CreatedAt, ClientScanAccess? Access)
+    {
+        public bool IsVisibleTo(IClientIdentity client) => User == client.User && (client.IsAdmin || !CreatorIsAdmin);
+    }
 
     /// <summary>The job, if it exists and <paramref name="client"/> may see it (both cases look the same to the client).</summary>
     public ScanJob? Find(IClientIdentity client, Guid jobId)
@@ -32,7 +38,7 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
 
         lock (_lock)
         {
-            return _owners.TryGetValue(job.Id, out var owner) && owner.User == client.User;
+            return _owners.TryGetValue(job.Id, out var owner) && owner.IsVisibleTo(client);
         }
     }
 
@@ -40,7 +46,7 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
     {
         lock (_lock)
         {
-            return _owners.TryGetValue(jobId, out var owner) && owner.User == client.User;
+            return _owners.TryGetValue(jobId, out var owner) && owner.IsVisibleTo(client);
         }
     }
 
@@ -83,7 +89,7 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
                 return (null, PipeStatus.BadRequest, Core.Text.SafeText.Display(ex.Message, 300));
             }
 
-            _owners[job.Id] = new Owner(client.User, session, time.GetUtcNow(), access);
+            _owners[job.Id] = new Owner(client.User, client.IsAdmin, session, time.GetUtcNow(), access);
             if (access is not null)
             {
                 job.StateChanged += change =>
