@@ -33,11 +33,12 @@ internal sealed class PipeConnection : IPipeEventSink
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly Channel<(PipeEventKind Kind, object Body)> _events;
     private readonly CancellationTokenSource _cts;
+    private readonly Action _identified;
     private long _dropped;
 
     public PipeConnection(
         NamedPipeServerStream pipe, PipeRequestHandler handler, IClientIdentityResolver resolver, Func<IClientIdentity, IDisposable?> acquireUserSlot,
-        PipeServerOptions options, ILogger logger, CancellationToken stopping)
+        Action identified, PipeServerOptions options, ILogger logger)
     {
         _pipe = pipe;
         _handler = handler;
@@ -45,7 +46,8 @@ internal sealed class PipeConnection : IPipeEventSink
         _acquireUserSlot = acquireUserSlot;
         _options = options;
         _logger = logger;
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        _identified = identified;
+        _cts = new CancellationTokenSource();
         _events = Channel.CreateBounded<(PipeEventKind, object)>(
             new BoundedChannelOptions(options.EventQueueCapacity) { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true },
             _ => Interlocked.Increment(ref _dropped));
@@ -62,8 +64,10 @@ internal sealed class PipeConnection : IPipeEventSink
         return _events.Writer.TryWrite((kind, body)) && Interlocked.Read(ref _dropped) == before;
     }
 
-    public async Task RunAsync()
+    /// <param name="stopping">The service is stopping: the connection ends.</param>
+    public async Task RunAsync(CancellationToken stopping)
     {
+        var stopRegistration = stopping.Register(() => _cts.Cancel());
         var token = _cts.Token;
         PipeSession? session = null;
         IDisposable? userSlot = null;
@@ -78,6 +82,7 @@ internal sealed class PipeConnection : IPipeEventSink
             }
 
             var identity = _resolver.Resolve(_pipe, out string failure);
+            _identified(); // no longer counts against the unidentified-connection cap (review B4 M1)
             if (identity is null)
             {
                 _logger.LogWarning("Pipe client refused: {Why}.", failure);
@@ -124,22 +129,51 @@ internal sealed class PipeConnection : IPipeEventSink
         }
         finally
         {
-            _cts.Cancel();
+            // Review B4 L1: every step on its own, so a failing one can't keep the user slot or the pipe instance.
+            stopRegistration.Dispose(); // first: a later stop must not cancel a disposed source
+            Step("cancel", () => _cts.Cancel());
             _events.Writer.TryComplete();
             if (session is not null)
             {
-                _handler.Disconnected(session);
-                session.Dispose();
+                Step("disconnect", () => _handler.Disconnected(session));
+                Step("session", session.Dispose);
             }
 
             if (writer is not null)
             {
-                await writer.ConfigureAwait(false);
+                try
+                {
+                    await writer.ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    _logger.LogWarning(ex, "The pipe event writer failed.");
+                }
             }
 
-            userSlot?.Dispose();
-            await _pipe.DisposeAsync().ConfigureAwait(false);
+            Step("user slot", () => userSlot?.Dispose());
+            try
+            {
+                await _pipe.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                _logger.LogWarning(ex, "Closing a pipe instance failed.");
+            }
+
             _cts.Dispose();
+        }
+    }
+
+    private void Step(string what, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogWarning(ex, "Pipe connection cleanup step '{Step}' failed.", what);
         }
     }
 
@@ -269,17 +303,26 @@ internal sealed class PipeConnection : IPipeEventSink
                 long dropped = Interlocked.Exchange(ref _dropped, 0);
                 if (dropped > 0)
                 {
-                    await WriteFrameAsync(Event(PipeEventKind.EventsDropped, new EventsDroppedEvent(dropped)), token).ConfigureAwait(false);
+                    await WriteFrameAsync(EventFactory(PipeEventKind.EventsDropped, new EventsDroppedEvent(dropped)), token).ConfigureAwait(false);
                 }
 
-                await WriteFrameAsync(Event(kind, body), token).ConfigureAwait(false);
+                await WriteFrameAsync(EventFactory(kind, body), token).ConfigureAwait(false);
             }
         }
-        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or PipeProtocolException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            // Review B4 L1: any failure (I/O, or e.g. an event that can't be serialized) ends this connection only.
+            if (ex is not (IOException or OperationCanceledException or ObjectDisposedException))
+            {
+                _logger.LogWarning(ex, "The pipe event writer failed; closing the connection.");
+            }
+
             _cts.Cancel();
         }
     }
+
+    /// <summary>Test seam: builds an event frame (tests make it throw).</summary>
+    internal Func<PipeEventKind, object, PipeFrame> EventFactory { get; set; } = Event;
 
     private static PipeFrame Event(PipeEventKind kind, object body) =>
         new(PipeFrameKind.Event, Event: kind, Body: JsonSerializer.SerializeToElement(body, body.GetType(), PipeJson.Options));

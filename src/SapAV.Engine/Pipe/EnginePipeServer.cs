@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Extensions.Options;
 using Microsoft.Win32.SafeHandles;
@@ -16,26 +17,43 @@ public sealed class PipeNameTakenException(string message) : Exception(message);
 /// </summary>
 /// <remarks>
 /// <para><b>Pipe security.</b> Every instance is created with the explicit descriptor of <see cref="EnginePipeSecurity"/>
-/// (SYSTEM full; Authenticated Users connect but can't create instances). The first instance uses
-/// FILE_FLAG_FIRST_PIPE_INSTANCE, so if anyone created the name before the engine, the engine refuses to serve
-/// (<see cref="PipeNameTakenException"/>, logged as critical) instead of joining a pipe it doesn't own. All instances use
-/// PIPE_REJECT_REMOTE_CLIENTS; the instance limit is <see cref="PipeServerOptions.MaxClients"/>.</para>
-/// <para><b>Concurrency.</b> At most <see cref="PipeServerOptions.MaxClients"/> connections (the listening instance counts),
-/// at most <see cref="PipeServerOptions.MaxConnectionsPerUser"/> per user SID. Each connection runs on its own task
+/// (owner and group = the engine's account; SYSTEM full; Authenticated Users connect but can't create instances), with
+/// PIPE_REJECT_REMOTE_CLIENTS. Whenever the engine holds no instance, the next one is created with
+/// FILE_FLAG_FIRST_PIPE_INSTANCE, so a name someone else created is refused (<see cref="PipeNameTakenException"/>, logged
+/// as critical) instead of joined. Every new instance is read back: its owner and DACL must be the engine's own, otherwise
+/// it belongs to a squatter's pipe object and is closed (review B4 H2).</para>
+/// <para><b>Always listening</b> (review B4 H2). A replacement instance is created before a connected one is handed off,
+/// and the instance limit is <see cref="PipeServerOptions.MaxClients"/> + 1, so the engine keeps the name even when every
+/// connection slot is in use. A client that connects while all slots are taken is disconnected at once.</para>
+/// <para><b>Resilience</b> (review B4 H1). A client that connects and leaves before the connect completes, or any other
+/// failure of one instance, only costs that instance; creating an instance is retried with backoff. Only stopping the
+/// service ends the loop.</para>
+/// <para><b>Concurrency.</b> At most <see cref="PipeServerOptions.MaxClients"/> connections, at most
+/// <see cref="PipeServerOptions.MaxUnidentifiedConnections"/> of them not yet identified (review B4 M1), at most
+/// <see cref="PipeServerOptions.MaxConnectionsPerUser"/> per user SID. Each connection runs on its own task
 /// (<see cref="PipeConnection"/>).</para>
 /// </remarks>
 public sealed class EnginePipeServer : BackgroundService
 {
+    private static readonly TimeSpan MinBackoff = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(5);
+
     private readonly PipeServerOptions _options;
     private readonly PipeRequestHandler _handler;
     private readonly IClientIdentityResolver _resolver;
     private readonly ILogger _logger;
+    private readonly SecurityIdentifier _owner;
+    private readonly RawSecurityDescriptor _descriptor;
     private readonly byte[] _securityDescriptor;
     private readonly SemaphoreSlim _slots;
     private readonly Lock _lock = new();
     private readonly Dictionary<SecurityIdentifier, int> _perUser = [];
     private readonly HashSet<Task> _connections = [];
     private readonly TaskCompletionSource _listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _liveInstances;
+    private int _unidentified;
+    private long _listeningGeneration;
+    private CancellationToken _stoppingToken;
 
     public EnginePipeServer(IOptions<PipeServerOptions> options, IScanJobService jobs, IQuarantineService quarantine, TimeProvider time,
         ILogger<EnginePipeServer> logger)
@@ -54,11 +72,13 @@ public sealed class EnginePipeServer : BackgroundService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
         _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType);
-        _securityDescriptor = EnginePipeSecurity.ToBytes(EnginePipeSecurity.Create(serverAccount));
+        _owner = EnginePipeSecurity.CurrentAccount();
+        _descriptor = EnginePipeSecurity.Create(_owner, serverAccount);
+        _securityDescriptor = EnginePipeSecurity.ToBytes(_descriptor);
         _slots = new SemaphoreSlim(options.MaxClients, options.MaxClients);
     }
 
-    /// <summary>Completes when the first instance exists (faults if the pipe couldn't be created).</summary>
+    /// <summary>Completes when the first instance exists (faults if the first attempt failed; the server keeps retrying).</summary>
     public Task Listening => _listening.Task;
 
     internal PipeRequestHandler Handler => _handler;
@@ -76,56 +96,71 @@ public sealed class EnginePipeServer : BackgroundService
         }
     }
 
+    /// <summary>Pipe instances the engine holds right now (listening + connected).</summary>
+    internal int LiveInstances => Volatile.Read(ref _liveInstances);
+
+    /// <summary>Increments every time a new listening instance is ready (tests wait on it).</summary>
+    internal long ListeningGeneration => Interlocked.Read(ref _listeningGeneration);
+
+    /// <summary>Test seam: runs before each WaitForConnection (e.g. to let a client connect and leave first).</summary>
+    internal Func<Task>? BeforeWaitForConnection { get; set; }
+
+    /// <summary>Test seam: the event-frame factory of new connections (to inject a writer fault).</summary>
+    internal Func<Core.Pipe.PipeEventKind, object, Core.Pipe.PipeFrame>? EventFactory { get; set; }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        NamedPipeServerStream? listening;
+        _stoppingToken = stoppingToken;
+        NamedPipeServerStream? listening = null;
         try
         {
-            listening = CreateInstance(first: true);
-        }
-        catch (Exception ex) when (ex is PipeNameTakenException or IOException)
-        {
-            _logger.LogCritical("The engine pipe {Pipe} could not be created: {Why} The GUI can't connect.", FullPipeName, ex.Message);
-            _listening.TrySetException(ex);
-            return;
-        }
-
-        _listening.TrySetResult();
-        _logger.LogInformation("Engine pipe listening on {Pipe}.", FullPipeName);
-        try
-        {
-            while (!stoppingToken.IsCancellationRequested)
+            while (true)
             {
-                await _slots.WaitAsync(stoppingToken).ConfigureAwait(false);
-                var instance = listening ?? CreateInstance(first: false);
-                listening = null;
+                listening ??= await CreateWithRetryAsync(stoppingToken).ConfigureAwait(false);
+                if (BeforeWaitForConnection is { } hook)
+                {
+                    await hook().ConfigureAwait(false);
+                }
+
                 try
                 {
-                    await instance.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                    await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
                 }
-                catch
+                catch (IOException ex)
                 {
-                    await instance.DisposeAsync().ConfigureAwait(false);
-                    _slots.Release();
-                    throw;
+                    // e.g. ERROR_NO_DATA: the client connected and left before the connect completed. Only this instance is lost.
+                    _logger.LogDebug("A pipe instance failed while waiting for a client: {Why}", ex.Message);
+                    await CloseInstanceAsync(listening).ConfigureAwait(false);
+                    listening = null;
+                    continue;
                 }
 
-                Track(instance, stoppingToken);
+                var connected = listening;
+                listening = null;
+                bool slot = _slots.Wait(0);
+                if (!slot)
+                {
+                    _logger.LogWarning("Pipe client refused: all {Max} connection slots are in use.", _options.MaxClients);
+                    await CloseInstanceAsync(connected).ConfigureAwait(false);
+                }
+
+                // The replacement exists before the connected instance is handed off, so the name is never released.
+                listening = TryCreateInstance(out _);
+                if (slot)
+                {
+                    Track(connected);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // stopping
         }
-        catch (Exception ex) when (ex is IOException or PipeNameTakenException)
-        {
-            _logger.LogCritical(ex, "The engine pipe stopped accepting clients.");
-        }
         finally
         {
             if (listening is not null)
             {
-                await listening.DisposeAsync().ConfigureAwait(false);
+                await CloseInstanceAsync(listening).ConfigureAwait(false);
             }
 
             Task[] running;
@@ -138,19 +173,70 @@ public sealed class EnginePipeServer : BackgroundService
         }
     }
 
-    private void Track(NamedPipeServerStream instance, CancellationToken stoppingToken)
+    /// <summary>Creates an instance, retrying with backoff until it works or the service stops.</summary>
+    private async Task<NamedPipeServerStream> CreateWithRetryAsync(CancellationToken stoppingToken)
     {
-        var connection = new PipeConnection(instance, _handler, _resolver, AcquireUserSlot, _options, _logger, stoppingToken);
+        var delay = MinBackoff;
+        bool reported = false;
+        while (true)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+            var instance = TryCreateInstance(out Exception? failure);
+            if (instance is not null)
+            {
+                if (_listening.TrySetResult())
+                {
+                    _logger.LogInformation("Engine pipe listening on {Pipe}.", FullPipeName);
+                }
+                else if (reported)
+                {
+                    _logger.LogWarning("Engine pipe {Pipe} is available again.", FullPipeName);
+                }
+
+                return instance;
+            }
+
+            if (!reported)
+            {
+                _logger.LogCritical("The engine pipe {Pipe} could not be created: {Why} The GUI can't connect; retrying.", FullPipeName, failure!.Message);
+                _listening.TrySetException(failure);
+                reported = true;
+            }
+
+            await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+            delay = TimeSpan.FromTicks(Math.Min(MaxBackoff.Ticks, delay.Ticks * 2));
+        }
+    }
+
+    private void Track(NamedPipeServerStream instance)
+    {
+        if (Interlocked.Increment(ref _unidentified) > _options.EffectiveMaxUnidentified)
+        {
+            Interlocked.Decrement(ref _unidentified);
+            _logger.LogWarning("Pipe client refused: {Max} connections are still waiting to be identified.", _options.EffectiveMaxUnidentified);
+            _ = CloseAndReleaseAsync(instance);
+            return;
+        }
+
+        var identified = new Release(() => Interlocked.Decrement(ref _unidentified));
+        var connection = new PipeConnection(instance, _handler, _resolver, AcquireUserSlot, identified.Dispose, _options, _logger);
+        if (EventFactory is { } factory)
+        {
+            connection.EventFactory = factory;
+        }
+
         lock (_lock)
         {
             var task = Task.Run(async () =>
             {
                 try
                 {
-                    await connection.RunAsync().ConfigureAwait(false);
+                    await connection.RunAsync(_stoppingToken).ConfigureAwait(false);
                 }
                 finally
                 {
+                    identified.Dispose();
+                    Interlocked.Decrement(ref _liveInstances); // the connection disposed its instance
                     _slots.Release();
                 }
             }, CancellationToken.None);
@@ -163,6 +249,18 @@ public sealed class EnginePipeServer : BackgroundService
                 }
             }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
+    }
+
+    private async Task CloseAndReleaseAsync(NamedPipeServerStream instance)
+    {
+        await CloseInstanceAsync(instance).ConfigureAwait(false);
+        _slots.Release();
+    }
+
+    private async Task CloseInstanceAsync(NamedPipeServerStream instance)
+    {
+        await instance.DisposeAsync().ConfigureAwait(false);
+        Interlocked.Decrement(ref _liveInstances);
     }
 
     /// <summary>One of the user's <see cref="PipeServerOptions.MaxConnectionsPerUser"/> slots, or null.</summary>
@@ -192,20 +290,54 @@ public sealed class EnginePipeServer : BackgroundService
         });
     }
 
-    private NamedPipeServerStream CreateInstance(bool first)
+    /// <summary>
+    /// A new verified instance, or null with the failure. FILE_FLAG_FIRST_PIPE_INSTANCE whenever the engine holds none;
+    /// the instance's owner and DACL must read back as the engine's own.
+    /// </summary>
+    internal NamedPipeServerStream? TryCreateInstance(out Exception? failure, bool? forceFirst = null)
     {
+        bool first = forceFirst ?? Volatile.Read(ref _liveInstances) == 0;
         uint openMode = PipeNative.PipeAccessDuplex | PipeNative.FileFlagOverlapped | (first ? PipeNative.FileFlagFirstPipeInstance : 0);
         uint pipeMode = PipeNative.PipeTypeByte | PipeNative.PipeReadModeByte | PipeNative.PipeWait | PipeNative.PipeRejectRemoteClients;
-        SafePipeHandle handle = PipeNative.CreatePipe(FullPipeName, openMode, pipeMode, _options.MaxClients, 64 * 1024, _securityDescriptor, out int error);
+        SafePipeHandle handle = PipeNative.CreatePipe(FullPipeName, openMode, pipeMode, _options.MaxClients + 1, 64 * 1024, _securityDescriptor,
+            out int error);
         if (handle.IsInvalid)
         {
             handle.Dispose();
-            throw error is PipeNative.ErrorAccessDenied or PipeNative.ErrorPipeBusy
+            failure = error == PipeNative.ErrorAccessDenied || (first && error == PipeNative.ErrorPipeBusy)
                 ? new PipeNameTakenException($"{FullPipeName} already exists and belongs to someone else (Win32 error {error}).")
                 : new IOException($"CreateNamedPipe failed for {FullPipeName} (Win32 error {error}).");
+            return null;
         }
 
+        if (!IsOwnInstance(handle))
+        {
+            handle.Dispose();
+            _logger.LogCritical("A new instance of {Pipe} joined a pipe the engine doesn't own (owner or DACL differ); closed it.", FullPipeName);
+            failure = new PipeNameTakenException($"{FullPipeName} belongs to someone else (owner or DACL differ).");
+            return null;
+        }
+
+        Interlocked.Increment(ref _liveInstances);
+        Interlocked.Increment(ref _listeningGeneration);
+        failure = null;
         return new NamedPipeServerStream(PipeDirection.InOut, isAsync: true, isConnected: false, handle);
+    }
+
+    /// <summary>The instance's pipe object has the engine's owner and exactly the engine's DACL.</summary>
+    private bool IsOwnInstance(SafePipeHandle handle)
+    {
+        var actual = PipeNative.TryReadKernelObjectSecurity(handle);
+        if (actual?.Owner is null || actual.Owner != _owner || actual.DiscretionaryAcl is null)
+        {
+            return false;
+        }
+
+        var expected = new byte[_descriptor.DiscretionaryAcl!.BinaryLength];
+        _descriptor.DiscretionaryAcl.GetBinaryForm(expected, 0);
+        var read = new byte[actual.DiscretionaryAcl.BinaryLength];
+        actual.DiscretionaryAcl.GetBinaryForm(read, 0);
+        return expected.AsSpan().SequenceEqual(read);
     }
 
     private sealed class Release(Action release) : IDisposable

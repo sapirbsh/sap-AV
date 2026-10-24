@@ -28,9 +28,10 @@ public static class EnginePipeSecurity
     public static readonly SecurityIdentifier LocalSystem = new(WellKnownSidType.LocalSystemSid, null);
     public static readonly SecurityIdentifier AuthenticatedUsers = new(WellKnownSidType.AuthenticatedUserSid, null);
 
+    /// <param name="owner">Owner and group of the pipe (the engine's own account, review B4 L7: set explicitly, never defaulted).</param>
     /// <param name="serverAccount">The engine's account; null or SYSTEM adds no extra entry (tests pass null to prove a
     /// non-SYSTEM account can't create instances).</param>
-    public static RawSecurityDescriptor Create(SecurityIdentifier? serverAccount)
+    public static RawSecurityDescriptor Create(SecurityIdentifier owner, SecurityIdentifier? serverAccount)
     {
         var acl = new RawAcl(GenericAcl.AclRevision, 3);
         acl.InsertAce(acl.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, FullControl, LocalSystem, false, null));
@@ -40,7 +41,8 @@ public static class EnginePipeSecurity
         }
 
         acl.InsertAce(acl.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, ClientAccess, AuthenticatedUsers, false, null));
-        return new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent | ControlFlags.DiscretionaryAclProtected, null, null, null, acl);
+        ArgumentNullException.ThrowIfNull(owner);
+        return new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent | ControlFlags.DiscretionaryAclProtected, owner, owner, null, acl);
     }
 
     public static byte[] ToBytes(RawSecurityDescriptor descriptor)

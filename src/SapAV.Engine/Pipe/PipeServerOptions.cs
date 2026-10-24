@@ -5,14 +5,23 @@ public sealed class PipeServerOptions
 {
     public const string SectionName = "Pipe";
 
-    /// <summary>Connections served at once (also the pipe's instance limit).</summary>
-    public int MaxClients { get; set; } = 16;
+    /// <summary>Connections served at once (the pipe's instance limit is one more: the listening instance). Connections are async.</summary>
+    public int MaxClients { get; set; } = 64;
+
+    /// <summary>
+    /// Connections not identified yet (before their first frame arrived), review B4 M1: anonymous slot exhaustion is capped
+    /// below <see cref="MaxClients"/>, so identified users keep slots. Default 32 (half of the default MaxClients).
+    /// </summary>
+    public int MaxUnidentifiedConnections { get; set; } = 32;
+
+    /// <summary>The cap in effect (never more than <see cref="MaxClients"/>).</summary>
+    internal int EffectiveMaxUnidentified => Math.Min(MaxUnidentifiedConnections, MaxClients);
 
     /// <summary>Connections one user (SID) may hold at once.</summary>
     public int MaxConnectionsPerUser { get; set; } = 4;
 
-    /// <summary>Time for a new connection to complete Hello.</summary>
-    public TimeSpan HelloTimeout { get; set; } = TimeSpan.FromSeconds(10);
+    /// <summary>Time for a new connection to send its first frame and complete Hello (short: unidentified connections hold slots).</summary>
+    public TimeSpan HelloTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>A connection with no request and no subscription for this long is closed.</summary>
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
@@ -55,6 +64,7 @@ public sealed class PipeServerOptions
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxClients, 1, nameof(MaxClients));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxClients, 254, nameof(MaxClients));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxUnidentifiedConnections, 1, nameof(MaxUnidentifiedConnections));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxConnectionsPerUser, 1, nameof(MaxConnectionsPerUser));
         ArgumentOutOfRangeException.ThrowIfLessThan(HelloTimeout, TimeSpan.FromMilliseconds(10), nameof(HelloTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(IdleTimeout, TimeSpan.FromMilliseconds(10), nameof(IdleTimeout));

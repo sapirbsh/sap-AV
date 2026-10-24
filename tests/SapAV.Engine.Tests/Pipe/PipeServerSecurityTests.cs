@@ -33,7 +33,7 @@ public sealed class PipeServerSecurityTests
     public void AnAccountWithoutTheServerEntry_CannotCreateAnotherInstance()
     {
         string name = @"\\.\pipe\sap-AV.engine.test." + Guid.NewGuid().ToString("N");
-        var sd = EnginePipeSecurity.ToBytes(EnginePipeSecurity.Create(serverAccount: null)); // SYSTEM + Authenticated Users only
+        var sd = EnginePipeSecurity.ToBytes(EnginePipeSecurity.Create(EnginePipeSecurity.CurrentAccount(), serverAccount: null)); // SYSTEM + Authenticated Users only
         uint mode = PipeNative.PipeAccessDuplex | PipeNative.FileFlagOverlapped;
         uint pipeMode = PipeNative.PipeRejectRemoteClients;
         using var first = PipeNative.CreatePipe(name, mode | PipeNative.FileFlagFirstPipeInstance, pipeMode, 4, 4096, sd, out int firstError);
@@ -49,7 +49,7 @@ public sealed class PipeServerSecurityTests
     public async Task ASquattedPipeName_IsRefused_FirstPipeInstance()
     {
         string name = "sap-AV.engine.test." + Guid.NewGuid().ToString("N");
-        var permissive = EnginePipeSecurity.ToBytes(EnginePipeSecurity.Create(EnginePipeSecurity.CurrentAccount()));
+        var permissive = EnginePipeSecurity.ToBytes(EnginePipeSecurity.Create(EnginePipeSecurity.CurrentAccount(), EnginePipeSecurity.CurrentAccount()));
         using var squatter = PipeNative.CreatePipe(@"\\.\pipe\" + name, PipeNative.PipeAccessDuplex | PipeNative.FileFlagOverlapped, 0, 8, 4096,
             permissive, out _);
         Assert.False(squatter.IsInvalid);
