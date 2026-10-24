@@ -219,13 +219,19 @@ internal sealed class PipeTestServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var client in _clients)
+        try
         {
-            await client.DisposeAsync();
-        }
+            foreach (var client in _clients)
+            {
+                await client.DisposeAsync();
+            }
 
-        await Server.StopAsync(CancellationToken.None);
-        Server.Dispose();
-        Harness.Dispose();
+            await Server.StopAsync(CancellationToken.None);
+            Server.Dispose();
+        }
+        finally
+        {
+            Harness.Dispose(); // the temp tree goes even if a client or the server failed to close
+        }
     }
 }
