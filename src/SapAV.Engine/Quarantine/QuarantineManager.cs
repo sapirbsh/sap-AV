@@ -42,7 +42,7 @@ internal enum QuarantineStep
 public sealed partial class QuarantineManager : IQuarantineService, IDisposable
 {
     private readonly QuarantineOptions _options;
-    private readonly IAlertSink _alerts;
+    private readonly IAlertDispatcher _alerts;
     private readonly ILogger<QuarantineManager> _logger;
     private readonly TimeProvider _time;
     private readonly IQuarantineKeyProvider _keys;
@@ -56,7 +56,7 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
 
     public QuarantineManager(
         IOptions<QuarantineOptions> options,
-        IAlertSink alerts,
+        IAlertDispatcher alerts,
         ILogger<QuarantineManager> logger,
         TimeProvider time,
         IQuarantineKeyProvider keys,
@@ -86,6 +86,9 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
 
     /// <inheritdoc/>
     public bool IsAvailable => Volatile.Read(ref _store) is not null;
+
+    /// <summary>The configured store root (whether or not it could be opened).</summary>
+    public string ConfiguredRoot => _options.EffectiveRoot;
 
     /// <summary>The open store's root (null until initialised).</summary>
     public string? StoreRoot => Volatile.Read(ref _store)?.RootPath;

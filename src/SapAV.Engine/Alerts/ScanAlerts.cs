@@ -64,6 +64,27 @@ public static class ScanAlerts
             "This sap-AV folder is not protected (" + why + "), so it is scanned instead of excluded. Reinstall sap-AV or let an " +
             "administrator restore its permissions.", AlertAction.None);
 
+    /// <summary>The quarantine store can't be opened (review B M4); <paramref name="why"/> is engine text (the store's own refusal).</summary>
+    public static Alert StoreUnavailable(string storeRoot, string why, DateTimeOffset now) =>
+        Health(AlertType.QuarantineStoreUnavailable, Verdict.Suspicious, storeRoot, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "The quarantine is unavailable, so Malicious files are left in place; the engine keeps retrying: " + why, AlertAction.None);
+
+    /// <summary>No scan worker could start or load the rules (review B M4 / ROADMAP D3 M-B). Fixed text: worker output never goes here.</summary>
+    public static Alert SandboxUnavailable(string workerPath, DateTimeOffset now) =>
+        Health(AlertType.SandboxUnavailable, Verdict.Suspicious, workerPath, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "No sandboxed scan worker could start or load the rules, so files are reported NotScanned until it recovers. See the engine log.",
+            AlertAction.None);
+
+    /// <summary>The engine pipe can't be created (review B M4 / M5): the name is taken or creating it fails.</summary>
+    public static Alert PipeUnavailable(string pipeName, string why, DateTimeOffset now) =>
+        Health(AlertType.PipeUnavailable, Verdict.Suspicious, pipeName, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "The engine pipe is unavailable, so the sap-AV app can't connect; the engine keeps retrying: " + why, AlertAction.None);
+
+    /// <summary>The sap-AV log's CustomSD or message DLL isn't what the installer set (review B6 M2).</summary>
+    public static Alert EventLogIntegrityDegraded(string logName, string problem, DateTimeOffset now) =>
+        Health(AlertType.EventLogIntegrityDegraded, Verdict.Suspicious, logName, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "Log integrity degraded: " + problem + " Run the sap-AV installer (--install-eventlog-source) again to restore it.", AlertAction.None);
+
     private static Alert Health(
         AlertType type, Verdict verdict, string path, ScanTrigger trigger, DateTimeOffset now, string technique, string reason, AlertAction action) =>
         new(Alert.ComputeAlertId(type, now, path, null, trigger), now, type, verdict, path, null, null, null, technique, [], [reason], null,

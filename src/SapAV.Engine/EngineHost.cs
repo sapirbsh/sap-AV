@@ -34,13 +34,21 @@ public static class EngineHost
         builder.Services.AddSingleton<IWindowsEventLog, WindowsEventLog>();
         builder.Services.AddSingleton<IAlertSink, EventLogAlertSink>();
 
+        // Review B M4: one component failing (an exception escaping a BackgroundService) must never stop the engine. Each
+        // service also guards itself, logs, raises a health alert (9005-9009) and retries where that makes sense.
+        builder.Services.Configure<HostOptions>(options => options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+
+        // Review B6 M2: the sap-AV log's actual CustomSD and message DLL are re-checked at startup and every 5 minutes.
+        builder.Services.AddSingleton<IMessageFileLocationCheck>(MessageFileLocationCheck.Instance);
+        builder.Services.AddHostedService<EventLogIntegrityMonitor>();
+
         // Quarantine (B2): store opened + recovered at startup; the pipe (B4) and scan queue (B3) use IQuarantineService.
         builder.Services.Configure<QuarantineOptions>(builder.Configuration.GetSection(QuarantineOptions.SectionName));
         builder.Services.AddSingleton<IQuarantineKeyProvider, DpapiQuarantineKeyProvider>();
         builder.Services.AddSingleton(sp =>
         {
             var quarantine = sp.GetRequiredService<IOptions<QuarantineOptions>>();
-            return new QuarantineManager(quarantine, sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<ILogger<QuarantineManager>>(),
+            return new QuarantineManager(quarantine, sp.GetRequiredService<IAlertDispatcher>(), sp.GetRequiredService<ILogger<QuarantineManager>>(),
                 sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IQuarantineKeyProvider>(), sp.GetRequiredService<ExclusionSet>());
         });
         builder.Services.AddSingleton<IQuarantineService>(sp => sp.GetRequiredService<QuarantineManager>());
@@ -61,7 +69,9 @@ public static class EngineHost
                 runningAsSystem: AppContainerName.IsLocalSystem());
         });
         builder.Services.AddSingleton<IFileScanner>(sp => sp.GetRequiredService<IScanBroker>());
-        builder.Services.AddHostedService<ScanBrokerStartupService>();
+        builder.Services.AddHostedService(sp => new ScanBrokerStartupService(sp.GetRequiredService<IScanBroker>(),
+            sp.GetRequiredService<IAlertDispatcher>(), sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<IOptions<SandboxOptions>>().Value.ResolvedWorkerPath, sp.GetRequiredService<ILogger<ScanBrokerStartupService>>()));
 
         // Scan jobs (B3): bounded queue, dedicated background-mode threads, pause/resume/cancel. The pipe (B4) drives it.
         builder.Services.Configure<ScanJobOptions>(builder.Configuration.GetSection(ScanJobOptions.SectionName));
@@ -74,7 +84,6 @@ public static class EngineHost
         builder.Services.AddSingleton(ScanJobService.CreateExclusions); // review B H1: engine folders excluded only while verified
         builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
-        builder.Services.AddHostedService<Worker>();
 
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));

@@ -8,8 +8,20 @@ namespace SapAV.Core.Pipe;
 /// <summary>Constants of the engine pipe protocol (ROADMAP B4).</summary>
 public static class PipeProtocol
 {
-    /// <summary>The engine's pipe (<c>\\.\pipe\sap-AV.engine</c>).</summary>
-    public const string PipeName = "sap-AV.engine";
+    /// <summary>
+    /// The engine's pipe, <c>\\.\pipe\ProtectedPrefix\Administrators\sap-AV.engine</c> (review B M5). The named-pipe file
+    /// system lets only members of Administrators (elevated) and SYSTEM create pipes under
+    /// <c>ProtectedPrefix\Administrators\</c>, so a standard user can't squat the name before the service starts; who may
+    /// connect is still decided by the pipe's own DACL (every authenticated local user).
+    /// </summary>
+    public const string PipeName = @"ProtectedPrefix\Administrators\sap-AV.engine";
+
+    /// <summary>
+    /// The pipe of an engine run from a console <b>without</b> elevation (debugging only): it can't create
+    /// <see cref="PipeName"/>, and gives nothing away that the user doesn't already have. Clients must ask for it explicitly
+    /// (and turn off the SYSTEM-owner check).
+    /// </summary>
+    public const string DebugPipeName = "sap-AV.engine.debug";
 
     /// <summary>The only protocol version this build speaks.</summary>
     public const int Version = 1;

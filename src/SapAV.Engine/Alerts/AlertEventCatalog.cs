@@ -24,7 +24,11 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 ///   9002   | AutoQuarantineBurst      | Warning     | Auto-quarantine rate limit hit; the rest need the user (B3)
 ///   9003   | ScanRulesDegraded        | Warning     | No YARA rules loaded, or rule files failed (B3)
 ///   9004   | QuarantineStoreFull      | Error       | Quarantine quota or free-space floor reached (B3)
+///   9005   | QuarantineStoreUnavailable | Error     | The quarantine store / data folder can't be used (retried with backoff)
+///   9006   | SandboxUnavailable       | Error       | No scan worker could start or load the rules: files are NotScanned
+///   9007   | PipeUnavailable          | Error       | The engine pipe can't be created (name taken or failing): no GUI
 ///   9008   | EngineFolderUntrusted    | Warning     | An engine folder isn't admin-only, so it is scanned, not excluded (B review H1)
+///   9009   | EventLogIntegrityDegraded | Error      | The sap-AV log's CustomSD or message DLL isn't the expected one (B6 M2)
 /// </code>
 /// Ranges: 1000-1999 file detections, 2000-2999 system-change detections (persistence, Defender tampering,
 /// honeytokens, process chains), 3000-3999 user / remediation actions, 9000-9999 engine health.
@@ -45,7 +49,11 @@ public static class AlertEventCatalog
     public const int AutoQuarantineBurstEventId = 9002;
     public const int ScanRulesDegradedEventId = 9003;
     public const int QuarantineStoreFullEventId = 9004;
+    public const int QuarantineStoreUnavailableEventId = 9005;
+    public const int SandboxUnavailableEventId = 9006;
+    public const int PipeUnavailableEventId = 9007;
     public const int EngineFolderUntrustedEventId = 9008;
+    public const int EventLogIntegrityDegradedEventId = 9009;
 
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> is not a defined value.</exception>
     public static AlertEventDefinition For(AlertType type) => type switch
@@ -58,7 +66,11 @@ public static class AlertEventCatalog
         AlertType.AutoQuarantineBurst => new(AutoQuarantineBurstEventId, EventLogEntryType.Warning),
         AlertType.ScanRulesDegraded => new(ScanRulesDegradedEventId, EventLogEntryType.Warning),
         AlertType.QuarantineStoreFull => new(QuarantineStoreFullEventId, EventLogEntryType.Error),
+        AlertType.QuarantineStoreUnavailable => new(QuarantineStoreUnavailableEventId, EventLogEntryType.Error),
+        AlertType.SandboxUnavailable => new(SandboxUnavailableEventId, EventLogEntryType.Error),
+        AlertType.PipeUnavailable => new(PipeUnavailableEventId, EventLogEntryType.Error),
         AlertType.EngineFolderUntrusted => new(EngineFolderUntrustedEventId, EventLogEntryType.Warning),
+        AlertType.EventLogIntegrityDegraded => new(EventLogIntegrityDegradedEventId, EventLogEntryType.Error),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Undefined alert type."),
     };
 }

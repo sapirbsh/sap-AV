@@ -39,10 +39,10 @@ public sealed partial class QuarantineManager
             return Task.FromResult(new RestoreResult(RestoreStatus.StoreUnavailable, "The quarantine store is not available."));
         }
 
-        return Task.Run(() => RestoreLockedAsync(store, key, itemId), CancellationToken.None);
+        return Task.Run(() => RestoreLocked(store, key, itemId), CancellationToken.None);
     }
 
-    private async Task<RestoreResult> RestoreLockedAsync(QuarantineStore store, byte[] key, string id)
+    private RestoreResult RestoreLocked(QuarantineStore store, byte[] key, string id)
     {
         RestoreResult result;
         QuarantineMetadata? metadata;
@@ -63,7 +63,7 @@ public sealed partial class QuarantineManager
         }
 
         _logger.LogInformation("Restored quarantine item {Id} to {Path}.", id, result.RestoredPath);
-        await EmitRestoredAlertAsync(metadata!, result.RestoredPath!).ConfigureAwait(false);
+        EmitRestoredAlert(metadata!, result.RestoredPath!);
         return result;
     }
 
@@ -371,7 +371,8 @@ public sealed partial class QuarantineManager
         }
     }
 
-    private async Task EmitRestoredAlertAsync(QuarantineMetadata metadata, string restoredPath)
+    /// <summary>Review B L2: through the dispatcher (never blocks on the Event Log), as an uncapped health-type alert.</summary>
+    private void EmitRestoredAlert(QuarantineMetadata metadata, string restoredPath)
     {
         try
         {
@@ -383,7 +384,7 @@ public sealed partial class QuarantineManager
                 now, AlertType.QuarantineRestored, metadata.Verdict, restoredPath, metadata.Sha256, null, null,
                 metadata.TechniqueIds.FirstOrDefault(), metadata.TechniqueIds.Skip(1).ToArray(), reasons, null,
                 AlertAction.Restored, metadata.Trigger, EngineInfo.Version);
-            await _alerts.WriteAsync(alert, CancellationToken.None).ConfigureAwait(false);
+            _alerts.Post(alert, health: true);
         }
         catch (ArgumentException ex)
         {

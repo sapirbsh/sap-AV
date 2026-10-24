@@ -14,10 +14,38 @@ namespace SapAV.Engine.Tests.TestSupport;
 /// <summary>Thrown by a step hook to simulate a crash at that point.</summary>
 internal sealed class SimulatedCrashException(string step) : Exception($"Simulated crash at {step}.");
 
-/// <summary>Collects alerts.</summary>
-internal sealed class RecordingAlertSink : IAlertSink
+/// <summary>Collects alerts; also usable as an <see cref="IAlertDispatcher"/> that records every post (no aggregation).</summary>
+internal sealed class RecordingAlertSink : IAlertSink, IAlertDispatcher
 {
     public List<Alert> Alerts { get; } = [];
+
+    /// <summary>The health flag of each <see cref="Post"/>, in order.</summary>
+    public List<bool> HealthFlags { get; } = [];
+
+    public bool Post(Alert alert, bool health = false)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        lock (Alerts)
+        {
+            Alerts.Add(alert);
+            HealthFlags.Add(health);
+        }
+
+        return true;
+    }
+
+    public void FlushSummary()
+    {
+    }
+
+    /// <summary>A snapshot (alerts may arrive from other threads).</summary>
+    public Alert[] Snapshot()
+    {
+        lock (Alerts)
+        {
+            return [.. Alerts];
+        }
+    }
 
     public ValueTask WriteAsync(Alert alert, CancellationToken cancellationToken = default)
     {

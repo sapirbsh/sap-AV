@@ -3,6 +3,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Extensions.Options;
 using Microsoft.Win32.SafeHandles;
+using SapAV.Engine.Alerts;
 using SapAV.Engine.Pipe.Native;
 using SapAV.Engine.Quarantine;
 using SapAV.Engine.Scanning;
@@ -13,7 +14,8 @@ namespace SapAV.Engine.Pipe;
 public sealed class PipeNameTakenException(string message) : Exception(message);
 
 /// <summary>
-/// The engine's named-pipe server (B4): <c>\\.\pipe\sap-AV.engine</c>, protocol v1 (<see cref="Core.Pipe.PipeProtocol"/>).
+/// The engine's named-pipe server (B4): <c>\\.\pipe\ProtectedPrefix\Administrators\sap-AV.engine</c> (review B M5), protocol v1
+/// (<see cref="Core.Pipe.PipeProtocol"/>).
 /// </summary>
 /// <remarks>
 /// <para><b>Pipe security.</b> Every instance is created with the explicit descriptor of <see cref="EnginePipeSecurity"/>
@@ -39,6 +41,8 @@ public sealed class EnginePipeServer : BackgroundService
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(5);
 
     private readonly PipeServerOptions _options;
+    private readonly IAlertDispatcher? _alerts;
+    private readonly TimeProvider _time;
     private readonly PipeRequestHandler _handler;
     private readonly IClientIdentityResolver _resolver;
     private readonly ILogger _logger;
@@ -56,19 +60,23 @@ public sealed class EnginePipeServer : BackgroundService
     private CancellationToken _stoppingToken;
 
     public EnginePipeServer(IOptions<PipeServerOptions> options, IScanJobService jobs, IQuarantineService quarantine, TimeProvider time,
-        ILogger<EnginePipeServer> logger)
-        : this(options.Value, jobs, quarantine, time, logger, new PipeClientIdentityResolver(), EnginePipeSecurity.CurrentAccount())
+        ILogger<EnginePipeServer> logger, IAlertDispatcher alerts)
+        : this(ForThisProcess(options.Value, RunningAsSystemOrElevated()), jobs, quarantine, time, logger, new PipeClientIdentityResolver(),
+            EnginePipeSecurity.CurrentAccount(), alerts: alerts)
     {
     }
 
     /// <param name="resolver">Test seam: the identity of each connection. Production always uses <see cref="PipeClientIdentityResolver"/>.</param>
     /// <param name="serverAccount">The account that gets full control besides SYSTEM (the engine's own account).</param>
+    /// <param name="alerts">Where the pipe-unavailable health alert goes (review B M4); null in most tests.</param>
     internal EnginePipeServer(PipeServerOptions options, IScanJobService jobs, IQuarantineService? quarantine, TimeProvider time, ILogger logger,
-        IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null)
+        IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null, IAlertDispatcher? alerts = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
         _options = options;
+        _alerts = alerts;
+        _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
         _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType);
@@ -114,7 +122,70 @@ public sealed class EnginePipeServer : BackgroundService
         base.Dispose();
     }
 
+    /// <summary>
+    /// Review B M5: only an elevated or SYSTEM engine can create <see cref="Core.Pipe.PipeProtocol.PipeName"/> (under
+    /// <c>ProtectedPrefix\Administrators\</c>); a non-elevated console run uses <see cref="Core.Pipe.PipeProtocol.DebugPipeName"/>.
+    /// </summary>
+    internal static PipeServerOptions ForThisProcess(PipeServerOptions options, bool privileged)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!privileged && options.PipeName == Core.Pipe.PipeProtocol.PipeName)
+        {
+            options.PipeName = Core.Pipe.PipeProtocol.DebugPipeName;
+        }
+
+        return options;
+    }
+
+    private static bool RunningAsSystemOrElevated()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return identity.IsSystem || new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    /// <summary>
+    /// Review B M4: the accept loop is supervised. It already survives failures of single instances; anything unexpected
+    /// that still escapes it is logged as critical, raises the pipe-unavailable alert, and the loop starts again after a
+    /// backoff, so the engine never loses its pipe for good (and never stops because of it).
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (_options.PipeName == Core.Pipe.PipeProtocol.DebugPipeName)
+        {
+            _logger.LogWarning("The engine is not elevated: it listens on the debug pipe {Pipe}, not the protected engine pipe.", FullPipeName);
+        }
+
+        var delay = MinBackoff;
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await AcceptLoopAsync(stoppingToken).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException && !stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogCritical(ex, "The engine pipe loop failed; restarting it in {Delay}.", delay);
+                ReportUnavailable($"the pipe loop failed ({ex.GetType().Name}).");
+            }
+
+            try
+            {
+                await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            delay = TimeSpan.FromTicks(Math.Min(MaxBackoff.Ticks, delay.Ticks * 2));
+        }
+    }
+
+    private void ReportUnavailable(string why) =>
+        _alerts?.Post(Alerts.ScanAlerts.PipeUnavailable(FullPipeName, why, _time.GetUtcNow()), health: true);
+
+    private async Task AcceptLoopAsync(CancellationToken stoppingToken)
     {
         _stoppingToken = stoppingToken;
         NamedPipeServerStream? listening = null;
@@ -205,6 +276,7 @@ public sealed class EnginePipeServer : BackgroundService
             if (!reported)
             {
                 _logger.LogCritical("The engine pipe {Pipe} could not be created: {Why} The GUI can't connect; retrying.", FullPipeName, failure!.Message);
+                ReportUnavailable(failure.Message);
                 _listening.TrySetException(failure);
                 reported = true;
             }

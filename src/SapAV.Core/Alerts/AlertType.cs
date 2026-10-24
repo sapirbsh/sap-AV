@@ -46,4 +46,19 @@ public enum AlertType
     /// is scanned instead of excluded: someone who controls it could hide files there (review B H1).
     /// </summary>
     EngineFolderUntrusted,
+
+    /// <summary>The quarantine store (or the sap-AV data folder it lives in) can't be used: nothing is quarantined until it can.</summary>
+    QuarantineStoreUnavailable,
+
+    /// <summary>No sandboxed scan worker could start or load the rules: files are reported NotScanned until it recovers.</summary>
+    SandboxUnavailable,
+
+    /// <summary>The engine pipe can't be created (the name is taken, or creating it fails): the GUI can't connect.</summary>
+    PipeUnavailable,
+
+    /// <summary>
+    /// The sap-AV event log's actual security descriptor (CustomSD) isn't the restricted one, or its message DLL is in an
+    /// unsafe place: events in it may be forged or flooded (review B6 M2).
+    /// </summary>
+    EventLogIntegrityDegraded,
 }

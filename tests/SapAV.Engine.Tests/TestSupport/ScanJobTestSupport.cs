@@ -60,8 +60,16 @@ internal sealed class FakeScanBroker : IScanBroker
         return Judge(item, file, Time);
     }
 
+    /// <summary>Thrown by <see cref="ReloadRulesAsync"/> when set.</summary>
+    public Exception? ReloadFailure { get; set; }
+
     public Task<RulesLoadSummary?> ReloadRulesAsync(CancellationToken cancellationToken = default)
     {
+        if (ReloadFailure is not null)
+        {
+            return Task.FromException<RulesLoadSummary?>(ReloadFailure);
+        }
+
         Rules = ReloadResult;
         return Task.FromResult(ReloadResult);
     }
