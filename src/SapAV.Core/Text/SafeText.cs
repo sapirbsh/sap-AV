@@ -103,6 +103,92 @@ public static class SafeText
         return new string(chars);
     }
 
+    /// <summary>
+    /// Free text for a display (the pipe to the GUI, ROADMAP B4 / review B1 L8): <see cref="SingleLine"/>, plus every
+    /// invisible format character (<see cref="IsInvisibleFormat"/>) mapped to U+FFFD, so a zero-width or tag character
+    /// can't hide or forge part of a reason. Idempotent.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxLength"/> is less than 2.</exception>
+    public static string Display(string value, int maxLength) => MapInvisibleFormat(SingleLine(value, maxLength));
+
+    /// <summary>
+    /// <paramref name="value"/> with every invisible format character (<see cref="IsInvisibleFormat"/>) replaced by U+FFFD
+    /// (a tag character, a surrogate pair, becomes one U+FFFD). Nothing else changes; never cut.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
+    public static string MapInvisibleFormat(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!ContainsInvisibleFormat(value))
+        {
+            return value;
+        }
+
+        var sb = new StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+            {
+                int codePoint = char.ConvertToUtf32(c, value[i + 1]);
+                if (IsInvisibleFormat(codePoint))
+                {
+                    sb.Append(Replacement);
+                }
+                else
+                {
+                    sb.Append(c).Append(value[i + 1]);
+                }
+
+                i++;
+            }
+            else
+            {
+                sb.Append(IsInvisibleFormat(c) ? Replacement : c);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>True if the text has a bidi control or an invisible format character (a UI should isolate or escape it).</summary>
+    public static bool ContainsHiddenCharacters(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return ContainsInvisibleFormat(value) || value.Any(IsBidiControl);
+    }
+
+    /// <summary>
+    /// Invisible format characters that render as nothing: U+00AD (soft hyphen), U+180E, U+200B (zero-width space),
+    /// U+2060-2064 (word joiner, invisible operators), U+FEFF (BOM / ZWNBSP), U+FFF9-FFFB (interlinear annotation) and the
+    /// tag characters U+E0000-E007F. ZWJ / ZWNJ (U+200C/D) are kept: emoji and several scripts need them.
+    /// </summary>
+    public static bool IsInvisibleFormat(int codePoint) =>
+        codePoint is 0x00AD or 0x180E or 0x200B or (>= 0x2060 and <= 0x2064) or 0xFEFF or (>= 0xFFF9 and <= 0xFFFB)
+            or (>= 0xE0000 and <= 0xE007F);
+
+    private static bool ContainsInvisibleFormat(string value)
+    {
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+            {
+                if (IsInvisibleFormat(char.ConvertToUtf32(c, value[++i])))
+                {
+                    return true;
+                }
+            }
+            else if (IsInvisibleFormat(c))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>C0/C1 controls (incl. CR, LF, TAB, NEL) and the Unicode line / paragraph separators.</summary>
     public static bool IsLineBreakOrControl(char c) => char.IsControl(c) || c is '\u2028' or '\u2029';
 
