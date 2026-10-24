@@ -7,14 +7,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, all steps B1–B6 done; section B tester pass running |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B6 done, section test pass done; section reviewer pass running |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B6): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 298 passed + 5 skipped (elevated / opt-in
+Tests (after the section B test pass): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 303 passed + 6 skipped (elevated / opt-in
 tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
@@ -81,8 +81,10 @@ follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
 
 **B6 is built** (`6f44479`, `f28b0d1`): a dedicated `sap-AV` log only SYSTEM + Administrators can write (Event Log Readers
 read), migration from the Application log, and the installer refuses a message DLL in a user-writable folder (so it works
-once D3 installs under Program Files, not from a dev build). B6's review came back **CLEAN** (the permission bits match the live Windows defaults). **Now:** the section B
-tester pass, then the section B reviewer pass. After that, section B is done and section C (scan modes) starts.
+once D3 installs under Program Files, not from a dev build). B6's review came back **CLEAN** (the permission bits match the live Windows defaults). The **section B tester pass** is done (`a39440b`): end-to-end tests through the real pipe, sandboxed worker,
+auto-quarantine and restore (also inside the real AppContainer), pause/resume/cancel and disconnect through the pipe,
+and a positive control for the real Event Log test. It also fixed a test-cleanup bug that leaked old sandbox profiles.
+No production bugs found. **Now:** the section B reviewer pass. After that, section B is done and section C (scan modes) starts.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
@@ -97,7 +99,8 @@ tester pass, then the section B reviewer pass. After that, section B is done and
 **Open for the user**
 - **Ready now:** in an **elevated** PowerShell in `C:\Projects\sap-AV`, run
   `$env:SAPAV_TEST_ALLOW_HKLM='1'; dotnet test tests/SapAV.Engine.Tests --filter "FullyQualifiedName~RealEventLogTests"`.
-  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused). It cleans up
+  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused). It now
+  also runs a positive control (the same filtered token can write to a permissive throwaway log). It cleans up
   after itself (only a throwaway .evtx file and a "log cleared" record remain).
 - Decision X2 M1 is made (dedicated `sap-AV` event log, step B6). No other decisions are pending.
 
