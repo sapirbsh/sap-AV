@@ -55,6 +55,7 @@ public sealed class EnginePipeClient : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _reader;
     private long _nextId;
+    private int _disposed;
 
     private EnginePipeClient(NamedPipeClientStream pipe)
     {
@@ -201,6 +202,11 @@ public sealed class EnginePipeClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         await _cts.CancelAsync().ConfigureAwait(false);
         await _pipe.DisposeAsync().ConfigureAwait(false);
         try
@@ -232,7 +238,7 @@ public sealed class EnginePipeClient : IAsyncDisposable
                 {
                     _events.Writer.TryWrite(new PipeEvent(kind, body));
                 }
-                else if (frame.Kind == PipeFrameKind.Reply && _pending.TryGetValue(frame.ReplyTo ?? 0, out var waiter))
+                else if (frame.Kind == PipeFrameKind.Reply && FindWaiter(frame.ReplyTo) is { } waiter)
                 {
                     waiter.TrySetResult(frame);
                 }
@@ -251,6 +257,26 @@ public sealed class EnginePipeClient : IAsyncDisposable
                 waiter.TrySetException(new IOException("The engine pipe closed."));
             }
         }
+    }
+
+    /// <summary>
+    /// The waiter for a reply. A reply without an ID (the engine couldn't read the request's ID, or refused the connection
+    /// before reading it) goes to an explicit ID-less waiter, else to the only pending request, if there is just one.
+    /// </summary>
+    private TaskCompletionSource<PipeFrame>? FindWaiter(long? replyTo)
+    {
+        if (_pending.TryGetValue(replyTo ?? 0, out var waiter))
+        {
+            return waiter;
+        }
+
+        if (replyTo is null)
+        {
+            var all = _pending.Values.Take(2).ToArray();
+            return all.Length == 1 ? all[0] : null;
+        }
+
+        return null;
     }
 
     private static async Task<NamedPipeClientStream> OpenAsync(string pipeName, TimeSpan timeout, CancellationToken cancellationToken)
