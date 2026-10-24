@@ -7,14 +7,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 being built |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 nearly built |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B2 fixes): Core 1067 passed + 1 skipped (opt-in on-disk EICAR), Engine 88 passed + 3 skipped (elevated / opt-in
+Tests (after B3 fixes): Core 1111 passed + 1 skipped (opt-in on-disk EICAR), Engine 190 passed + 5 skipped (elevated / opt-in
 tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
@@ -64,34 +64,36 @@ pass comes at the end.
 | B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | Being built |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Nearly built** (4 commits local; client library in progress) |
 | B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
 
-## Current status — paused 2026-10-23, start here next session
+## Current status (2026-10-25)
 
-**B5 (scan-worker sandbox) is partly done.**
-- **Committed + pushed:** `b21a8fb` "B5: scan worker process" (the `SapAV.ScanWorker` project, worker protocol,
-  handle-broker pieces in Core). Verified in a clean checkout: 0 warnings, all tests pass (simulated clean machine too).
-- **On disk, NOT committed** (untracked, kept for next session): `src/SapAV.Engine/Sandbox/` (the AppContainer
-  launcher), `tests/SapAV.Engine.Tests/Sandbox/`, `tests/SapAV.Engine.Tests/TestSupport/SandboxTestSupport.cs`.
-- **Open problem (blocking B5):** the sandboxed worker fails to start with **0xc0000142** (STATUS_DLL_INIT_FAILED), and
-  test runs showed an error dialog on the desktop. Findings so far:
-  - Creating a named window station is denied for a non-admin user.
-  - Next to check: read/execute ACLs for ALL APPLICATION PACKAGES (S-1-15-2-1) on the worker and .NET runtime
-    folders, Job UI limits, mitigation policies, STARTUPINFO desktop.
-- **Next steps:**
-  1. Resume B5. **First** suppress hard-error popups: SetErrorMode in the broker, no CREATE_DEFAULT_ERROR_MODE,
-     CREATE_NO_WINDOW, DIE_ON_UNHANDLED_EXCEPTION. Tests must never show UI.
-  2. Find the 0xc0000142 cause and fix it. If AppContainer truly can't run the .NET worker, **stop and ask the user**:
-     the fallback is a Low-integrity restricted token.
-  3. Finish B5 (supervision: timeouts, crashes, restart), then its full reviewer pass, then B3 → B4 → section B review.
-- Leftover worker processes from the stopped test run were killed; none are running.
+**B4 (named pipe, engine ↔ GUI) is nearly built.** Committed locally, not pushed yet:
+- `009d580` pipe framing, strict JSON, `ScanPathPolicy`, display text
+- `504f828` pipe server, client identity and access checks
+- `97973a7` protocol v1 messages and hostile-input tests
+- `514ffcd` client authorization and output safety tests
+
+The client library (for the GUI in F1) is still in progress. When it's done: verify, push, then B4's **immediate review**
+(the pipe is where untrusted users reach the SYSTEM engine), then **B6**, then the section B tester + reviewer pass.
+
+**Done in section B so far**
+- **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
+- **B2** reversible quarantine; review found **Critical C1** (quarantine could be redirected into deleting another
+  file as SYSTEM), fixed and confirmed closed.
+- **B5** sandboxed scan worker (AppContainer, Job Object, read-only brokered handles). The 0xc0000142 startup failure
+  was a blocked `conhost.exe`; fixed by starting the worker detached. Review H1 (worker process DACL) fixed and confirmed.
+- **B3** scan jobs (queue, pause/resume/cancel, ETA, alert aggregation, auto-quarantine policy). Review H1 (trailing
+  dot/space names) fixed.
+- All Medium/Low findings are recorded in `ROADMAP.md` under the step they belong to.
 
 **Open for the user**
-- ~~Decision X2 M1~~: **decided 2026-10-24: dedicated `sap-AV` event log** (only SYSTEM + the installer write), built as new step **B6**.
-- Once by hand: in an **elevated** PowerShell, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`. The 2026-10-24 attempt did not run the Event Log test: the Engine project was mid-edit by the B3 agent and didn't compile. Rerun after B6 (which changes that test).
+- Once by hand, after B6: in an **elevated** PowerShell, run `$env:SAPAV_TEST_ALLOW_HKLM=1; dotnet test`, so the real
+  Event Log test actually runs. (The 2026-10-24 attempt ran while B3 was mid-edit, so the Engine tests didn't compile.)
+- Decision X2 M1 is made (dedicated `sap-AV` event log, step B6). No other decisions are pending.
 
 ## What's left
 
-- **B:** B3 (in progress) → B4 → B6, then the section B tester + reviewer pass.
+- **B:** finish B4 → its review → B6 (with its review) → section B tester + reviewer pass.
 - Then C → D → E → F → G, ending with the Phase 1 security review (G5).
