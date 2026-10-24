@@ -92,6 +92,55 @@ public sealed class RealEventLogTests
         Assert.False(eventLog.LogExists(name));
     }
 
+    /// <summary>
+    /// Positive control for the test above (B6 review L3): the same filtered (non-admin) token that is refused by the sap-AV
+    /// log CAN write to a throwaway log whose security descriptor allows Authenticated Users, so the refusal there comes from
+    /// the CustomSD and not from the token being unable to write to any event log.
+    /// </summary>
+    [RequiresFact(Requires.RunningElevated, Requires.HklmWritesAllowed)]
+    public void PositiveControl_FilteredToken_CanWriteToALogWhoseSdAllowsIt()
+    {
+        var eventLog = new WindowsEventLog();
+        SweepStale(eventLog);
+
+        var name = TestPrefix + "ctl-" + Guid.NewGuid().ToString("N")[..12];
+        const string message = "sap-AV positive control entry";
+        try
+        {
+            // A throwaway log + source whose SD lets Authenticated Users write: the same registration path as the real
+            // installer, only the CustomSD differs (the Windows default for custom logs is not a stable thing to rely on).
+            const string ordinarySd = "O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x3;;;AU)";
+            eventLog.WriteLogSettings(name, new EventLogSettings(ordinarySd, 1024 * 1024, 0, false));
+            eventLog.WriteSource(name, name, ProtectedMessageFile());
+            _ = ServiceSecurityDescriptor(name); // wait until the service has loaded the new log
+
+            using (var nonAdmin = FilteredToken.CreateNonAdmin())
+            {
+                WindowsIdentity.RunImpersonated(nonAdmin,
+                    () => eventLog.ReportEvent(name, name, message, EventLogEntryType.Information, AlertEventCatalog.MaliciousFileEventId));
+            }
+
+            var records = ReadBack(name);
+            try
+            {
+                Assert.Contains(records, r => r.Id == AlertEventCatalog.MaliciousFileEventId && r.Properties[0].Value as string == message);
+            }
+            finally
+            {
+                foreach (var r in records)
+                {
+                    r.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            eventLog.DeleteLog(name);
+        }
+
+        Assert.False(eventLog.LogExists(name));
+    }
+
     /// <summary>The .NET Framework 4 pass-through message DLL: in an admin-only Windows folder on every Windows 10/11.</summary>
     private static string ProtectedMessageFile()
     {

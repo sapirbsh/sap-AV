@@ -175,12 +175,12 @@ internal static class StaleTestProfiles
             foreach (var sid in mappings?.GetSubKeyNames() ?? [])
             {
                 using var key = mappings!.OpenSubKey(sid);
-                if (key?.GetValue("Moniker") is not string moniker || !moniker.StartsWith("sap-AV.ScanWorker", StringComparison.Ordinal))
+                if (key?.GetValue("Moniker") is not string moniker || !moniker.StartsWith("sap-AV.ScanWorker", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue; // not ours
+                    continue; // not ours (the registry stores monikers lower-cased, so compare ignoring case)
                 }
 
-                if (AppContainerName.IsValidName(moniker) || OwnerIsAlive(moniker))
+                if (IsPerInstallName(moniker) || OwnerIsAlive(moniker))
                 {
                     live.Add(sid);
                 }
@@ -215,10 +215,15 @@ internal static class StaleTestProfiles
         return true;
     }
 
+    /// <summary>The engine's own <c>sap-AV.ScanWorker.&lt;32 hex&gt;</c> profile, in any letter case (the registry lower-cases monikers).</summary>
+    private static bool IsPerInstallName(string moniker) =>
+        System.Text.RegularExpressions.Regex.IsMatch(moniker, @"^sap-AV\.ScanWorker\.[0-9a-f]{32}$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>True for <c>sap-AV.ScanWorker.Test.&lt;pid&gt;.…</c> names whose process still runs.</summary>
     private static bool OwnerIsAlive(string moniker)
     {
-        if (!moniker.StartsWith(TestAppContainer.NamePrefix, StringComparison.Ordinal))
+        if (!moniker.StartsWith(TestAppContainer.NamePrefix, StringComparison.OrdinalIgnoreCase))
         {
             return false; // an older test name format: stale by definition
         }
