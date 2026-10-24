@@ -400,10 +400,10 @@ the live Windows defaults for classic logs.
 - **X2 docs (L7):** users can still write Application events with look-alike sources (`sap-AV ` with a trailing space,
   homoglyphs). SIEM docs must say: filter on `Channel == "sap-AV"`, never on the provider name alone.
 
-**Carried over from the section B review (cross-step; Medium/Low).** H1 (`%ProgramData%sap-AV` writable by users and
+**Carried over from the section B review (cross-step; Medium/Low).** H1 (`%ProgramData%\sap-AV` writable by users and
 wholly excluded), H2 (admin/engine jobs following links on file opens) and H3 (one user blocking all scans with paused
 jobs) are fixed in section B. M4 (startup resilience + health alerts, incl. B6 M2), M5 (pipe name in
-`ProtectedPrefixAdministrators`), L1 and L2 were pulled forward and fixed too.
+`ProtectedPrefix\Administrators`), L1 and L2 were pulled forward and fixed too.
 - **C1 (M1):** a standard user can fill the quarantine store through `QuarantineFromResult` (Suspicious results are
   accepted; there's no per-user quota or rate limit), so real auto-quarantines then get StoreFull. Add a per-requester
   quota and rate limit for pipe-requested quarantines; keep the global quota for engine-initiated ones.
