@@ -7,14 +7,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 nearly built |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 built (review running) |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after B3 fixes): Core 1111 passed + 1 skipped (opt-in on-disk EICAR), Engine 190 passed + 5 skipped (elevated / opt-in
+Tests (after B4): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 243 passed + 5 skipped (elevated / opt-in
 tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 
@@ -64,19 +64,16 @@ pass comes at the end.
 | B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Nearly built** (4 commits local; client library in progress) |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Built** (`009d580`…`3b12c01`, 6 commits); immediate review running |
 | B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
 
 ## Current status (2026-10-25)
 
-**B4 (named pipe, engine ↔ GUI) is nearly built.** Committed locally, not pushed yet:
-- `009d580` pipe framing, strict JSON, `ScanPathPolicy`, display text
-- `504f828` pipe server, client identity and access checks
-- `97973a7` protocol v1 messages and hostile-input tests
-- `514ffcd` client authorization and output safety tests
-
-The client library (for the GUI in F1) is still in progress. When it's done: verify, push, then B4's **immediate review**
-(the pipe is where untrusted users reach the SYSTEM engine), then **B6**, then the section B tester + reviewer pass.
+**B4 (named pipe, engine ↔ GUI) is built and pushed** (`009d580`…`3b12c01`): pipe locked to local authenticated
+users (SYSTEM owns it, first-instance protection), client identity from the pipe, strict 64 KiB JSON frames, `ScanPathPolicy`,
+scans run with the requester's access, per-user job isolation, quarantine/restore authorization, per-user caps, sanitized
+output, and a client library for the GUI (F1). Now: B4's **immediate review** (the pipe is where untrusted users reach
+the SYSTEM engine), then **B6**, then the section B tester + reviewer pass.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
