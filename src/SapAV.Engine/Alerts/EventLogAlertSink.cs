@@ -4,10 +4,17 @@ using SapAV.Engine.EventLogging;
 namespace SapAV.Engine.Alerts;
 
 /// <summary>
-/// Writes each alert to the Windows Event Log (Application log, source "sap-AV"), as JSON
+/// Writes each alert to the Windows Event Log (the dedicated "sap-AV" log, source "sap-AV"; B6), as JSON
 /// (<see cref="AlertEventMessage"/>) with the event ID and entry type from <see cref="AlertEventCatalog"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Only the dedicated log is used.</b> The source must be registered in <see cref="LogName"/> and in no other log.
+/// If it is still in the Application log (installed by B1, not migrated yet), alerts are <b>skipped</b> with one health
+/// warning, rather than written there: any user can write Application-log events with source "sap-AV", so alerts there
+/// can be forged or flooded out, and a SIEM must be able to trust every event in the sap-AV log. Running
+/// <c>--install-eventlog-source</c> again migrates the source; the sink picks it up within <see cref="RecheckInterval"/>.
+/// </para>
 /// <para>
 /// The source is registered only by the elevated service installer command (<see cref="EventLogSourceInstaller"/>);
 /// this sink never registers it. Writes go through <see cref="IWindowsEventLog.ReportEvent"/> (ReportEventW), which
@@ -50,6 +57,9 @@ public sealed class EventLogAlertSink : IAlertSink
     /// <summary>Event source name; "sap-AV" except in tests.</summary>
     public string SourceName { get; init; } = AlertEventCatalog.SourceName;
 
+    /// <summary>The log the source must be registered in, and only in; "sap-AV" except in tests.</summary>
+    public string LogName { get; init; } = AlertEventCatalog.LogName;
+
     /// <summary>Message cap (see <see cref="AlertEventMessage.Format"/>).</summary>
     /// <exception cref="ArgumentOutOfRangeException">
     /// Not between <see cref="AlertEventMessage.MinMessageChars"/> and <see cref="AlertEventMessage.EventLogStringLimit"/>.
@@ -89,7 +99,7 @@ public sealed class EventLogAlertSink : IAlertSink
 
             try
             {
-                _eventLog.ReportEvent(SourceName, AlertEventCatalog.LogName, message, definition.EntryType, definition.EventId);
+                _eventLog.ReportEvent(SourceName, LogName, message, definition.EntryType, definition.EventId);
                 _writeFailureLogged = false;
                 return true;
             }
@@ -110,24 +120,35 @@ public sealed class EventLogAlertSink : IAlertSink
             return false;
         }
 
-        string? log;
+        IReadOnlyList<string> logs;
         try
         {
-            log = _eventLog.FindLogForSource(SourceName);
+            logs = _eventLog.FindLogsForSource(SourceName);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return Unavailable(now, $"its registration could not be read ({ex.GetType().Name}: {ex.Message})");
         }
 
-        if (log is null)
+        if (logs.Count == 0)
         {
             return Unavailable(now, "it is not registered");
         }
 
-        if (!string.Equals(log, AlertEventCatalog.LogName, StringComparison.OrdinalIgnoreCase))
+        if (logs.Count > 1)
         {
-            return Unavailable(now, $"it is registered in the '{log}' log instead of {AlertEventCatalog.LogName}");
+            return Unavailable(now, $"it is registered in more than one log ({string.Join(", ", logs)})");
+        }
+
+        if (string.Equals(logs[0], EventLogSourceInstaller.LegacyLogName, StringComparison.OrdinalIgnoreCase))
+        {
+            return Unavailable(now, $"it is still in the {EventLogSourceInstaller.LegacyLogName} log, where any user can write " +
+                                    $"forged '{SourceName}' events, instead of the dedicated '{LogName}' log (not migrated yet)");
+        }
+
+        if (!string.Equals(logs[0], LogName, StringComparison.OrdinalIgnoreCase))
+        {
+            return Unavailable(now, $"it is registered in the '{logs[0]}' log instead of '{LogName}'");
         }
 
         if (_unavailableLogged)

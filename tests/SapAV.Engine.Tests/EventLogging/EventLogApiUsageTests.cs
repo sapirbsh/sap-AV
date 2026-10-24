@@ -5,7 +5,8 @@ namespace SapAV.Engine.Tests.EventLogging;
 /// <summary>
 /// Guard: nothing in src/ may use an Event Log API that registers a missing source as a side effect
 /// (<c>EventLog.WriteEntry</c> / <c>WriteEvent</c>, an <c>EventLog</c> instance, the ILogger EventLog provider).
-/// Registration calls (<c>CreateEventSource</c> / <c>DeleteEventSource</c>) may only appear in
+/// Registration and log-management code (<c>CreateEventSource</c> / <c>DeleteEventSource</c>, the <c>Services\EventLog</c>
+/// registry key, <c>EventLogConfiguration</c>, <c>ClearLog</c>, <c>EventLog.Delete</c>) may only appear in
 /// <c>WindowsEventLog.cs</c>, which the elevated installer command uses. Comment lines are ignored.
 /// </summary>
 public sealed partial class EventLogApiUsageTests
@@ -25,6 +26,7 @@ public sealed partial class EventLogApiUsageTests
             }
 
             bool isWrapper = Path.GetFileName(file) == "WindowsEventLog.cs";
+            bool isInstaller = isWrapper || Path.GetFileName(file) == "EventLogSourceInstaller.cs";
             var lines = File.ReadAllLines(file);
             for (int i = 0; i < lines.Length; i++)
             {
@@ -34,7 +36,9 @@ public sealed partial class EventLogApiUsageTests
                     continue;
                 }
 
-                if (ForbiddenEverywhere().IsMatch(line) || (!isWrapper && RegistrationCall().IsMatch(line)))
+                if (ForbiddenEverywhere().IsMatch(line)
+                    || (!isWrapper && (RegistrationCall().IsMatch(line) || LogManagement().IsMatch(line)))
+                    || (!isInstaller && WrapperMutation().IsMatch(line)))
                 {
                     hits.Add($"{relative}:{i + 1}: {line}");
                 }
@@ -49,6 +53,24 @@ public sealed partial class EventLogApiUsageTests
 
     [GeneratedRegex(@"\b(CreateEventSource|DeleteEventSource)\b")]
     private static partial Regex RegistrationCall();
+
+    /// <summary>B6: the classic-log registry key (any spelling of the separator), the channel config API, clear and delete.</summary>
+    [GeneratedRegex(@"Services(\\|\\\\|/)+EventLog\b|\bEventLogConfiguration\b|\bEventLogSession\b|\bEventLog\.Delete\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex LogManagement();
+
+    /// <summary>The HKLM-changing <c>IWindowsEventLog</c> methods: only <c>EventLogSourceInstaller</c> calls them.</summary>
+    [GeneratedRegex(@"\.(WriteLogSettings|WriteSource|DeleteSource|DeleteLog|ClearLog)\s*\(")]
+    private static partial Regex WrapperMutation();
+
+    [Theory]
+    [InlineData(@"var key = @""SYSTEM\CurrentControlSet\Services\EventLog\sap-AV"";")]
+    [InlineData(@"var key = ""SYSTEM\\CurrentControlSet\\services\\eventlog"";")]
+    [InlineData("using var config = new EventLogConfiguration(name);")]
+    [InlineData("EventLogSession.GlobalSession.ClearLog(name);")]
+    public void LogManagementPattern_CatchesTheRegistryKeyAndTheLogApis(string line)
+    {
+        Assert.Matches(LogManagement(), line);
+    }
 
     private static string FindRepoRoot()
     {

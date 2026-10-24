@@ -16,7 +16,7 @@ public sealed class EventLogAlertSinkTests
 
     private EventLogAlertSink Sink() => new(_eventLog, _logger, _time);
 
-    private void Register(string log = "Application") => _eventLog.Sources["sap-AV"] = log;
+    private void Register(string log = "sap-AV") => _eventLog.Register("sap-AV", log);
 
     [Fact]
     public async Task Write_RegisteredSource_WritesJsonWithTheCatalogIdAndEntryType()
@@ -27,7 +27,7 @@ public sealed class EventLogAlertSinkTests
         await Sink().WriteAsync(alert);
 
         var entry = Assert.Single(_eventLog.Entries);
-        Assert.Equal(("sap-AV", "Application", 1002, EventLogEntryType.Warning),
+        Assert.Equal(("sap-AV", "sap-AV", 1002, EventLogEntryType.Warning),
             (entry.Source, entry.LogName, entry.EventId, entry.EntryType));
         Assert.Equal(alert, JsonSerializer.Deserialize<Alert>(entry.Message));
     }
@@ -47,7 +47,7 @@ public sealed class EventLogAlertSinkTests
         Assert.True(sink.TryWrite(SampleAlerts.Create()));
         Assert.Single(_eventLog.Entries);
         Assert.Equal(1, _logger.Count(LogLevel.Information));
-        Assert.Equal(0, _eventLog.CreateCalls); // the sink never registers the source itself
+        Assert.Empty(_eventLog.Changes); // the sink never registers the source itself
     }
 
     [Fact]
@@ -57,12 +57,12 @@ public sealed class EventLogAlertSinkTests
         var sink = Sink();
         Assert.True(sink.TryWrite(SampleAlerts.Create()));
 
-        _eventLog.Sources.Remove("sap-AV"); // admin ran --uninstall-eventlog-source while the service is up
+        _eventLog.Unregister("sap-AV"); // admin ran --uninstall-eventlog-source while the service is up
 
         Assert.False(sink.TryWrite(SampleAlerts.Create()));
         Assert.Single(_eventLog.Entries);
-        Assert.Empty(_eventLog.Sources);
-        Assert.Equal(0, _eventLog.CreateCalls);
+        Assert.Empty(_eventLog.FindLogsForSource("sap-AV"));
+        Assert.Empty(_eventLog.Changes);
     }
 
     [Theory]
@@ -100,21 +100,47 @@ public sealed class EventLogAlertSinkTests
     [Fact]
     public void Write_RegistryLookupThrows_DegradesGracefully()
     {
-        var sink = new EventLogAlertSink(new ThrowingLookup(), _logger, _time);
+        _eventLog.LookupFailure = new UnauthorizedAccessException("registry denied");
 
-        Assert.False(sink.TryWrite(SampleAlerts.Create()));
+        Assert.False(Sink().TryWrite(SampleAlerts.Create()));
         Assert.Equal(1, _logger.Count(LogLevel.Warning));
     }
 
-    private sealed class ThrowingLookup : SapAV.Engine.EventLogging.IWindowsEventLog
+    [Fact]
+    public void Write_SourceStillInTheApplicationLog_IsSkippedWithOneHealthWarning_NeverWrittenThere()
     {
-        public string? FindLogForSource(string source) => throw new UnauthorizedAccessException("registry denied");
+        Register("Application"); // installed by B1, --install-eventlog-source not rerun yet
+        var sink = Sink();
 
-        public void CreateSource(string source, string logName) => throw new NotSupportedException();
+        Assert.False(sink.TryWrite(SampleAlerts.Create()));
+        _time.Now += EventLogAlertSink.RecheckInterval;
+        Assert.False(sink.TryWrite(SampleAlerts.Create()));
 
-        public void DeleteSource(string source) => throw new NotSupportedException();
+        Assert.Empty(_eventLog.Entries);
+        var warning = Assert.Single(_logger.Lines);
+        Assert.Equal(LogLevel.Warning, warning.Level);
+        Assert.Contains("not migrated", warning.Message);
+        Assert.Contains("--install-eventlog-source", warning.Message);
+        Assert.Empty(_eventLog.Changes);
+    }
 
-        public void ReportEvent(string source, string logName, string message, EventLogEntryType entryType, int eventId) =>
-            throw new NotSupportedException();
+    [Fact]
+    public void Write_SourceInTheDedicatedLogAndAnother_IsNotUsed()
+    {
+        Register();
+        Register("Application");
+
+        Assert.False(Sink().TryWrite(SampleAlerts.Create()));
+        Assert.Empty(_eventLog.Entries);
+        Assert.Contains("more than one log", Assert.Single(_logger.Lines).Message);
+    }
+
+    [Fact]
+    public void Write_ConfiguredLogName_IsTheOneCheckedAndWritten()
+    {
+        Register("sap-AV-test-log");
+
+        Assert.True(new EventLogAlertSink(_eventLog, _logger, _time) { LogName = "sap-AV-test-log" }.TryWrite(SampleAlerts.Create()));
+        Assert.Equal("sap-AV-test-log", Assert.Single(_eventLog.Entries).LogName);
     }
 }

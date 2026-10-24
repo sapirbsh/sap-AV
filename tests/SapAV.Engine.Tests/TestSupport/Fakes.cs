@@ -6,51 +6,134 @@ using SapAV.Engine.EventLogging;
 
 namespace SapAV.Engine.Tests.TestSupport;
 
-/// <summary>In-memory Event Log: source registrations (source to log) and written entries.</summary>
+/// <summary>
+/// In-memory Event Log: logs (with their settings and sources) and written entries. Every change is recorded in
+/// <see cref="Changes"/> (e.g. "WriteSource sap-AV@sap-AV"), so tests can check order and "nothing changed".
+/// </summary>
 internal sealed class FakeWindowsEventLog : IWindowsEventLog
 {
     public sealed record Entry(string Source, string LogName, string Message, EventLogEntryType EntryType, int EventId);
 
-    public Dictionary<string, string> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public sealed class Log
+    {
+        public EventLogSettings? Settings { get; set; }
+
+        /// <summary>Source name to message file.</summary>
+        public Dictionary<string, string> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public Dictionary<string, Log> Logs { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public List<Entry> Entries { get; } = [];
 
-    public int CreateCalls { get; private set; }
+    public List<string> Changes { get; } = [];
 
-    public int DeleteCalls { get; private set; }
-
-    /// <summary>Thrown by every write / create / delete when set (e.g. a SecurityException for "not elevated").</summary>
+    /// <summary>Thrown by every change and write when set (e.g. a SecurityException for "not elevated").</summary>
     public Exception? Failure { get; set; }
 
-    public string? FindLogForSource(string source) => Sources.GetValueOrDefault(source);
+    /// <summary>Thrown by <see cref="FindLogsForSource"/> when set.</summary>
+    public Exception? LookupFailure { get; set; }
 
-    /// <summary>Runs inside CreateSource before registering, e.g. to simulate a concurrent installer.</summary>
-    public Action<string>? BeforeCreate { get; set; }
+    /// <summary>Replaces what <see cref="ReadLogSettings"/> returns (e.g. a CustomSD the service rewrote).</summary>
+    public Func<EventLogSettings, EventLogSettings>? ReadBack { get; set; }
 
-    public void CreateSource(string source, string logName)
+    /// <summary>Registers <paramref name="source"/> in <paramref name="log"/> without recording a change (test setup).</summary>
+    public void Register(string source, string log, string messageFile = @"C:\fake\messages.dll")
     {
-        CreateCalls++;
-        ThrowIfFailing();
-        BeforeCreate?.Invoke(source);
-        Sources.Add(source, logName); // throws ArgumentException if it exists, like CreateEventSource
+        if (!Logs.TryGetValue(log, out var entry))
+        {
+            Logs[log] = entry = new Log();
+        }
+
+        entry.Sources[source] = messageFile;
     }
 
-    public void DeleteSource(string source)
+    public void Unregister(string source)
     {
-        DeleteCalls++;
-        ThrowIfFailing();
-        Sources.Remove(source);
+        foreach (var log in Logs.Values)
+        {
+            log.Sources.Remove(source);
+        }
+    }
+
+    public IReadOnlyList<string> FindLogsForSource(string source)
+    {
+        if (LookupFailure is not null)
+        {
+            throw LookupFailure;
+        }
+
+        return Logs.Where(l => l.Value.Sources.ContainsKey(source)).Select(l => l.Key).Order(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public bool LogExists(string logName) => Logs.ContainsKey(logName);
+
+    public EventLogSettings? ReadLogSettings(string logName) =>
+        Logs.TryGetValue(logName, out var log) && log.Settings is { } settings
+            ? ReadBack?.Invoke(settings) ?? settings
+            : Logs.ContainsKey(logName) ? new EventLogSettings(string.Empty, 0, 0, false) : null;
+
+    public void WriteLogSettings(string logName, EventLogSettings settings)
+    {
+        Change($"WriteLogSettings {logName}");
+        if (!Logs.TryGetValue(logName, out var log))
+        {
+            Logs[logName] = log = new Log();
+        }
+
+        log.Settings = settings;
+    }
+
+    public void WriteSource(string source, string logName, string messageFile)
+    {
+        Change($"WriteSource {source}@{logName}");
+        if (!Logs.TryGetValue(logName, out var log))
+        {
+            throw new InvalidOperationException($"The '{logName}' log is not registered.");
+        }
+
+        log.Sources[source] = messageFile;
+    }
+
+    public string? ReadMessageFile(string source, string logName) =>
+        Logs.TryGetValue(logName, out var log) ? log.Sources.GetValueOrDefault(source) : null;
+
+    public void DeleteSource(string source, string logName)
+    {
+        Change($"DeleteSource {source}@{logName}");
+        if (Logs.TryGetValue(logName, out var log))
+        {
+            log.Sources.Remove(source);
+        }
+    }
+
+    public void DeleteLog(string logName)
+    {
+        Change($"DeleteLog {logName}");
+        Logs.Remove(logName);
+    }
+
+    public void ClearLog(string logName)
+    {
+        Change($"ClearLog {logName}");
+        Entries.RemoveAll(e => string.Equals(e.LogName, logName, StringComparison.OrdinalIgnoreCase));
     }
 
     public void ReportEvent(string source, string logName, string message, EventLogEntryType entryType, int eventId)
     {
         ThrowIfFailing();
-        if (FindLogForSource(source) != logName)
+        if (!FindLogsForSource(source).SequenceEqual([logName], StringComparer.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("The fake requires a registered source, like the real API without admin rights.");
+            throw new InvalidOperationException("The fake requires the source registered in exactly that log.");
         }
 
         Entries.Add(new(source, logName, message, entryType, eventId));
+    }
+
+    private void Change(string change)
+    {
+        ThrowIfFailing();
+        Changes.Add(change);
     }
 
     private void ThrowIfFailing()
@@ -59,6 +142,18 @@ internal sealed class FakeWindowsEventLog : IWindowsEventLog
         {
             throw Failure;
         }
+    }
+}
+
+/// <summary>A message DLL check with a fixed answer.</summary>
+internal sealed class FakeMessageFileCheck(string? problem = null) : IMessageFileLocationCheck
+{
+    public List<string> Checked { get; } = [];
+
+    public string? FindProblem(string messageFile)
+    {
+        Checked.Add(messageFile);
+        return problem;
     }
 }
 

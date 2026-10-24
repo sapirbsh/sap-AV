@@ -10,7 +10,8 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 /// Fixed Windows Event Log IDs per alert type (ROADMAP X2). SIEM rules key on these: never change or reuse an ID.
 /// </summary>
 /// <remarks>
-/// All alerts go to the <b>Application</b> log with source <b>"sap-AV"</b>; the message is the alert as JSON
+/// All alerts go to the dedicated <b>"sap-AV"</b> log (B6; only SYSTEM and Administrators may write it) with source
+/// <b>"sap-AV"</b>; the message is the alert as JSON
 /// (<see cref="AlertEventMessage"/>).
 /// <code>
 /// Event ID | Alert type               | Entry type  | Meaning
@@ -32,7 +33,8 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 public static class AlertEventCatalog
 {
     public const string SourceName = "sap-AV";
-    public const string LogName = "Application";
+    /// <summary>The dedicated log (B6). Until B6 it was "Application", which any user could write to.</summary>
+    public const string LogName = "sap-AV";
 
     public const int MaliciousFileEventId = 1001;
     public const int SuspiciousFileEventId = 1002;
