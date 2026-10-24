@@ -50,7 +50,10 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
         {
             var item = new ScanItem(path, trigger);
             var notes = new List<ScanNote>();
-            using var opened = ScanFileOpener.Open(item, notes, time, out var failure); // blocking: we are on a dedicated thread
+            // Blocking: we are on a dedicated thread. Jobs for a standard user never use a following open (review B4 M2).
+            using var opened = access is null
+                ? ScanFileOpener.Open(item, notes, time, out var failure)
+                : SafeScanOpen.Open(item, notes, time, out failure);
             if (opened is not null && excluded.Contains(opened.Identity?.FinalPath))
             {
                 return null; // e.g. reached through an 8.3 name: the final path is an engine folder

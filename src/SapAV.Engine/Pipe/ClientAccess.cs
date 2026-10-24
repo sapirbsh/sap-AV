@@ -16,17 +16,37 @@ public enum AccessDecision
 
     /// <summary>The object isn't the expected one (a different file object at the path now).</summary>
     Mismatch,
+
+    /// <summary>The path goes through a junction, symlink or mount point (or is one), or is on a network drive: refused.</summary>
+    Redirected,
 }
 
 /// <summary>
 /// Access checks with a <b>client's</b> token against objects the engine opens itself (B4). The engine never opens a
-/// client-supplied path while impersonating (the client controls its own drive-letter mappings, so an impersonated open
-/// could reach a different object than the engine later scans). Instead it opens the object as itself, without following
-/// reparse points, for READ_CONTROL only, reads its security descriptor and runs AccessCheck with the client token.
-/// Anything that can't be determined is Denied (fails closed).
+/// client-supplied path while impersonating (the client controls its own drive-letter mappings), and never with a
+/// following open (review B4 M2: an intermediate symlink could send SYSTEM to a remote server). The object is opened as
+/// the engine with <see cref="SafeTree"/> (component by component, no reparse point followed, name surrogates refused),
+/// for READ_CONTROL + attributes only; its descriptor is read from that handle and AccessCheck runs with the client
+/// token. Anything that can't be determined is Denied (fails closed).
 /// </summary>
 internal static class ClientAccess
 {
+    /// <summary>
+    /// Opens <paramref name="path"/> safely (see the class remarks); null with the decision when it can't be opened.
+    /// </summary>
+    public static SafeFileHandle? OpenForCheck(string path, out AccessDecision failure)
+    {
+        var handle = SafeTree.Open(path, SafeTree.InspectAccess, SafeTree.ShareAll, 0, out var why, out _);
+        failure = why switch
+        {
+            SafeTreeFailure.None => AccessDecision.Granted,
+            SafeTreeFailure.NotFound => AccessDecision.NotFound,
+            SafeTreeFailure.Redirected or SafeTreeFailure.Unsupported => AccessDecision.Redirected,
+            _ => AccessDecision.Denied,
+        };
+        return handle;
+    }
+
     /// <summary>
     /// Checks <paramref name="desiredAccess"/> on <paramref name="path"/>. With <paramref name="expected"/>, the opened object
     /// must be that file (volume serial + 128-bit file ID), so the check is bound to the scanned object.
@@ -34,22 +54,25 @@ internal static class ClientAccess
     public static AccessDecision Check(IClientIdentity client, string path, uint desiredAccess, FileIdentity? expected = null)
     {
         ArgumentNullException.ThrowIfNull(client);
-        string open = ExactPath.ToExtended(path) ?? path;
-        var sd = PipeNative.TryReadSecurity(open, out SafeFileHandle? handle, out int error);
-        if (sd is null)
+        using var handle = OpenForCheck(path, out var failure);
+        if (handle is null)
         {
-            return error is PipeNative.ErrorFileNotFound or PipeNative.ErrorPathNotFound ? AccessDecision.NotFound : AccessDecision.Denied;
+            return failure;
         }
 
-        using (handle)
+        if (expected is not null && !expected.IsSameObject(FileIdentity.TryCapture(handle)))
         {
-            if (expected is not null && !expected.IsSameObject(FileIdentity.TryCapture(handle!)))
-            {
-                return AccessDecision.Mismatch;
-            }
+            return AccessDecision.Mismatch;
         }
 
-        return client.IsGranted(sd, desiredAccess) ? AccessDecision.Granted : AccessDecision.Denied;
+        return IsGranted(client, handle, desiredAccess) ? AccessDecision.Granted : AccessDecision.Denied;
+    }
+
+    /// <summary>AccessCheck against the descriptor of an open handle (opened with READ_CONTROL).</summary>
+    public static bool IsGranted(IClientIdentity client, System.Runtime.InteropServices.SafeHandle handle, uint desiredAccess)
+    {
+        var sd = PipeNative.TryReadFileSecurity(handle);
+        return sd is not null && client.IsGranted(sd, desiredAccess);
     }
 
     /// <summary>The client may read (files) or list (folders) <paramref name="path"/>: FILE_READ_DATA / FILE_LIST_DIRECTORY.</summary>
@@ -69,7 +92,7 @@ internal static class ClientAccess
 
         string path = report.Result.Item.Path;
         var onFile = Check(client, path, PipeNative.Delete, identity);
-        if (onFile is AccessDecision.Granted or AccessDecision.NotFound or AccessDecision.Mismatch)
+        if (onFile is AccessDecision.Granted or AccessDecision.NotFound or AccessDecision.Mismatch or AccessDecision.Redirected)
         {
             return onFile;
         }
@@ -91,12 +114,7 @@ internal static class ClientAccess
     internal static string? ParentOf(string path)
     {
         string? exact = ExactPath.ToExtended(path);
-        if (exact is null)
-        {
-            return null;
-        }
-
-        if (exact.Length <= 7 || !exact.StartsWith(@"\\?\", StringComparison.Ordinal) || exact[5] != ':')
+        if (exact is null || exact.Length <= 7 || !exact.StartsWith(@"\\?\", StringComparison.Ordinal) || exact[5] != ':')
         {
             return null; // \\?\C:\ itself has no parent; UNC is never used here
         }
@@ -111,18 +129,12 @@ internal sealed class ClientScanAccess(IClientIdentity client) : IScanAccessChec
 {
     private const uint ShareAll = ScanNative.FileShareRead | ScanNative.FileShareWrite | ScanNative.FileShareDelete;
 
-    public bool CanList(string directoryPath) => ClientAccess.CanReadOrList(client, directoryPath) == AccessDecision.Granted;
+    public bool CanList(SafeFileHandle directory) => ClientAccess.IsGranted(client, directory, PipeNative.FileReadData);
 
     public bool CanRead(SafeFileHandle handle)
     {
         using var control = ScanNative.ReOpen(handle, PipeNative.ReadControl, ShareAll, out _);
-        if (control is null)
-        {
-            return false;
-        }
-
-        var sd = PipeNative.TryReadFileSecurity(control);
-        return sd is not null && client.IsGranted(sd, PipeNative.FileReadData);
+        return control is not null && ClientAccess.IsGranted(client, control, PipeNative.FileReadData);
     }
 
     public void Dispose() => client.Dispose();

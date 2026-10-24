@@ -11,8 +11,8 @@ namespace SapAV.Engine.Scanning;
 /// </summary>
 internal interface IScanAccessCheck
 {
-    /// <summary>May the requester list this folder (FILE_LIST_DIRECTORY)? False when it can't be determined.</summary>
-    bool CanList(string directoryPath);
+    /// <summary>May the requester list this open folder (FILE_LIST_DIRECTORY, on the handle's own descriptor)? False when unknown.</summary>
+    bool CanList(SafeFileHandle directory);
 
     /// <summary>May the requester read this open file (FILE_READ_DATA)? False when it can't be determined.</summary>
     bool CanRead(SafeFileHandle handle);

@@ -194,17 +194,29 @@ internal sealed class PipeRequestHandler
             return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1}: network drives are not scanned.");
         }
 
-        if (client.IsAdmin)
+        // Review B4 M2: every root (admins' too) is opened component by component without following any reparse point;
+        // a root reached through (or being) a junction, symlink or mount point is refused before the job exists.
+        using var handle = ClientAccess.OpenForCheck(normalized, out var opened);
+        if (opened == AccessDecision.Redirected)
         {
-            return null;
+            return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1} goes through a junction, symbolic link or mount point, or a network drive.");
         }
 
-        return ClientAccess.CanReadOrList(client, normalized) switch
+        if (client.IsAdmin)
         {
-            AccessDecision.Granted => null,
-            AccessDecision.NotFound => PipeReply.Fail(PipeStatus.NotFound, $"Path {index + 1} does not exist."),
-            _ => PipeReply.Fail(PipeStatus.AccessDenied, $"Path {index + 1}: you don't have read access to it."),
-        };
+            return null; // a missing or unreadable root is reported by the job
+        }
+
+        if (handle is null)
+        {
+            return opened == AccessDecision.NotFound
+                ? PipeReply.Fail(PipeStatus.NotFound, $"Path {index + 1} does not exist.")
+                : PipeReply.Fail(PipeStatus.AccessDenied, $"Path {index + 1}: you don't have read access to it.");
+        }
+
+        return ClientAccess.IsGranted(client, handle, PipeNative.FileReadData)
+            ? null
+            : PipeReply.Fail(PipeStatus.AccessDenied, $"Path {index + 1}: you don't have read access to it.");
     }
 
     private PipeReply Start(PipeSession session, JobRequest request)
