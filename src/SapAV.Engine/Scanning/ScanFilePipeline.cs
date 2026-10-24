@@ -43,7 +43,7 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
     /// <see cref="OperationCanceledException"/> for <paramref name="jobToken"/>.
     /// </summary>
     public async Task<ScanJobFileResult?> ProcessAsync(
-        string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken)
+        string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null)
     {
         string step = "open";
         try
@@ -60,6 +60,13 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
             {
                 logger.LogWarning("Scan of {Path}: {Why}", path, different);
                 return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null);
+            }
+
+            if (access is not null && opened is not null && !access.CanRead(opened.Handle))
+            {
+                // B4: checked on the scan's own handle, so it is the scanned object; nothing about the file is reported.
+                return new ScanJobFileResult(path, ScanStatus.AccessDenied, null, ScanFileAction.None,
+                    "Not scanned: the user who requested the scan can't read this file.", null, null, null);
             }
 
             item = Canonical(item, opened);
@@ -155,7 +162,12 @@ internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, I
             detail = report.Notes.LastOrDefault(n => n.Level == ScanNoteLevel.Warning)?.Message ?? $"Not scanned ({result.Status}).";
         }
 
+        bool keepReport = result.Status == ScanStatus.Scanned && result.Verdict is { } verdict && verdict != Verdict.Clean
+            && outcome.Action != ScanFileAction.Quarantined && report.Identity is not null;
         return new ScanJobFileResult(result.Item.Path, result.Status, result.Verdict, outcome.Action,
-            detail is null ? null : SafeText.SingleLine(detail, MaxDetailLength), result.Sha256, outcome.QuarantineItemId, outcome.AlertId);
+            detail is null ? null : SafeText.SingleLine(detail, MaxDetailLength), result.Sha256, outcome.QuarantineItemId, outcome.AlertId)
+        {
+            Report = keepReport ? report : null,
+        };
     }
 }

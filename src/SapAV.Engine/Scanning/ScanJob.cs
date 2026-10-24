@@ -114,6 +114,18 @@ public sealed class ScanJob : IDisposable
     /// <summary>Every recorded file result (all but Clean files).</summary>
     public event Action<ScanJobFileResult>? FileCompleted;
 
+    /// <summary>Like <see cref="FileCompleted"/>, with the result ID (its index in <see cref="Results"/>, stable: results are only appended).</summary>
+    internal event Action<int, ScanJobFileResult>? FileRecorded;
+
+    /// <summary>The recorded result with this ID, or null.</summary>
+    internal ScanJobFileResult? ResultAt(int resultId)
+    {
+        lock (_lock)
+        {
+            return resultId >= 0 && resultId < _results.Count ? _results[resultId] : null;
+        }
+    }
+
     /// <summary>Progress changed (coalesced: at most one pending notification at a time).</summary>
     public event Action<ScanJobProgress>? ProgressChanged;
 
@@ -304,7 +316,7 @@ public sealed class ScanJob : IDisposable
         try
         {
             RunPreflight(token);
-            _walker.Walk(Request.Paths, entry => Emit(entry, token), token);
+            _walker.Walk(Request.Paths, entry => Emit(entry, token), token, Request.Access);
             lock (_lock)
             {
                 _enumerationDone = true;
@@ -459,7 +471,7 @@ public sealed class ScanJob : IDisposable
         }
 
         long scannedBytes = 0;
-        var result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token).GetAwaiter().GetResult();
+        var result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access).GetAwaiter().GetResult();
         lock (_lock)
         {
             _current[index] = null;
@@ -521,7 +533,12 @@ public sealed class ScanJob : IDisposable
         }
 
         _results.Add(result);
-        Post(() => FileCompleted?.Invoke(result));
+        int resultId = _results.Count - 1;
+        Post(() =>
+        {
+            FileCompleted?.Invoke(result);
+            FileRecorded?.Invoke(resultId, result);
+        });
     }
 
     // ---- Pause gate, budget, completion ----

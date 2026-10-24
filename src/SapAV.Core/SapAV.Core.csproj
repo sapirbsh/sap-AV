@@ -13,6 +13,8 @@
     <InternalsVisibleTo Include="SapAV.Core.Tests" />
     <!-- The engine's quarantine (B2) reuses the hardened open (SecureFile / NativeFile) instead of a second copy. -->
     <InternalsVisibleTo Include="SapAV.Engine" />
+    <!-- The pipe client's raw-frame test seam (B4 hostile-message tests). -->
+    <InternalsVisibleTo Include="SapAV.Engine.Tests" />
   </ItemGroup>
 
   <!-- YARA-X engine: pinned native DLL, downloaded once, hash-verified, copied to the output. -->

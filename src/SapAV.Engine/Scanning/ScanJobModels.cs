@@ -11,6 +11,12 @@ namespace SapAV.Engine.Scanning;
 /// <param name="TimeBudget">Overrides <see cref="ScanJobOptions.TimeBudget"/> for this job.</param>
 public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Trigger, TimeSpan? TimeBudget = null)
 {
+    /// <summary>
+    /// The requester's access (B4): set for jobs a standard user asked for over the pipe, so the job lists and scans only
+    /// what that user can read. Null = scan everything (engine-initiated jobs, administrators).
+    /// </summary>
+    internal IScanAccessCheck? Access { get; init; }
+
     /// <exception cref="ArgumentException">No paths, or a path that isn't fully qualified.</exception>
     internal void Validate()
     {
@@ -69,7 +75,18 @@ public enum ScanFileAction
 /// <param name="AlertId">The alert raised for the file, if any.</param>
 public sealed record ScanJobFileResult(
     string Path, ScanStatus Status, Verdict? Verdict, ScanFileAction Action, string? Detail, string? Sha256,
-    string? QuarantineItemId, Guid? AlertId);
+    string? QuarantineItemId, Guid? AlertId)
+{
+    /// <summary>
+    /// The engine's own report, kept only for flagged files that are still in place (Scanned, not Clean, not quarantined,
+    /// with a file identity), so the user can ask to quarantine the file by result ID (B4). Never sent to or read from a client.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal Core.Scanning.FileScanReport? Report { get; init; }
+
+    /// <summary>True if the file can be quarantined on request (<see cref="Report"/> is kept).</summary>
+    public bool CanQuarantine => Report is not null;
+}
 
 /// <summary>Exact counters of a job (results lists may be capped; these never are).</summary>
 public sealed record ScanJobCounters(

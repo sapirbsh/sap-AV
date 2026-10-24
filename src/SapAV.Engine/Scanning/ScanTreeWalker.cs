@@ -45,16 +45,16 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
 
     /// <summary>Walks every root in order, calling <paramref name="emit"/> for each entry (it may block for back-pressure or pause).</summary>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    public void Walk(IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken)
+    public void Walk(IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access = null)
     {
         foreach (var root in roots)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            WalkRoot(root, emit, cancellationToken);
+            WalkRoot(root, emit, cancellationToken, access);
         }
     }
 
-    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken)
+    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access)
     {
         // B3 review H1: walk in the exact \\?\ form. A plain path would drop trailing dots/spaces, so a folder "x." could
         // not be listed (its files never scanned) and "evil.exe." would be read as "evil.exe".
@@ -94,16 +94,23 @@ internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? re
             return;
         }
 
-        WalkTree(root, emit, cancellationToken);
+        WalkTree(root, emit, cancellationToken, access);
     }
 
-    private void WalkTree(string root, Action<ScanTreeEntry> emit, CancellationToken cancellationToken)
+    private void WalkTree(string root, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access)
     {
         var pending = new Stack<string>();
         pending.Push(root);
         while (pending.TryPop(out var directory))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (access is not null && !access.CanList(directory))
+            {
+                // B4: the requester can't list this folder, so the job doesn't either (and never descends below it).
+                emit(new(ExactPath.ForOpening(directory), ScanTreeEntryKind.Unreadable, Detail: "AccessDenied (requester)"));
+                continue;
+            }
+
             var subdirectories = new List<string>();
             try
             {

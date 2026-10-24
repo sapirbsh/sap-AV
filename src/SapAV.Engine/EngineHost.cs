@@ -76,6 +76,10 @@ public static class EngineHost
         builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
         builder.Services.AddHostedService<Worker>();
+
+        // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
+        builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
+        builder.Services.AddHostedService<Pipe.EnginePipeServer>();
         return builder;
     }
 }
