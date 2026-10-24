@@ -22,7 +22,13 @@ internal enum ScanTreeEntryKind
 
 /// <param name="Length">The file size from the directory listing (0 if unknown); for the progress total only.</param>
 /// <param name="Detail">Why, for Unreadable entries.</param>
-internal readonly record struct ScanTreeEntry(string Path, ScanTreeEntryKind Kind, long Length = 0, string? Detail = null);
+/// <param name="Folder">
+/// For a File found in a listing: the listed folder (one reference owned by this entry; the consumer releases it) and
+/// <paramref name="Name"/>, so the file is opened relative to that folder handle (review B H2). Null for a root given as a file.
+/// </param>
+/// <param name="Name">The file name inside <paramref name="Folder"/>.</param>
+internal readonly record struct ScanTreeEntry(
+    string Path, ScanTreeEntryKind Kind, long Length = 0, string? Detail = null, SharedFolder? Folder = null, string? Name = null);
 
 /// <summary>
 /// The recursive walk for "scan these files/folders" (B3), depth first, <b>bound to handles</b> (review B4 H3 / M2,
@@ -32,7 +38,9 @@ internal readonly record struct ScanTreeEntry(string Path, ScanTreeEntryKind Kin
 /// same handle. A folder swapped for a junction after its parent was listed is opened as the junction itself and refused,
 /// so the walk can't leave the requested tree or list a folder the check didn't cover. Name surrogates (junctions,
 /// symlinks, mount points) are never followed; other reparse points (OneDrive / cloud files, dedup) are regular content
-/// (the opener skips offline placeholders without recalling them). Depth is capped at <see cref="MaxDepth"/>.
+/// (the opener skips offline placeholders without recalling them). Depth is capped at <see cref="MaxDepth"/>. Each file is
+/// emitted with a reference to the listed folder's handle (<see cref="SharedFolder"/>), so the scan opens it relative to
+/// that handle (review B H2) and a parent renamed or replaced after the listing can't redirect the open.
 /// Runs on the job's enumerator thread; nothing here reads file content.
 /// </summary>
 internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>? reparseTag = null)
@@ -92,17 +100,18 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         WalkTree(root, handle, emit, cancellationToken, access);
     }
 
-    private sealed class Frame(string path, SafeFileHandle handle, List<string> subdirectories) : IDisposable
+    private sealed class Frame(string path, SharedFolder folder, List<string> subdirectories) : IDisposable
     {
         public string Path { get; } = path;
 
-        public SafeFileHandle Handle { get; } = handle;
+        public SafeFileHandle Handle => folder.Handle;
 
         public List<string> Subdirectories { get; } = subdirectories;
 
         public int Next { get; set; }
 
-        public void Dispose() => Handle.Dispose();
+        /// <summary>Drops the walker's reference; queued files keep the folder open until they are scanned.</summary>
+        public void Dispose() => folder.Release();
     }
 
     /// <summary>Depth first; one handle per level is open (the chain from the root to the current folder).</summary>
@@ -184,23 +193,24 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         }
 
         var subdirectories = new List<string>();
+        var folder = new SharedFolder(handle);
         try
         {
             foreach (var entry in entries)
             {
-                Classify(directory, entry, subdirectories, emit);
+                Classify(directory, folder, entry, subdirectories, emit);
             }
         }
         catch
         {
-            handle.Dispose();
+            folder.Release();
             throw;
         }
 
-        return new Frame(directory, handle, subdirectories);
+        return new Frame(directory, folder, subdirectories);
     }
 
-    private void Classify(string directory, SafeTreeEntry entry, List<string> subdirectories, Action<ScanTreeEntry> emit)
+    private void Classify(string directory, SharedFolder folder, SafeTreeEntry entry, List<string> subdirectories, Action<ScanTreeEntry> emit)
     {
         string path = SafeTree.Child(directory, entry.Name); // extended form: exact names
         string shown = ExactPath.ForOpening(path);
@@ -218,7 +228,17 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         }
         else
         {
-            emit(new(shown, ScanTreeEntryKind.File, entry.Length));
+            // Review B H2: the file is opened relative to this listed folder's handle, never by path again.
+            var file = new ScanTreeEntry(shown, ScanTreeEntryKind.File, entry.Length, Folder: folder.AddRef(), Name: entry.Name);
+            try
+            {
+                emit(file);
+            }
+            catch
+            {
+                file.Folder!.Release(); // not handed over (cancelled, or the consumer failed)
+                throw;
+            }
         }
     }
 

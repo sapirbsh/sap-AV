@@ -99,22 +99,22 @@ internal static unsafe class ScanNative
             : null;
     }
 
-    /// <summary>The path with every 8.3 component expanded to its long name (links are not resolved), or null on failure.</summary>
-    public static string? TryGetLongPath(string path)
+    /// <summary>
+    /// The 8.3 short name of the open file or folder itself (<c>FileAlternateNameInformation</c>, from the handle: nothing is
+    /// looked up by path), or null if it has none or it can't be read.
+    /// </summary>
+    public static string? TryGetShortName(SafeFileHandle handle)
     {
-        // Review L4: ask for the needed length first, so long paths (up to 32,767 characters) work too.
-        uint needed = GetLongPathNameW(path, null, 0);
-        if (needed == 0 || needed > short.MaxValue)
+        const int size = 4 + 64; // FILE_NAME_INFORMATION: length + an 8.3 name (12 characters) with room to spare
+        byte* buffer = stackalloc byte[size];
+        int status = NtQueryInformationFile(handle, out _, buffer, size, 21 /* FileAlternateNameInformation */);
+        if (status < 0)
         {
             return null;
         }
 
-        var buffer = new char[needed];
-        fixed (char* p = buffer)
-        {
-            uint length = GetLongPathNameW(path, p, needed);
-            return length is 0 || length >= needed ? null : new string(p, 0, (int)length);
-        }
+        int length = *(int*)buffer;
+        return length <= 0 || length > size - 4 ? null : new string((char*)(buffer + 4), 0, length / 2);
     }
 
     /// <summary>
@@ -159,6 +159,13 @@ internal static unsafe class ScanNative
     [DllImport("advapi32.dll", ExactSpelling = true)]
     private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
 
-    [DllImport("kernel32.dll", EntryPoint = "GetLongPathNameW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
-    private static extern uint GetLongPathNameW(string shortPath, char* longPath, uint bufferLength);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoStatusBlock
+    {
+        public IntPtr Status;
+        public UIntPtr Information;
+    }
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtQueryInformationFile(SafeFileHandle file, out IoStatusBlock ioStatus, void* information, uint length, int fileInformationClass);
 }

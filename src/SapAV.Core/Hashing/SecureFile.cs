@@ -80,11 +80,9 @@ internal static class SecureFile
         var handle = NativeFile.OpenForScan(fullPath, denyWriters, out int error, additionalAccess);
         if (handle.IsInvalid)
         {
-            var reason = Sha256Hasher.MapWin32Error(error);
-            failure = reason == HashFailureReason.AccessDenied && IsFileSymlinkToDirectory(fullPath)
-                // Windows refuses to open a file-type symlink whose target is a directory.
-                ? new(HashFailureReason.Directory, "Path is a symbolic link to a directory.")
-                : new(reason, $"{Marshal.GetPInvokeErrorMessage(error)} (Win32 error {error})");
+            // Review B H2: no follow-up lookup of a link's target to relabel the failure (a file symlink to a directory is
+            // reported as the AccessDenied Windows gives); resolving the target by path would follow user-controlled links.
+            failure = new(Sha256Hasher.MapWin32Error(error), $"{Marshal.GetPInvokeErrorMessage(error)} (Win32 error {error})");
             return null;
         }
 
@@ -142,32 +140,6 @@ internal static class SecureFile
         catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out var reason))
         {
             failure = new(reason, ex.Message);
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Only used to label an AccessDenied open: reads the first hop of a link from its reparse data
-    /// (<see cref="FileSystemInfo.LinkTarget"/> opens the link itself, not the target) and checks whether
-    /// it names an existing directory by an ordinary path. It never leads to another open for reading.
-    /// </summary>
-    private static bool IsFileSymlinkToDirectory(string fullPath)
-    {
-        try
-        {
-            var target = new FileInfo(fullPath).LinkTarget;
-            if (target is null || Sha256Hasher.IsDeviceNamespacePath(target))
-            {
-                return false;
-            }
-
-            var resolved = Path.IsPathFullyQualified(target)
-                ? target
-                : Path.GetFullPath(target, Path.GetDirectoryName(fullPath) ?? string.Empty);
-            return !Sha256Hasher.IsDeviceNamespacePath(resolved) && Directory.Exists(resolved);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
             return false;
         }
     }

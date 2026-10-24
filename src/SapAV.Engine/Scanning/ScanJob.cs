@@ -438,9 +438,18 @@ public sealed class ScanJob : IDisposable
                     continue;
                 }
 
-                Gate(token); // a pause that arrived while waiting for work
-                CheckBudget();
-                token.ThrowIfCancellationRequested();
+                try
+                {
+                    Gate(token); // a pause that arrived while waiting for work
+                    CheckBudget();
+                    token.ThrowIfCancellationRequested();
+                }
+                catch
+                {
+                    entry.Folder?.Release();
+                    throw;
+                }
+
                 ScanOne(index, entry, token);
             }
         }
@@ -471,7 +480,17 @@ public sealed class ScanJob : IDisposable
         }
 
         long scannedBytes = 0;
-        var result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access).GetAwaiter().GetResult();
+        ScanJobFileResult? result;
+        try
+        {
+            result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name)
+                .GetAwaiter().GetResult();
+        }
+        finally
+        {
+            entry.Folder?.Release();
+        }
+
         lock (_lock)
         {
             _current[index] = null;
@@ -636,6 +655,11 @@ public sealed class ScanJob : IDisposable
 
     private void Finish()
     {
+        while (_queue.Reader.TryRead(out var dropped))
+        {
+            dropped.Folder?.Release(); // queued but never scanned (cancelled, timed out, failed): close the folder handles
+        }
+
         ScanJobState final;
         lock (_lock)
         {

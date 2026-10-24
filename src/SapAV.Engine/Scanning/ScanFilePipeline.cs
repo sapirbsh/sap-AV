@@ -42,18 +42,21 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
     /// Scans one file; null if it turned out to be in an excluded folder (nothing scanned). Throws only
     /// <see cref="OperationCanceledException"/> for <paramref name="jobToken"/>.
     /// </summary>
+    /// <param name="folder">The listed folder the file was found in (the caller keeps its reference), so the file is opened
+    /// relative to that handle; null = reach <paramref name="path"/> component by component (<see cref="SafeTree"/>).</param>
+    /// <param name="name">The file's name in <paramref name="folder"/>.</param>
     public async Task<ScanJobFileResult?> ProcessAsync(
-        string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null)
+        string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
+        SharedFolder? folder = null, string? name = null)
     {
         string step = "open";
         try
         {
             var item = new ScanItem(path, trigger);
             var notes = new List<ScanNote>();
-            // Blocking: we are on a dedicated thread. Jobs for a standard user never use a following open (review B4 M2).
-            using var opened = access is null
-                ? ScanFileOpener.Open(item, notes, time, out var failure)
-                : SafeScanOpen.Open(item, notes, time, out failure);
+            // Blocking: we are on a dedicated thread. Review B H2: every job (standard user, administrator, engine) opens
+            // without following links, relative to the folder handle the walker listed when there is one (review B4 M2).
+            using var opened = SafeScanOpen.Open(item, notes, time, out var failure, folder, name);
             if (opened is not null && excluded.Contains(opened.Identity?.FinalPath))
             {
                 return null; // e.g. reached through an 8.3 name: the final path is an engine folder
@@ -95,59 +98,89 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
     }
 
     /// <summary>
-    /// The requested path, exact (only "." / ".." resolved, trailing dots and spaces kept) with 8.3 parts expanded, in the
-    /// drive / UNC form the handle's final path uses; null if it can't be computed.
+    /// True if the requested path names the same location as the handle's final path (drive-letter form): equal exactly
+    /// (only "." / ".." resolved, trailing dots and spaces kept, case-insensitive), or equal once each 8.3 component of the
+    /// request matches the short name of that component of the final path. Short names are read from handles opened through
+    /// <see cref="SafeTree"/> (review B H2: no path lookup that could follow a link, unlike <c>GetLongPathNameW</c>).
     /// </summary>
-    private static string? ExactLongPath(string path)
+    /// <param name="shortNameOf">Test seam: the short name of a final-path prefix.</param>
+    internal static bool SameLocation(string requestedPath, string finalPath, Func<string, string?>? shortNameOf = null)
     {
-        var exact = ExactPath.ToExtended(path);
-        if (exact is null)
+        if (ExactPath.ToExtended(requestedPath) is not { } exact)
         {
-            return null;
+            return false;
         }
 
-        return ExactPath.StripPrefix(Native.ScanNative.TryGetLongPath(exact) ?? exact);
+        string requested = ExactPath.StripPrefix(exact).TrimEnd('\\');
+        if (string.Equals(requested, finalPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var wanted = requested.Split('\\');
+        var actual = finalPath.Split('\\');
+        if (wanted.Length != actual.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            if (string.Equals(wanted[i], actual[i], StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (i == 0 || !wanted[i].Contains('~', StringComparison.Ordinal)
+                || !string.Equals((shortNameOf ?? ShortNameOf)(string.Join('\\', actual, 0, i + 1)), wanted[i], StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string? ShortNameOf(string path)
+    {
+        using var handle = SafeTree.Open(path, Quarantine.Native.QuarantineNative.FileReadAttributes, SafeTree.ShareAll, 0, out _, out _);
+        return handle is null ? null : Native.ScanNative.TryGetShortName(handle);
     }
 
     /// <summary>
-    /// B3 review H1: the open must have reached the file that was asked for. If the handle's final file name differs from
-    /// the requested name (after 8.3 expansion), something translated the name, e.g. a plain <c>evil.exe.</c> opening the
-    /// harmless <c>evil.exe</c> next to it, and judging that file would hide the real one. Null when the names agree (or the
-    /// file system can't report a final path; the quarantine refuses those anyway).
+    /// B3 review H1 / review B H2: the open must have reached the file that was asked for. If the handle's final path differs
+    /// from the requested path (after 8.3 expansion), something redirected or translated it: a plain <c>evil.exe.</c> opening
+    /// the harmless <c>evil.exe</c> next to it, or a parent folder renamed or replaced between the listing and the open.
+    /// Judging that file would hide the real one, so it isn't. Null when they agree (or the file system can't report a final
+    /// path; the quarantine refuses those anyway). The message names files only, never the other folder.
     /// </summary>
     internal static string? DifferentFile(ScanItem item, OpenedScanFile? opened)
     {
         string? finalPath = opened?.Identity?.FinalPath;
-        if (finalPath is null)
+        if (finalPath is null || SameLocation(item.Path, finalPath))
         {
             return null;
         }
 
-        string? requested = ExactLongPath(item.Path);
-        string requestedName = requested is null ? Path.GetFileName(item.Path) : requested[(requested.LastIndexOf('\\') + 1)..];
+        string requested = ExactPath.ToExtended(item.Path) is { } exact ? ExactPath.StripPrefix(exact) : item.Path;
+        string requestedName = requested[(requested.LastIndexOf('\\') + 1)..];
         string finalName = finalPath[(finalPath.LastIndexOf('\\') + 1)..];
         return string.Equals(requestedName, finalName, StringComparison.OrdinalIgnoreCase)
-            ? null
+            ? $"Not scanned (Error): opening '{requestedName}' reached a file of that name in a different folder; it was not judged."
             : $"Not scanned (Error): opening '{requestedName}' reached a different file ('{finalName}'); it was not judged.";
     }
 
     /// <summary>
     /// Review B2 follow-up Low: <c>Path.GetFullPath</c> doesn't expand 8.3 names (e.g. <c>C:\Users\RUNNER~1\...</c>), so
-    /// the quarantine would see a "redirect" for a plain short-name spelling. If the exact requested path with its 8.3 parts
-    /// expanded is the handle's final path, the job continues with the final path (same object, same folders, only the
-    /// canonical spelling; in <c>\\?\</c> form if a name ends in a dot or space, so it stays exact). Anything else (a
-    /// junction on the way) keeps the requested path, so the quarantine's redirect check still refuses it.
+    /// the quarantine would see a "redirect" for a plain short-name spelling. If the requested path is the handle's final
+    /// path (<see cref="SameLocation"/>), the job continues with the final path (same object, same folders, only the
+    /// canonical spelling; in <c>\\?\</c> form if a name ends in a dot or space, so it stays exact). Anything else keeps the
+    /// requested path, so the quarantine's redirect check still refuses it.
     /// </summary>
     internal static ScanItem Canonical(ScanItem item, OpenedScanFile? opened)
     {
         string? finalPath = opened?.Identity?.FinalPath;
-        if (finalPath is null)
-        {
-            return item;
-        }
-
-        string? longPath = string.Equals(item.Path, finalPath, StringComparison.Ordinal) ? finalPath : ExactLongPath(item.Path);
-        if (longPath is null || !string.Equals(longPath, finalPath, StringComparison.OrdinalIgnoreCase))
+        if (finalPath is null || !SameLocation(item.Path, finalPath))
         {
             return item;
         }

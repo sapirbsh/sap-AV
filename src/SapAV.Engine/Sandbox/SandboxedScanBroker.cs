@@ -88,7 +88,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>();
 
-        using var opened = ScanFileOpener.Open(item, notes, _time, out var failureReport);
+        using var opened = Scanning.SafeScanOpen.Open(item, notes, _time, out var failureReport); // review B H2: never a following open
         if (opened is null)
         {
             return failureReport!;

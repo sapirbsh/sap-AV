@@ -44,7 +44,7 @@ internal sealed class UnavailableScanBroker(string reason, TimeProvider time) : 
         ArgumentNullException.ThrowIfNull(item);
         cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>();
-        using var opened = ScanFileOpener.Open(item, notes, time, out var failure);
+        using var opened = Scanning.SafeScanOpen.Open(item, notes, time, out var failure); // review B H2: never a following open
         return opened is null ? Task.FromResult(failure!) : ScanOpenedAsync(item, opened, notes, cancellationToken);
     }
 

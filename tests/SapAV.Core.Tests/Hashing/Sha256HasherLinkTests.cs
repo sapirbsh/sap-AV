@@ -406,7 +406,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
     }
 
     [RequiresFact(Requires.Symlinks)]
-    public async Task FileSymlinkPointingAtADirectory_IsDirectory()
+    public async Task FileSymlinkPointingAtADirectory_IsNotHashed_AndTheTargetIsNeverLookedUp()
     {
         var real = _dir.File("realdir");
         Directory.CreateDirectory(real);
@@ -415,8 +415,10 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
 
         var result = await WithTimeout(new Sha256Hasher().HashFileAsync(link));
 
+        // Review B H2: Windows refuses the open (AccessDenied); the failure is no longer relabelled "Directory", because that
+        // meant resolving the link target by path.
         Assert.False(result.IsHashed);
-        Assert.Equal(HashFailureReason.Directory, result.FailureReason);
+        Assert.Equal(HashFailureReason.AccessDenied, result.FailureReason);
     }
 
     // --- Metadata comes from the target, not the link ---

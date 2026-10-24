@@ -41,7 +41,9 @@ internal sealed class InProcessScanBroker : IScanBroker, IDisposable
     {
         ArgumentNullException.ThrowIfNull(item);
         var scanner = _scanner ?? await LoadAsync(cancellationToken).ConfigureAwait(false);
-        return await scanner.ScanAsync(item, cancellationToken).ConfigureAwait(false);
+        var notes = new List<ScanNote>();
+        using var opened = Scanning.SafeScanOpen.Open(item, notes, TimeProvider.System, out var failure); // review B H2: never a following open
+        return opened is null ? failure! : await scanner.ScanOpenedAsync(item, opened, notes, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<FileScanReport> ScanOpenedAsync(
