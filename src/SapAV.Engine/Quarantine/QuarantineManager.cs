@@ -47,7 +47,8 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
     private readonly TimeProvider _time;
     private readonly IQuarantineKeyProvider _keys;
     private readonly QuarantineAccessPolicy _policy;
-    private readonly Scanning.FolderSet _engineFolders;
+    private readonly Scanning.FolderSet _ownStore;
+    private readonly Scanning.ExclusionSet _engineFolders;
     private readonly KeyedLocks _locks = new();
     private readonly Lock _initLock = new();
     private QuarantineStore? _store;
@@ -59,7 +60,7 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
         ILogger<QuarantineManager> logger,
         TimeProvider time,
         IQuarantineKeyProvider keys,
-        Scanning.FolderSet? engineFolders = null)
+        Scanning.ExclusionSet? engineFolders = null)
     {
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _alerts = alerts ?? throw new ArgumentNullException(nameof(alerts));
@@ -71,7 +72,10 @@ public sealed partial class QuarantineManager : IQuarantineService, IDisposable
             : new QuarantineAccessPolicy(_options.AdditionalTrustedSids);
 
         // Review B2 follow-up Medium: never quarantine the engine's own data (rules match themselves), store or install folders.
-        _engineFolders = new Scanning.FolderSet([.. Scanning.EngineDataFolders.Defaults(), _options.EffectiveRoot, .. engineFolders?.Folders ?? []]);
+        // Review B H1: the other engine folders only while their owner and ACL are verified (the open store always is).
+        _ownStore = new Scanning.FolderSet([_options.EffectiveRoot]);
+        _engineFolders = engineFolders ?? new Scanning.ExclusionSet(new Scanning.FolderSet(Scanning.EngineDataFolders.Defaults()), new Scanning.FolderSet([]),
+            Scanning.FolderTrust.Default, _time);
     }
 
     /// <summary>Test seam: called at each <see cref="QuarantineStep"/>; throwing simulates a crash there.</summary>

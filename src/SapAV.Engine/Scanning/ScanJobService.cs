@@ -42,8 +42,16 @@ public sealed class ScanJobService : IScanJobService, IDisposable
     private readonly Lock _lock = new();
     private readonly List<ScanJob> _jobs = [];
 
+    /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
     internal ScanJobService(
         ScanJobOptions options, IScanBroker broker, FolderSet excluded, IScanVerdictHandler? handler, IScanJobPreflight? preflight,
+        TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null)
+        : this(options, broker, ExclusionSet.Always(excluded), handler, preflight, time, logger, reparseTag)
+    {
+    }
+
+    internal ScanJobService(
+        ScanJobOptions options, IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, IScanJobPreflight? preflight,
         TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -66,7 +74,6 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var options = services.GetRequiredService<IOptions<ScanJobOptions>>().Value;
         options.Validate();
         var sandbox = services.GetRequiredService<IOptions<SandboxOptions>>().Value;
-        var quarantine = services.GetRequiredService<IOptions<Quarantine.QuarantineOptions>>().Value;
         var time = services.GetRequiredService<TimeProvider>();
         var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning");
         var broker = services.GetRequiredService<IScanBroker>();
@@ -78,24 +85,39 @@ public sealed class ScanJobService : IScanJobService, IDisposable
             new AutoQuarantineLimiter(time, options.AutoQuarantineMaxPerWindow, options.AutoQuarantineWindow),
             time, logger);
         var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
-        return new ScanJobService(options, broker, ExcludedFolders(options, sandbox, quarantine), handler, preflight, time, logger);
+        return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger);
     }
 
-    /// <summary>The folders this service never scans.</summary>
-    public FolderSet Excluded { get; }
+    /// <summary>What this service doesn't scan (engine folders only while verified, plus the configured exclusions).</summary>
+    public ExclusionSet Excluded { get; }
 
     public event Action<ScanJob>? JobCreated;
 
-    /// <summary>The engine's own folders plus the configured extras (review B2 follow-up Medium).</summary>
-    internal static FolderSet ExcludedFolders(ScanJobOptions options, SandboxOptions sandbox, Quarantine.QuarantineOptions quarantine) =>
+    /// <summary>The engine's own folders (review B2 follow-up Medium); excluded only while verified (review B H1).</summary>
+    internal static FolderSet EngineFolders(SandboxOptions sandbox, Quarantine.QuarantineOptions quarantine) =>
         new([
             .. EngineDataFolders.Defaults(),
             Path.GetDirectoryName(sandbox.ResolvedWorkerPath),
             sandbox.ResolvedRulesDirectory,
             Path.GetDirectoryName(sandbox.ResolvedBlocklistPath),
             quarantine.EffectiveRoot,
-            .. options.ExcludedFolders,
         ]);
+
+    /// <summary>The engine's exclusions: verified engine folders, configured extras; an unverified engine folder raises a health alert.</summary>
+    internal static ExclusionSet CreateExclusions(IServiceProvider services)
+    {
+        var options = services.GetRequiredService<IOptions<ScanJobOptions>>().Value;
+        var sandbox = services.GetRequiredService<IOptions<SandboxOptions>>().Value;
+        var quarantine = services.GetRequiredService<IOptions<Quarantine.QuarantineOptions>>().Value;
+        var time = services.GetRequiredService<TimeProvider>();
+        var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning");
+        var alerts = services.GetRequiredService<Alerts.IAlertDispatcher>();
+        return new ExclusionSet(EngineFolders(sandbox, quarantine), new FolderSet(options.ExcludedFolders), FolderTrust.Default, time, (folder, why) =>
+        {
+            logger.LogWarning("Engine folder {Folder} is scanned, not excluded: {Why}.", folder, why);
+            alerts.Post(Alerts.ScanAlerts.EngineFolderUntrusted(folder, why, time.GetUtcNow()), health: true);
+        });
+    }
 
     public ScanJob Create(ScanJobRequest request)
     {

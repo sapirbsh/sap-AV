@@ -18,8 +18,10 @@ namespace SapAV.Engine.Quarantine;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Open"/>: the root path must be local and fully qualified. The parent is created if missing (normal
-/// inheritance; D3 owns its ACL), must not be a reparse point and must have a trusted owner. The root is created
+/// <see cref="Open"/>: the root path must be local and fully qualified. The parent must not be a reparse point and must
+/// have a trusted owner. The engine's data root (<c>%ProgramData%\sap-AV</c>) as the parent is created, verified and if
+/// possible fixed by <see cref="EngineDataRoot.Ensure"/> (protected SYSTEM + Administrators DACL); any other parent is
+/// created with normal inheritance if missing (a configured <c>Root</c>). The root is created
 /// atomically with the protected SYSTEM + Administrators DACL (<see cref="QuarantineAccessPolicy"/>); an existing
 /// root must not be a reparse point and must have a trusted owner. A DACL that is wider is <b>fixed</b> only if the
 /// folder is empty (nothing could have been planted); otherwise the store is <b>refused</b>.
@@ -56,13 +58,24 @@ public sealed class QuarantineStore : IDisposable
     internal SafeFileHandle RootHandle { get; }
 
     /// <summary>Opens (creating if needed) and verifies the store at <paramref name="root"/>.</summary>
+    /// <param name="parentIsDataRoot">
+    /// The parent is the engine's data root, so it is created and verified by <see cref="EngineDataRoot.Ensure"/> (review
+    /// B H1) instead of inheriting <c>%ProgramData%</c>'s ACL. Default: true when the parent is
+    /// <see cref="Scanning.EngineDataFolders.ProgramDataRoot"/>.
+    /// </param>
     /// <exception cref="QuarantineStoreException">The store can't be used safely.</exception>
-    public static QuarantineStore Open(string root, QuarantineAccessPolicy policy)
+    public static QuarantineStore Open(string root, QuarantineAccessPolicy policy, bool? parentIsDataRoot = null)
     {
         ArgumentNullException.ThrowIfNull(policy);
         string full = ValidateRootPath(root);
         string parentPath = Path.GetDirectoryName(full)
             ?? throw new QuarantineStoreException($"The quarantine root {full} has no parent folder.");
+
+        if (parentIsDataRoot ?? string.Equals(Scanning.FolderSet.Normalize(parentPath), Scanning.FolderSet.Normalize(Scanning.EngineDataFolders.ProgramDataRoot),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            EngineDataRoot.Ensure(parentPath, policy);
+        }
 
         var parent = OpenParent(parentPath, policy);
         try

@@ -109,6 +109,9 @@ internal sealed class ScanJobHarness : IDisposable
 
     public List<string> Excluded { get; } = [];
 
+    /// <summary>Replaces <see cref="Excluded"/> with a real exclusion set (verified engine folders).</summary>
+    public ExclusionSet? Exclusions { get; set; }
+
     public IScanVerdictHandler? Handler { get; set; }
 
     public IScanJobPreflight? Preflight { get; set; }
@@ -118,7 +121,7 @@ internal sealed class ScanJobHarness : IDisposable
     private ScanJobService? _service;
 
     public ScanJobService Service => _service ??= new ScanJobService(
-        Options, Broker, new FolderSet(Excluded), Handler, Preflight, Time, NullLogger.Instance, ReparseTag);
+        Options, Broker, Exclusions ?? ExclusionSet.Always(new FolderSet(Excluded)), Handler, Preflight, Time, NullLogger.Instance, ReparseTag);
 
     public string Write(string relative, string content = "plain test content")
     {

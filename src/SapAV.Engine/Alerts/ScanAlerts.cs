@@ -52,6 +52,18 @@ public static class ScanAlerts
             MitreTechniqueIds.DisableOrModifyTools, "The quarantine store is full, so a Malicious file was left in place: " + why,
             AlertAction.QuarantineFailed);
 
+    /// <summary>
+    /// The trigger of engine-health alerts raised outside a scan job (startup, background checks): the always-on engine,
+    /// reported as <see cref="ScanTrigger.RealTime"/> (the alert models have no separate "engine" trigger).
+    /// </summary>
+    public const ScanTrigger EngineTrigger = ScanTrigger.RealTime;
+
+    /// <summary>An engine folder isn't admin-only, so it is scanned instead of excluded (review B H1, ROADMAP D3 M5).</summary>
+    public static Alert EngineFolderUntrusted(string folder, string why, DateTimeOffset now) =>
+        Health(AlertType.EngineFolderUntrusted, Verdict.Suspicious, folder, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "This sap-AV folder is not protected (" + why + "), so it is scanned instead of excluded. Reinstall sap-AV or let an " +
+            "administrator restore its permissions.", AlertAction.None);
+
     private static Alert Health(
         AlertType type, Verdict verdict, string path, ScanTrigger trigger, DateTimeOffset now, string technique, string reason, AlertAction action) =>
         new(Alert.ComputeAlertId(type, now, path, null, trigger), now, type, verdict, path, null, null, null, technique, [], [reason], null,

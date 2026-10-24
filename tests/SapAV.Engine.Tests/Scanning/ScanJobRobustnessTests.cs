@@ -137,7 +137,7 @@ public sealed class ScanJobRobustnessTests : IDisposable
         var rules = Path.Combine(context.Files, "rules");
         var manager = new QuarantineManager(
             Options.Create(new QuarantineOptions { Root = context.StoreRoot, AdditionalTrustedSids = [QuarantineTestContext.CurrentUser] }),
-            context.Alerts, context.Log, context.Time, new FixedKeyProvider(context.Key), new FolderSet([rules]));
+            context.Alerts, context.Log, context.Time, new FixedKeyProvider(context.Key), ExclusionSet.Always(new FolderSet([rules])));
         context.Manager.Dispose(); // one manager per store
         using (manager)
         {
@@ -153,27 +153,32 @@ public sealed class ScanJobRobustnessTests : IDisposable
     }
 
     [Fact]
-    public void ExcludedFolders_CoverProgramData_TheInstallWorkerAndRulesFolders_AndTheStore()
+    public void EngineFolders_AreTheStoreSandboxInstallWorkerAndRulesFolders_NeverTheWholeDataRoot()
     {
-        var excluded = ScanJobService.ExcludedFolders(new ScanJobOptions { ExcludedFolders = [@"D:\Extra"] }, new SandboxOptions(),
-            new QuarantineOptions { Root = @"E:\Store" });
+        var folders = ScanJobService.EngineFolders(new SandboxOptions(), new QuarantineOptions());
 
-        Assert.True(excluded.Contains(Path.Combine(EngineDataFolders.ProgramDataRoot, "Quarantine", "x")));
-        Assert.True(excluded.Contains(Path.Combine(AppContext.BaseDirectory, "ScanWorker", "SapAV.ScanWorker.exe")));
-        Assert.True(excluded.Contains(Path.Combine(AppContext.BaseDirectory, "data", "rules", "eicar.yar")));
-        Assert.True(excluded.Contains(@"e:\store\abc"));
-        Assert.True(excluded.Contains(@"D:\Extra"));
-        Assert.False(excluded.Contains(@"D:\Extra2\x")); // prefix of a name is not "inside"
-        Assert.False(excluded.Contains(Path.Combine(Path.GetTempPath(), "x.exe")));
+        Assert.True(folders.Contains(Path.Combine(EngineDataFolders.ProgramDataRoot, "Quarantine", "x")));
+        Assert.True(folders.Contains(Path.Combine(EngineDataFolders.ProgramDataRoot, "Sandbox", "sandbox.id")));
+        Assert.True(folders.Contains(Path.Combine(AppContext.BaseDirectory, "ScanWorker", "SapAV.ScanWorker.exe")));
+        Assert.True(folders.Contains(Path.Combine(AppContext.BaseDirectory, "data", "rules", "eicar.yar")));
+        Assert.False(folders.Contains(EngineDataFolders.ProgramDataRoot)); // review B H1: the root itself is scanned
+        Assert.False(folders.Contains(Path.Combine(EngineDataFolders.ProgramDataRoot, "x", "dropped.exe")));
+        Assert.False(folders.Contains(Path.Combine(Path.GetTempPath(), "x.exe")));
+        Assert.True(ScanJobService.EngineFolders(new SandboxOptions(), new QuarantineOptions { Root = @"E:\Store" }).Contains(@"e:\store\abc"));
     }
 
     [Fact]
-    public void EngineHost_ResolvesTheScanJobService_WithTheEngineFoldersExcluded()
+    public void EngineHost_ResolvesTheScanJobService_WithVerifiedEngineFoldersAndConfiguredExtras()
     {
-        using var host = EngineHost.Configure(Host.CreateApplicationBuilder([])).Build();
+        var builder = Host.CreateApplicationBuilder([]);
+        builder.Configuration["ScanJobs:ExcludedFolders:0"] = @"D:\Extra";
+        using var host = EngineHost.Configure(builder).Build();
 
         var service = Assert.IsType<ScanJobService>(host.Services.GetRequiredService<IScanJobService>());
-        Assert.True(service.Excluded.Contains(EngineDataFolders.ProgramDataRoot));
+        Assert.Same(host.Services.GetRequiredService<ExclusionSet>(), service.Excluded);
+        Assert.False(service.Excluded.Contains(EngineDataFolders.ProgramDataRoot));
+        Assert.True(service.Excluded.Contains(@"D:\Extra\x")); // configured by an administrator: honored as is
+        Assert.False(service.Excluded.Contains(@"D:\Extra2\x")); // prefix of a name is not "inside"
         Assert.NotNull(host.Services.GetRequiredService<IAlertDispatcher>());
     }
 

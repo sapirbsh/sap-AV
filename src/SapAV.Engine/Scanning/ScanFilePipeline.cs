@@ -33,7 +33,7 @@ internal interface IScanVerdictHandler
 /// cancel only when the <b>job's own</b> token is cancelled (an OperationCanceledException from anywhere else, e.g. a
 /// timed-out HTTP call inside a step, is just an error).
 /// </remarks>
-internal sealed class ScanFilePipeline(IScanBroker broker, FolderSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger)
+internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger)
 {
     /// <summary>Longest <see cref="ScanJobFileResult.Detail"/> kept.</summary>
     public const int MaxDetailLength = 512;

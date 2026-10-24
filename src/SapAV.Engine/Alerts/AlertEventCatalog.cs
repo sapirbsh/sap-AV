@@ -24,6 +24,7 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 ///   9002   | AutoQuarantineBurst      | Warning     | Auto-quarantine rate limit hit; the rest need the user (B3)
 ///   9003   | ScanRulesDegraded        | Warning     | No YARA rules loaded, or rule files failed (B3)
 ///   9004   | QuarantineStoreFull      | Error       | Quarantine quota or free-space floor reached (B3)
+///   9008   | EngineFolderUntrusted    | Warning     | An engine folder isn't admin-only, so it is scanned, not excluded (B review H1)
 /// </code>
 /// Ranges: 1000-1999 file detections, 2000-2999 system-change detections (persistence, Defender tampering,
 /// honeytokens, process chains), 3000-3999 user / remediation actions, 9000-9999 engine health.
@@ -44,6 +45,7 @@ public static class AlertEventCatalog
     public const int AutoQuarantineBurstEventId = 9002;
     public const int ScanRulesDegradedEventId = 9003;
     public const int QuarantineStoreFullEventId = 9004;
+    public const int EngineFolderUntrustedEventId = 9008;
 
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> is not a defined value.</exception>
     public static AlertEventDefinition For(AlertType type) => type switch
@@ -56,6 +58,7 @@ public static class AlertEventCatalog
         AlertType.AutoQuarantineBurst => new(AutoQuarantineBurstEventId, EventLogEntryType.Warning),
         AlertType.ScanRulesDegraded => new(ScanRulesDegradedEventId, EventLogEntryType.Warning),
         AlertType.QuarantineStoreFull => new(QuarantineStoreFullEventId, EventLogEntryType.Error),
+        AlertType.EngineFolderUntrusted => new(EngineFolderUntrustedEventId, EventLogEntryType.Warning),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Undefined alert type."),
     };
 }

@@ -79,6 +79,33 @@ public sealed class QuarantineAccessPolicy
         return bytes;
     }
 
+    /// <summary>
+    /// The DACL of the engine's data root (<c>%ProgramData%\sap-AV</c>, review B H1): full control for the trusted SIDs,
+    /// inherited by files and folders, nothing for anyone else. Engine subfolders that need more (the quarantine store's
+    /// no-execute files) are created with their own protected DACL.
+    /// </summary>
+    public RawAcl CreateDataRootDacl()
+    {
+        var acl = new RawAcl(GenericAcl.AclRevision, _trusted.Length);
+        foreach (var sid in _trusted)
+        {
+            acl.InsertAce(acl.Count, new CommonAce(AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed,
+                FullControl, sid, false, null));
+        }
+
+        return acl;
+    }
+
+    /// <summary>A self-relative descriptor with only the protected data-root DACL (owner = the creating account).</summary>
+    public byte[] CreateDataRootSecurityDescriptor()
+    {
+        var sd = new RawSecurityDescriptor(
+            ControlFlags.DiscretionaryAclPresent | ControlFlags.DiscretionaryAclProtected, null, null, null, CreateDataRootDacl());
+        var bytes = new byte[sd.BinaryLength];
+        sd.GetBinaryForm(bytes, 0);
+        return bytes;
+    }
+
     /// <summary>The root DACL in binary form, for <c>SetSecurityInfo</c>.</summary>
     public byte[] CreateRootDaclBytes()
     {

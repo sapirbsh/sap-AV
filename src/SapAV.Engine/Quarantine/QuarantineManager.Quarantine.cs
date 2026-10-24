@@ -102,7 +102,8 @@ public sealed partial class QuarantineManager
     {
         // B3 review H1: the exact requested path and the handle's final path, never the GetFullPath form (scannedPath), which
         // drops trailing dots/spaces: C:\ProgramData\sap-AV.\x is not inside C:\ProgramData\sap-AV.
-        if (_engineFolders.Contains(report.Result.Item.Path) || _engineFolders.Contains(report.Identity?.FinalPath))
+        if (_ownStore.Contains(report.Result.Item.Path) || _ownStore.Contains(report.Identity?.FinalPath)
+            || _engineFolders.Contains(report.Result.Item.Path) || _engineFolders.Contains(report.Identity?.FinalPath))
         {
             refusal = new QuarantineResult(QuarantineStatus.EngineFolder, "The file is in one of sap-AV's own folders; it is never quarantined.");
             return true;

@@ -35,8 +35,14 @@ internal readonly record struct ScanTreeEntry(string Path, ScanTreeEntryKind Kin
 /// (the opener skips offline placeholders without recalling them). Depth is capped at <see cref="MaxDepth"/>.
 /// Runs on the job's enumerator thread; nothing here reads file content.
 /// </summary>
-internal sealed class ScanTreeWalker(FolderSet excluded, Func<string, uint?>? reparseTag = null)
+internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>? reparseTag = null)
 {
+    /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
+    public ScanTreeWalker(FolderSet excluded, Func<string, uint?>? reparseTag = null)
+        : this(ExclusionSet.Always(excluded), reparseTag)
+    {
+    }
+
     /// <summary>Deepest folder nesting walked (review B3 C6 M2); deeper folders are reported Unreadable.</summary>
     public const int MaxDepth = 256;
 

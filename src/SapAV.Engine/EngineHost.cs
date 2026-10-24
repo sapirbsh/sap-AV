@@ -40,10 +40,8 @@ public static class EngineHost
         builder.Services.AddSingleton(sp =>
         {
             var quarantine = sp.GetRequiredService<IOptions<QuarantineOptions>>();
-            var engineFolders = ScanJobService.ExcludedFolders(sp.GetRequiredService<IOptions<ScanJobOptions>>().Value,
-                sp.GetRequiredService<IOptions<SandboxOptions>>().Value, quarantine.Value);
             return new QuarantineManager(quarantine, sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<ILogger<QuarantineManager>>(),
-                sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IQuarantineKeyProvider>(), engineFolders);
+                sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IQuarantineKeyProvider>(), sp.GetRequiredService<ExclusionSet>());
         });
         builder.Services.AddSingleton<IQuarantineService>(sp => sp.GetRequiredService<QuarantineManager>());
         builder.Services.AddHostedService<QuarantineStartupService>();
@@ -73,6 +71,7 @@ public static class EngineHost
             return new AlertDispatcher(sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<TimeProvider>(),
                 sp.GetRequiredService<ILogger<AlertDispatcher>>(), options.AlertWindow, options.MaxAlertsPerWindow, options.AlertQueueCapacity);
         });
+        builder.Services.AddSingleton(ScanJobService.CreateExclusions); // review B H1: engine folders excluded only while verified
         builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
         builder.Services.AddHostedService<Worker>();

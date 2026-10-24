@@ -27,6 +27,13 @@ public sealed class FolderSet
         return normalized is not null && _folders.Any(f => normalized.StartsWith(f, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>Every folder that is <paramref name="path"/> or contains it (normalized form, with the trailing separator).</summary>
+    public IReadOnlyList<string> Matches(string? path)
+    {
+        var normalized = Normalize(path);
+        return normalized is null ? [] : _folders.Where(f => normalized.StartsWith(f, StringComparison.OrdinalIgnoreCase)).ToArray();
+    }
+
     /// <summary>The exact full path with one trailing separator, or null if it isn't a fully qualified drive or UNC path.</summary>
     internal static string? Normalize(string? path)
     {
@@ -51,16 +58,21 @@ public sealed class FolderSet
 }
 
 /// <summary>
-/// Folders that scan jobs never scan and never auto-quarantine from (review B2 follow-up Medium): the engine's own data
-/// (<c>%ProgramData%\sap-AV</c>: settings, caches, sandbox, quarantine store), the engine and scan-worker install folders,
-/// the rules and blocklist folders (YARA rule files match themselves), plus configured extras.
+/// The engine's own folders, which scan jobs don't scan and never auto-quarantine from (review B2 follow-up Medium) <b>once
+/// their owner and ACL are verified</b> (review B H1 / ROADMAP D3 M5, <see cref="ExclusionSet"/>): the quarantine store and
+/// the sandbox folder inside <c>%ProgramData%\sap-AV</c>, the engine and scan-worker install folders, the rules and
+/// blocklist folders (YARA rule files match themselves). The data root itself is <b>never</b> excluded as a whole: anything
+/// else in it is scanned.
 /// </summary>
 public static class EngineDataFolders
 {
-    /// <summary><c>%ProgramData%\sap-AV</c>.</summary>
+    /// <summary><c>%ProgramData%\sap-AV</c> (protected by <see cref="Quarantine.EngineDataRoot"/>; not excluded).</summary>
     public static string ProgramDataRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "sap-AV");
 
-    /// <summary>The default set: ProgramData root and the engine's install folder.</summary>
-    public static IEnumerable<string> Defaults() => [ProgramDataRoot, AppContext.BaseDirectory];
+    /// <summary><c>%ProgramData%\sap-AV\Sandbox</c> (the scan worker's AppContainer id).</summary>
+    public static string Sandbox => Path.Combine(ProgramDataRoot, "Sandbox");
+
+    /// <summary>The default engine folders besides the configured store, worker, rules and blocklist folders.</summary>
+    public static IEnumerable<string> Defaults() => [Sandbox, AppContext.BaseDirectory];
 }

@@ -40,4 +40,10 @@ public enum AlertType
 
     /// <summary>The quarantine store is over its quota or the drive is below the free-space floor: nothing more is quarantined.</summary>
     QuarantineStoreFull,
+
+    /// <summary>
+    /// An engine folder (quarantine store, sandbox, install, rules) can't be verified as admin-only (owner, ACL, links), so it
+    /// is scanned instead of excluded: someone who controls it could hide files there (review B H1).
+    /// </summary>
+    EngineFolderUntrusted,
 }

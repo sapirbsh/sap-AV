@@ -350,6 +350,32 @@ internal static unsafe class QuarantineNative
         }
     }
 
+    /// <summary>
+    /// Sets parts of the handle's security descriptor with <c>NtSetSecurityObject</c>: only this object, no propagation to
+    /// children (unlike <c>SetSecurityInfo</c>, which walks the tree), so a folder whose content isn't trusted yet can be
+    /// locked down without the engine touching anything inside it. Returns the Win32 error (0 = success).
+    /// </summary>
+    public static int SetSecurityObject(SafeHandle handle, uint securityInformation, byte[] selfRelativeDescriptor)
+    {
+        bool added = false;
+        handle.DangerousAddRef(ref added);
+        try
+        {
+            fixed (byte* sd = selfRelativeDescriptor)
+            {
+                int status = NtSetSecurityObject(handle.DangerousGetHandle(), securityInformation, sd);
+                return status < 0 ? (int)RtlNtStatusToDosError(status) : 0;
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+    }
+
     /// <summary>DPAPI, machine scope, no UI.</summary>
     /// <exception cref="Win32Exception">The call failed.</exception>
     public static byte[] ProtectMachine(byte[] data, byte[] entropy) => Dpapi(data, entropy, protect: true);
@@ -481,6 +507,9 @@ internal static unsafe class QuarantineNative
 
     [DllImport("ntdll.dll", ExactSpelling = true)]
     private static extern uint RtlNtStatusToDosError(int status);
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtSetSecurityObject(IntPtr handle, uint securityInformation, byte* securityDescriptor);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern SafeFileHandle CreateFileW(
