@@ -375,6 +375,24 @@ M3, M4, L1 and L4 are fixed in B3.
 - **D1 (L6):** a writer holding a writable mapped view gets around deny-writers sharing (a scan race on the attacker's
   own file, an evasion, not a quarantine abuse).
 
+**Carried over from the B4 review (Low).** H1 (accept loop killed by an early close), H2 (instance count reaching 0 →
+pipe-name takeover), H3 (junction swap during a walk), M1 (slot exhaustion before Hello), M2 (SYSTEM following
+symlinks in client roots → SMB/NTLM coercion), M3 (jobs keyed by SID only) and L1, L5, L6, L7 are fixed in B4.
+- **B4 follow-up (L2):** ScanGet halves the page and re-serializes it up to ~8 times (≤ 4 MiB each) per request.
+  Estimate the size while building the page and serialize once.
+- **C1 (L3):** the excluded-folder result, the DifferentFile message (with the final file name) and open-failure statuses
+  (Locked, TooLarge, …) come before the client's read-access check. Check access first; for access-restricted jobs, map
+  open failures to a generic NotScanned.
+- **B2 follow-up (L4):** the restore and quarantine parent-folder checks are path-based (they read a junction's own SD).
+  SafeDirectory refuses the redirect today, so this is defense in depth. Run AccessCheck on the SafeDirectory handle
+  inside the quarantine call.
+- **B4 follow-up (L8):**
+  - Anonymous-SQOS clients each log a warning with no rate limit.
+  - Malformed frames and drains are parsed before the rate limiter.
+  - The event queue is bounded by count, not bytes (512 × up to ~64 KB paths ≈ 32 MB per connection); bound it by bytes.
+  - Document that auto-quarantine of a Malicious file in a standard user's job skips the DELETE rule quarantine-from-result
+    enforces (consistent with Full Scan).
+
 **B. Engine infrastructure (engine-dev)**
 
 | Step | Owner | Deliverable | Done when (tests) |

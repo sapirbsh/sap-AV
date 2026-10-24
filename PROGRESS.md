@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 built (review running) |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B4 built, review fixes in progress |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -64,7 +64,7 @@ pass comes at the end.
 | B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Built** (`009d580`…`3b12c01`, 6 commits); immediate review running |
+| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Built** (`009d580`…`3b12c01`); review NOT CLEAN (3 High), fixes in progress |
 | B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | Not started |
 
 ## Current status (2026-10-25)
@@ -72,8 +72,10 @@ pass comes at the end.
 **B4 (named pipe, engine ↔ GUI) is built and pushed** (`009d580`…`3b12c01`): pipe locked to local authenticated
 users (SYSTEM owns it, first-instance protection), client identity from the pipe, strict 64 KiB JSON frames, `ScanPathPolicy`,
 scans run with the requester's access, per-user job isolation, quarantine/restore authorization, per-user caps, sanitized
-output, and a client library for the GUI (F1). Now: B4's **immediate review** (the pipe is where untrusted users reach
-the SYSTEM engine), then **B6**, then the section B tester + reviewer pass.
+output, and a client library for the GUI (F1). B4's immediate review came back **NOT CLEAN** (3 High, 3 Medium, no Critical): a user could stop the pipe server
+for good (H1), take over the pipe name after draining all instances (H2), or list another user's folders through a
+junction swap during a paused scan (H3); a symlinked root could make SYSTEM authenticate to an attacker's SMB server (M2).
+All are being fixed now; Low findings are in ROADMAP.md. Then **B6**, then the section B tester + reviewer pass.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
