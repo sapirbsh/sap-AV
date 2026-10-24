@@ -95,7 +95,7 @@ once D3 installs under Program Files, not from a dev build). **Now:** B6's immed
 - All Medium/Low findings are recorded in `ROADMAP.md` under the step they belong to.
 
 **Open for the user**
-- **Ready now:** in an **elevated** PowerShell in `C:Projectssap-AV`, run
+- **Ready now:** in an **elevated** PowerShell in `C:\Projects\sap-AV`, run
   `$env:SAPAV_TEST_ALLOW_HKLM='1'; dotnet test tests/SapAV.Engine.Tests --filter "FullyQualifiedName~RealEventLogTests"`.
   It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused). It cleans up
   after itself (only a throwaway .evtx file and a "log cleared" record remain).
