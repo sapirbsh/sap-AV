@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B6 done, section test pass done; section reviewer pass running |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B6 done, section test + review done; review fixes in progress |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -84,7 +84,15 @@ read), migration from the Application log, and the installer refuses a message D
 once D3 installs under Program Files, not from a dev build). B6's review came back **CLEAN** (the permission bits match the live Windows defaults). The **section B tester pass** is done (`a39440b`): end-to-end tests through the real pipe, sandboxed worker,
 auto-quarantine and restore (also inside the real AppContainer), pause/resume/cancel and disconnect through the pipe,
 and a positive control for the real Event Log test. It also fixed a test-cleanup bug that leaked old sandbox profiles.
-No production bugs found. **Now:** the section B reviewer pass. After that, section B is done and section C (scan modes) starts.
+No production bugs found.
+
+The **section B reviewer pass** (cross-step) came back **NOT CLEAN**, with 3 High and no Critical:
+- **H1:** standard users can write into `%ProgramData%sap-AV`, which was excluded from scanning as a whole, so it was a
+  hiding place.
+- **H2:** admin and engine jobs still followed links when opening files.
+- **H3:** one user could block all scanning with two paused jobs.
+These are being fixed now, together with startup resilience + health alerts and a protected pipe name. The other
+Medium/Low findings are in ROADMAP.md. After the fixes, section B is done and section C (scan modes) starts. After that, section B is done and section C (scan modes) starts.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.

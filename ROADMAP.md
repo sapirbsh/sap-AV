@@ -400,6 +400,29 @@ the live Windows defaults for classic logs.
 - **X2 docs (L7):** users can still write Application events with look-alike sources (`sap-AV ` with a trailing space,
   homoglyphs). SIEM docs must say: filter on `Channel == "sap-AV"`, never on the provider name alone.
 
+**Carried over from the section B review (cross-step; Medium/Low).** H1 (`%ProgramData%sap-AV` writable by users and
+wholly excluded), H2 (admin/engine jobs following links on file opens) and H3 (one user blocking all scans with paused
+jobs) are fixed in section B. M4 (startup resilience + health alerts, incl. B6 M2), M5 (pipe name in
+`ProtectedPrefixAdministrators`), L1 and L2 were pulled forward and fixed too.
+- **C1 (M1):** a standard user can fill the quarantine store through `QuarantineFromResult` (Suspicious results are
+  accepted; there's no per-user quota or rate limit), so real auto-quarantines then get StoreFull. Add a per-requester
+  quota and rate limit for pipe-requested quarantines; keep the global quota for engine-initiated ones.
+- **C1, before D1 (M2):** the alert window (`AlertDispatcher`, 200 non-Malicious, 10,000 keys) and the auto-quarantine
+  window (`AutoQuarantineLimiter`) are shared by everyone, so a user's own scans can push real alerts into a summary and
+  use up quarantine slots (this also covers D1 L2). Give each requester/trigger its own budget; engine and real-time
+  Malicious alerts are never limited by user-requested jobs; the summary lists distinct hashes.
+- **B2 follow-up / C1 (M3):** restore creates files owned by SYSTEM (it can't set the original owner), and
+  `AutoQuarantinePolicy` then treats them as protected, so a restored file is never auto-quarantined again. Set the owner
+  to the requesting user (SeRestorePrivilege only for that call), or don't treat a SYSTEM owner as protection in
+  user-writable folders.
+- **F1 at the latest (M6):** `QuarantineList` isn't paged. One frame (≤ 4 MiB), so a few hundred long-path items break it
+  for everyone, and each item costs a SafeTree open + AccessCheck synchronously for a standard user. Page it and estimate
+  the size while building it.
+- **C1 (L3):** quarantine item visibility needs only list access on the folder, while scanning needs read access on the
+  file, so a user can see the SHA-256 and reasons of another user's quarantined file. Check against the stored DACL.
+- **B3 L3 / C1 (L4):** `RulesPreflight` puts worker rule-error text into job warnings shown to standard users. Send counts
+  only to non-admin clients.
+
 **Carried over from the B4 review (Low).** H1 (accept loop killed by an early close), H2 (instance count reaching 0 →
 pipe-name takeover), H3 (junction swap during a walk), M1 (slot exhaustion before Hello), M2 (SYSTEM following
 symlinks in client roots → SMB/NTLM coercion), M3 (jobs keyed by SID only) and L1, L5, L6, L7 are fixed in B4.
