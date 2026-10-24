@@ -45,9 +45,10 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
     /// <param name="folder">The listed folder the file was found in (the caller keeps its reference), so the file is opened
     /// relative to that handle; null = reach <paramref name="path"/> component by component (<see cref="SafeTree"/>).</param>
     /// <param name="name">The file's name in <paramref name="folder"/>.</param>
+    /// <param name="priority">Who the scan is for, for the next free worker (review B H3).</param>
     public async Task<ScanJobFileResult?> ProcessAsync(
         string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
-        SharedFolder? folder = null, string? name = null)
+        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal)
     {
         string step = "open";
         try
@@ -78,7 +79,7 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
             item = Canonical(item, opened);
 
             step = "scan";
-            var report = opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, jobToken).ConfigureAwait(false);
+            var report = opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, priority, jobToken).ConfigureAwait(false);
             bytesScanned(report.Hash.Length ?? 0);
 
             step = "post-scan";

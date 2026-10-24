@@ -50,6 +50,12 @@ public sealed class PipeServerOptions
     /// <summary>A created job not started within this is cancelled (review B3 L5).</summary>
     public TimeSpan PendingJobExpiry { get; set; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Review B H3: a standard user's unfinished jobs are cancelled once that user has had no connection to the engine for
+    /// this long (nobody is left to watch, pause or cancel them, and they hold a job slot).
+    /// </summary>
+    public TimeSpan OrphanJobTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
     /// <summary>Job subscriptions per connection.</summary>
     public int MaxSubscriptionsPerConnection { get; set; } = 8;
 
@@ -81,6 +87,7 @@ public sealed class PipeServerOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxActiveJobsPerUser, 1, nameof(MaxActiveJobsPerUser));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPendingJobsTotal, 1, nameof(MaxPendingJobsTotal));
         ArgumentOutOfRangeException.ThrowIfLessThan(PendingJobExpiry, TimeSpan.FromMilliseconds(10), nameof(PendingJobExpiry));
+        ArgumentOutOfRangeException.ThrowIfLessThan(OrphanJobTimeout, TimeSpan.FromMilliseconds(10), nameof(OrphanJobTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxSubscriptionsPerConnection, 1, nameof(MaxSubscriptionsPerConnection));
         ArgumentOutOfRangeException.ThrowIfLessThan(EventQueueCapacity, 1, nameof(EventQueueCapacity));
         ArgumentOutOfRangeException.ThrowIfLessThan(RequestsPerSecond, 0.01, nameof(RequestsPerSecond));

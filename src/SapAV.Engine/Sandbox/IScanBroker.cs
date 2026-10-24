@@ -19,6 +19,14 @@ public interface IScanBroker : IFileScanner
     /// <param name="openNotes">The notes <see cref="ScanFileOpener.Open"/> added while opening.</param>
     Task<FileScanReport> ScanOpenedAsync(ScanItem item, OpenedScanFile file, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// <see cref="ScanOpenedAsync(ScanItem, OpenedScanFile, IReadOnlyList{ScanNote}, CancellationToken)"/> with a priority for
+    /// the next free worker (review B H3). Brokers without a worker pool ignore it.
+    /// </summary>
+    Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile file, IReadOnlyList<ScanNote> openNotes, ScanPriority priority, CancellationToken cancellationToken) =>
+        ScanOpenedAsync(item, file, openNotes, cancellationToken);
+
     /// <summary>Re-reads the rules directory and blocklist and loads them into every worker.</summary>
     /// <returns>What was loaded, or null if no worker could load it (see the log).</returns>
     Task<RulesLoadSummary?> ReloadRulesAsync(CancellationToken cancellationToken = default);

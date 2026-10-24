@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using SapAV.Core.Models;
+using SapAV.Engine.Sandbox;
 
 namespace SapAV.Engine.Scanning;
 
@@ -63,6 +64,7 @@ public sealed class ScanJob : IDisposable
     private bool _progressPending;
     private TimeSpan _runningBefore;
     private DateTimeOffset? _runningSince;
+    private DateTimeOffset? _pauseRequestedAt;
 
     internal ScanJob(
         Guid id, ScanJobRequest request, ScanJobOptions options, ScanFilePipeline pipeline, ScanTreeWalker walker,
@@ -228,6 +230,7 @@ public sealed class ScanJob : IDisposable
             }
 
             _resume.Reset();
+            _pauseRequestedAt = _time.GetUtcNow();
             TransitionLocked(ScanJobState.Pausing);
             ParkedCheckLocked();
             return true;
@@ -252,8 +255,28 @@ public sealed class ScanJob : IDisposable
 
             TransitionLocked(ScanJobState.Running);
             _resume.Set();
+            _pauseRequestedAt = null;
             return true;
         }
+    }
+
+    /// <summary>
+    /// Review B H3: cancels the job if it has been pausing / paused for longer than <paramref name="maxPause"/> (a paused
+    /// job still holds a job slot). True if it was cancelled now.
+    /// </summary>
+    internal bool CancelIfPausedLongerThan(TimeSpan maxPause)
+    {
+        lock (_lock)
+        {
+            if (_state is not (ScanJobState.Pausing or ScanJobState.Paused) || _pauseRequestedAt is not { } since
+                || _time.GetUtcNow() - since <= maxPause)
+            {
+                return false;
+            }
+        }
+
+        AddWarning($"The job was paused for longer than {maxPause} and was cancelled; the results so far are kept.");
+        return Cancel();
     }
 
     /// <summary>Cancels the job (any non-final state). The results so far are kept.</summary>
@@ -483,7 +506,8 @@ public sealed class ScanJob : IDisposable
         ScanJobFileResult? result;
         try
         {
-            result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name)
+            result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name,
+                    PriorityOf(Request.Origin))
                 .GetAwaiter().GetResult();
         }
         finally
@@ -501,6 +525,14 @@ public sealed class ScanJob : IDisposable
             ProgressChangedLocked();
         }
     }
+
+    /// <summary>Review B H3: the engine's own jobs first, then administrators', then standard users'.</summary>
+    internal static ScanPriority PriorityOf(ScanJobOrigin origin) => origin switch
+    {
+        ScanJobOrigin.Engine => ScanPriority.High,
+        ScanJobOrigin.Administrator => ScanPriority.Normal,
+        _ => ScanPriority.Low,
+    };
 
     private void CountLocked(ScanJobFileResult? result)
     {

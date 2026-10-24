@@ -108,6 +108,12 @@ public sealed class EnginePipeServer : BackgroundService
     /// <summary>Test seam: the event-frame factory of new connections (to inject a writer fault).</summary>
     internal Func<Core.Pipe.PipeEventKind, object, Core.Pipe.PipeFrame>? EventFactory { get; set; }
 
+    public override void Dispose()
+    {
+        _handler.Dispose();
+        base.Dispose();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _stoppingToken = stoppingToken;

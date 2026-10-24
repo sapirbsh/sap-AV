@@ -16,6 +16,10 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
     private readonly Lock _lock = new();
     private readonly Dictionary<Guid, Owner> _owners = [];
 
+    /// <summary>Review B H3: open sessions (that sent at least one request) and when each user's last one ended.</summary>
+    private readonly Dictionary<object, SecurityIdentifier> _live = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<SecurityIdentifier, DateTimeOffset> _lastConnected = [];
+
     /// <param name="CreatorIsAdmin">Review B4 M3: an elevated session's jobs stay hidden from the same user's non-elevated processes.</param>
     private sealed record Owner(SecurityIdentifier User, bool CreatorIsAdmin, object Session, DateTimeOffset CreatedAt, ClientScanAccess? Access)
     {
@@ -90,6 +94,7 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
             }
 
             _owners[job.Id] = new Owner(client.User, client.IsAdmin, session, time.GetUtcNow(), access);
+            _live[session] = client.User;
             if (access is not null)
             {
                 job.StateChanged += change =>
@@ -105,13 +110,29 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
         }
     }
 
-    /// <summary>The connection ended: its created-but-never-started jobs are cancelled (review B3 L5).</summary>
+    /// <summary>A session of <paramref name="user"/> is connected (called for every request; cheap).</summary>
+    public void Seen(object session, SecurityIdentifier user)
+    {
+        lock (_lock)
+        {
+            _live[session] = user;
+        }
+    }
+
+    /// <summary>
+    /// The connection ended: its created-but-never-started jobs are cancelled (review B3 L5). If it was the user's last
+    /// connection, the orphan clock starts (review B H3, <see cref="PipeServerOptions.OrphanJobTimeout"/>).
+    /// </summary>
     public void CancelPendingOf(object session)
     {
         Guid[] ids;
         lock (_lock)
         {
             ids = _owners.Where(o => ReferenceEquals(o.Value.Session, session)).Select(o => o.Key).ToArray();
+            if (_live.Remove(session, out var user) && !_live.ContainsValue(user))
+            {
+                _lastConnected[user] = time.GetUtcNow();
+            }
         }
 
         foreach (var id in ids)
@@ -147,6 +168,26 @@ internal sealed class JobRegistry(IScanJobService jobs, PipeServerOptions option
             {
                 jobs.Cancel(id);
             }
+            else if (IsOrphanedLocked(owner, job, now))
+            {
+                jobs.Cancel(id); // review B H3: a standard user's job nobody of that user is connected for any more
+            }
         }
+
+        foreach (var user in _lastConnected.Keys.Where(u => _owners.Values.All(o => o.User != u)).ToArray())
+        {
+            _lastConnected.Remove(user); // nothing of theirs left to watch
+        }
+    }
+
+    private bool IsOrphanedLocked(Owner owner, ScanJob job, DateTimeOffset now)
+    {
+        if (owner.CreatorIsAdmin || ScanJobStateMachine.IsTerminal(job.State) || _live.ContainsValue(owner.User))
+        {
+            return false;
+        }
+
+        var gone = _lastConnected.TryGetValue(owner.User, out var at) ? at : owner.CreatedAt;
+        return now - gone > options.OrphanJobTimeout;
     }
 }

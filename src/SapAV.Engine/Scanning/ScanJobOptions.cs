@@ -14,6 +14,15 @@ public sealed class ScanJobOptions
     /// <summary>Jobs that may run at the same time; starting one more is refused (B4 reports it).</summary>
     public int MaxConcurrentJobs { get; set; } = 2;
 
+    /// <summary>
+    /// Review B H3: standard-user jobs (all users together) that may run or be paused at once. At most
+    /// <see cref="MaxConcurrentJobs"/> - 1, so at least one slot is always kept for administrator and engine jobs.
+    /// </summary>
+    public int MaxRunningStandardUserJobs { get; set; } = 1;
+
+    /// <summary>Review B H3: a job paused for longer than this is cancelled (a paused job still holds a slot).</summary>
+    public TimeSpan MaxPauseTime { get; set; } = TimeSpan.FromMinutes(30);
+
     /// <summary>Finished jobs kept for status queries; the oldest finished job is forgotten first.</summary>
     public int MaxRetainedJobs { get; set; } = 16;
 
@@ -53,6 +62,9 @@ public sealed class ScanJobOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(ThreadsPerJob, 1, nameof(ThreadsPerJob));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(ThreadsPerJob, 8, nameof(ThreadsPerJob));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxConcurrentJobs, 1, nameof(MaxConcurrentJobs));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxRunningStandardUserJobs, 1, nameof(MaxRunningStandardUserJobs));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxRunningStandardUserJobs, Math.Max(1, MaxConcurrentJobs - 1), nameof(MaxRunningStandardUserJobs));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxPauseTime, TimeSpan.FromSeconds(1), nameof(MaxPauseTime));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxRetainedJobs, 1, nameof(MaxRetainedJobs));
         ArgumentOutOfRangeException.ThrowIfLessThan(TimeBudget, TimeSpan.FromSeconds(1), nameof(TimeBudget));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxRecordedResults, 1, nameof(MaxRecordedResults));

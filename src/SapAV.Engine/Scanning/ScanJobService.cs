@@ -41,6 +41,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
     private readonly ILogger _logger;
     private readonly Lock _lock = new();
     private readonly List<ScanJob> _jobs = [];
+    private readonly ITimer _limits;
 
     /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
     internal ScanJobService(
@@ -66,6 +67,9 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger);
         _walker = new ScanTreeWalker(excluded, reparseTag);
         Excluded = excluded;
+        // Review B H3: the pause limit is checked every minute (or more often for a shorter limit).
+        var period = TimeSpan.FromTicks(Math.Min(TimeSpan.FromMinutes(1).Ticks, options.MaxPauseTime.Ticks));
+        _limits = time.CreateTimer(_ => EnforceLimitsSafely(), null, period, period);
     }
 
     /// <summary>The engine's service, as registered in <see cref="EngineHost"/>.</summary>
@@ -151,13 +155,36 @@ public sealed class ScanJobService : IScanJobService, IDisposable
                 return ScanJobStartResult.AlreadyStarted;
             }
 
-            if (_jobs.Count(j => j.State is not ScanJobState.Created && !ScanJobStateMachine.IsTerminal(j.State)) >= _options.MaxConcurrentJobs)
+            // Review B H3: paused jobs still count (they hold threads and results), so standard users together get at most
+            // MaxRunningStandardUserJobs of the slots and the rest stay free for administrator and engine jobs; a pause is
+            // bounded by MaxPauseTime (EnforceLimits).
+            var active = _jobs.Where(j => j.State is not ScanJobState.Created && !ScanJobStateMachine.IsTerminal(j.State)).ToArray();
+            if (active.Length >= _options.MaxConcurrentJobs
+                || (job.Request.Origin == ScanJobOrigin.StandardUser
+                    && active.Count(j => j.Request.Origin == ScanJobOrigin.StandardUser) >= _options.MaxRunningStandardUserJobs))
             {
                 return ScanJobStartResult.TooManyJobs;
             }
 
             return job.Start() ? ScanJobStartResult.Started : ScanJobStartResult.AlreadyStarted;
         }
+    }
+
+    /// <summary>Review B H3: cancels jobs paused for longer than <see cref="ScanJobOptions.MaxPauseTime"/>. Runs on a timer.</summary>
+    /// <returns>The jobs cancelled.</returns>
+    public int EnforceLimits()
+    {
+        int cancelled = 0;
+        foreach (var job in List())
+        {
+            if (job.CancelIfPausedLongerThan(_options.MaxPauseTime))
+            {
+                cancelled++;
+                _logger.LogWarning("Scan job {JobId} was paused for longer than {MaxPause}; cancelled.", job.Id, _options.MaxPauseTime);
+            }
+        }
+
+        return cancelled;
     }
 
     public bool Pause(Guid jobId) => Get(jobId)?.Pause() ?? false;
@@ -185,9 +212,22 @@ public sealed class ScanJobService : IScanJobService, IDisposable
     /// <summary>Cancels every job (service shutdown).</summary>
     public void Dispose()
     {
+        _limits.Dispose();
         foreach (var job in List())
         {
             job.Cancel();
+        }
+    }
+
+    private void EnforceLimitsSafely()
+    {
+        try
+        {
+            EnforceLimits();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogError(ex, "Checking the scan job limits failed.");
         }
     }
 }

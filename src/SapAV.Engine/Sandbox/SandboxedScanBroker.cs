@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using SapAV.Core.Hashing;
 using SapAV.Core.Mitre;
@@ -33,7 +32,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly WorkerSlot[] _slots;
-    private readonly Channel<WorkerSlot> _idle;
+    private readonly PrioritySlotPool<WorkerSlot> _idle;
     private readonly FileFailureTracker _failures;
     private readonly SemaphoreSlim _packageLock = new(1, 1);
     private RulePackage? _package;
@@ -61,11 +60,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
                 _lastError = why;
             },
         }).ToArray();
-        _idle = Channel.CreateBounded<WorkerSlot>(options.WorkerCount);
-        foreach (var slot in _slots)
-        {
-            _idle.Writer.TryWrite(slot);
-        }
+        _idle = new PrioritySlotPool<WorkerSlot>(_slots); // review B H3: engine work first, one worker kept from user jobs
 
         if (options.Isolation != WorkerIsolation.AppContainer)
         {
@@ -97,8 +92,12 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         return await ScanOpenedAsync(item, opened, notes, cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<FileScanReport> ScanOpenedAsync(
+        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default) =>
+        ScanOpenedAsync(item, opened, openNotes, ScanPriority.Normal, cancellationToken);
+
     public async Task<FileScanReport> ScanOpenedAsync(
-        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, CancellationToken cancellationToken = default)
+        ScanItem item, OpenedScanFile opened, IReadOnlyList<ScanNote> openNotes, ScanPriority priority, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(opened);
@@ -113,7 +112,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         }
 
         var package = await CurrentPackageAsync(cancellationToken).ConfigureAwait(false);
-        var slot = await RentAsync(cancellationToken).ConfigureAwait(false);
+        var slot = await RentAsync(priority, cancellationToken).ConfigureAwait(false);
         try
         {
             WorkerProcess worker;
@@ -176,7 +175,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         finally
         {
             slot.Lock.Release();
-            _idle.Writer.TryWrite(slot);
+            _idle.Return(slot, priority);
         }
     }
 
@@ -334,9 +333,9 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         }
     }
 
-    private async Task<WorkerSlot> RentAsync(CancellationToken cancellationToken)
+    private async Task<WorkerSlot> RentAsync(ScanPriority priority, CancellationToken cancellationToken)
     {
-        var slot = await _idle.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var slot = await _idle.RentAsync(priority, cancellationToken).ConfigureAwait(false);
         try
         {
             await slot.Lock.WaitAsync(cancellationToken).ConfigureAwait(false); // a reload may hold it briefly
@@ -344,7 +343,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         }
         catch
         {
-            _idle.Writer.TryWrite(slot);
+            _idle.Return(slot, priority);
             throw;
         }
     }

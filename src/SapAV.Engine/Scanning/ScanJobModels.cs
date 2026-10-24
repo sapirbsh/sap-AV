@@ -17,6 +17,9 @@ public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Tri
     /// </summary>
     internal IScanAccessCheck? Access { get; init; }
 
+    /// <summary>Who asked (review B H3): capacity reservation, the pause / orphan limits and the worker priority depend on it.</summary>
+    internal ScanJobOrigin Origin { get; init; } = ScanJobOrigin.Engine;
+
     /// <exception cref="ArgumentException">No paths, or a path that isn't fully qualified.</exception>
     internal void Validate()
     {
@@ -44,6 +47,19 @@ public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Tri
             throw new ArgumentOutOfRangeException(nameof(TimeBudget), budget, "The time budget must be positive.");
         }
     }
+}
+
+/// <summary>Who created a scan job (review B H3).</summary>
+public enum ScanJobOrigin
+{
+    /// <summary>The engine itself (scheduled, startup, later real-time follow-ups): highest worker priority.</summary>
+    Engine,
+
+    /// <summary>An administrator over the pipe.</summary>
+    Administrator,
+
+    /// <summary>A standard user over the pipe: at most <see cref="ScanJobOptions.MaxRunningStandardUserJobs"/> run at once.</summary>
+    StandardUser,
 }
 
 /// <summary>What the job did with a file after the scan.</summary>

@@ -32,7 +32,7 @@ internal readonly record struct PipeReply(PipeStatus Status, object? Body = null
 /// </list>
 /// Malformed bodies (<see cref="JsonException"/>, model <see cref="ArgumentException"/>s) become BadRequest replies.
 /// </summary>
-internal sealed class PipeRequestHandler
+internal sealed class PipeRequestHandler : IDisposable
 {
     private readonly IScanJobService _jobs;
     private readonly IQuarantineService? _quarantine;
@@ -41,6 +41,7 @@ internal sealed class PipeRequestHandler
     private readonly PipeServerOptions _options;
     private readonly ILogger _logger;
     private readonly Func<string, int> _driveType;
+    private readonly ITimer _prune;
 
     public PipeRequestHandler(
         IScanJobService jobs, IQuarantineService? quarantine, PipeServerOptions options, TimeProvider time, ILogger logger,
@@ -53,6 +54,9 @@ internal sealed class PipeRequestHandler
         _registry = new JobRegistry(jobs, options, time);
         _rate = new UserRateLimiter(time, options.RequestsPerSecond, options.RequestBurst);
         _driveType = driveType ?? PipeNative.DriveType;
+
+        // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
+        _prune = time.CreateTimer(_ => PruneSafely(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     internal JobRegistry Registry => _registry;
@@ -64,6 +68,7 @@ internal sealed class PipeRequestHandler
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(request);
+        _registry.Seen(session, session.Identity.User);
         if (!_rate.TryAcquire(session.Identity.User))
         {
             return PipeReply.Fail(PipeStatus.RateLimited, "Too many requests; slow down.");
@@ -109,6 +114,20 @@ internal sealed class PipeRequestHandler
 
     /// <summary>The connection ended.</summary>
     public void Disconnected(PipeSession session) => _registry.CancelPendingOf(session);
+
+    public void Dispose() => _prune.Dispose();
+
+    private void PruneSafely()
+    {
+        try
+        {
+            _registry.Prune();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogError(ex, "Pruning the pipe's scan jobs failed.");
+        }
+    }
 
     private static PipeReply? NoBody(PipeRequest request) =>
         request.Body is null or { ValueKind: JsonValueKind.Null } ? null : PipeReply.Fail(PipeStatus.BadRequest, $"{request.Kind} takes no body.");
@@ -166,7 +185,11 @@ internal sealed class PipeRequestHandler
         }
 
         var access = client.IsAdmin ? null : new ClientScanAccess(client.Duplicate());
-        var (job, status, error) = _registry.TryCreate(client, session, new ScanJobRequest(roots, ScanTrigger.CustomScan), access);
+        var jobRequest = new ScanJobRequest(roots, ScanTrigger.CustomScan)
+        {
+            Origin = client.IsAdmin ? ScanJobOrigin.Administrator : ScanJobOrigin.StandardUser, // review B H3
+        };
+        var (job, status, error) = _registry.TryCreate(client, session, jobRequest, access);
         if (job is null)
         {
             return PipeReply.Fail(status, error);
