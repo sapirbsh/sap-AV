@@ -375,6 +375,31 @@ M3, M4, L1 and L4 are fixed in B3.
 - **D1 (L6):** a writer holding a writable mapped view gets around deny-writers sharing (a scan race on the attacker's
   own file, an evasion, not a quarantine abuse).
 
+**Carried over from the B6 review (CLEAN, no Critical/High; Medium/Low).** The CustomSD bit values were checked against
+the live Windows defaults for classic logs.
+- **D3 (M1):** "clear once" doesn't revoke a write handle opened during the brief window between creating the log key and
+  writing CustomSD, and a rerun after a partial failure skips the clear. Fix:
+  - create the log key and its values in one KTM transaction (`RegCreateKeyTransacted`);
+  - clear whenever the source wasn't already in our log before this run;
+  - tell the user that a reboot (or Event Log service restart) closes handles opened before the CustomSD took effect.
+- **B3 / X2 (M2):** the writer trusts the registration but never checks the log's actual SD. A GPO or
+  `wevtutil sl sap-AV /ca:` could widen it silently. At startup and on each recheck, verify the CustomSD with
+  `EventLogCustomSd.IsExpected`; on a mismatch, report "log integrity: degraded" (and recheck the message DLL path).
+- **D3 (L1):** a mapped or SUBST drive letter passes the message DLL path check. Require DRIVE_FIXED, compare
+  `GetFinalPathNameByHandle` with the input, and reject `:` after index 2.
+- **D3 (L2):** uninstall + reinstall in the same boot clears the reused .evtx and wipes old evidence. Back it up first
+  (`ClearLog(backupPath)` / `EvtExportLog`).
+- **B6 follow-up / tester (L3):** the real test has no positive control. Show the same filtered token *can* write to a
+  default-SD throwaway log, so ERROR_ACCESS_DENIED is proven to come from our CustomSD.
+- **X2 (L4):** the guard test can be bypassed by aliasing (target-typed `new`, `using` aliases, concatenated registry
+  paths, a second ReportEvent P/Invoke). Add those patterns; a Roslyn analyzer would be more robust.
+- **B3 (L5):** one transient registry error skips alerts for the whole 5-minute recheck interval. Retry quickly with
+  backoff after errors.
+- **X2 (L6):** right after a same-boot migration, the service may briefly still map the source to Application. Read the
+  first event back after migrating, or recheck after a few seconds.
+- **X2 docs (L7):** users can still write Application events with look-alike sources (`sap-AV ` with a trailing space,
+  homoglyphs). SIEM docs must say: filter on `Channel == "sap-AV"`, never on the provider name alone.
+
 **Carried over from the B4 review (Low).** H1 (accept loop killed by an early close), H2 (instance count reaching 0 →
 pipe-name takeover), H3 (junction swap during a walk), M1 (slot exhaustion before Hello), M2 (SYSTEM following
 symlinks in client roots → SMB/NTLM coercion), M3 (jobs keyed by SID only) and L1, L5, L6, L7 are fixed in B4.

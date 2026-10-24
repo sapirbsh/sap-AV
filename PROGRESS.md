@@ -7,7 +7,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B5 done, B6 built (review running) |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, all steps B1–B6 done; section B tester pass running |
 | C — Scan modes | Not started |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
@@ -65,7 +65,7 @@ pass comes at the end.
 | B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
 | B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
 | B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Done** (`009d580`…`3b12c01`; review fixes `96a44de`, `d6b7cb2`, `866958e`, `88bac75`) |
-| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | **Built** (`6f44479`, `f28b0d1`); immediate review running |
+| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | **Done** (`6f44479`, `f28b0d1`; review CLEAN, Medium/Low → ROADMAP) |
 
 ## Current status (2026-10-25)
 
@@ -81,8 +81,8 @@ follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
 
 **B6 is built** (`6f44479`, `f28b0d1`): a dedicated `sap-AV` log only SYSTEM + Administrators can write (Event Log Readers
 read), migration from the Application log, and the installer refuses a message DLL in a user-writable folder (so it works
-once D3 installs under Program Files, not from a dev build). **Now:** B6's immediate review, then the section B tester
-+ reviewer pass.
+once D3 installs under Program Files, not from a dev build). B6's review came back **CLEAN** (the permission bits match the live Windows defaults). **Now:** the section B
+tester pass, then the section B reviewer pass. After that, section B is done and section C (scan modes) starts.
 
 **Done in section B so far**
 - **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
