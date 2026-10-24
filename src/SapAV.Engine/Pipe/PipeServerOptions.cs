@@ -26,6 +26,12 @@ public sealed class PipeServerOptions
     /// <summary>A connection with no request and no subscription for this long is closed.</summary>
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
 
+    /// <summary>
+    /// The idle limit for a connection with job subscriptions (review B4 L6): long, since a GUI may only listen, but finite,
+    /// so a subscription can't hold a connection slot forever. A client resets it with any request (e.g. GetStatus).
+    /// </summary>
+    public TimeSpan SubscribedIdleTimeout { get; set; } = TimeSpan.FromHours(8);
+
     /// <summary>Once a frame header arrived, its body must arrive within this (slow-sender protection).</summary>
     public TimeSpan ReadTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
@@ -68,6 +74,7 @@ public sealed class PipeServerOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxConnectionsPerUser, 1, nameof(MaxConnectionsPerUser));
         ArgumentOutOfRangeException.ThrowIfLessThan(HelloTimeout, TimeSpan.FromMilliseconds(10), nameof(HelloTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(IdleTimeout, TimeSpan.FromMilliseconds(10), nameof(IdleTimeout));
+        ArgumentOutOfRangeException.ThrowIfLessThan(SubscribedIdleTimeout, TimeSpan.FromMilliseconds(10), nameof(SubscribedIdleTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(ReadTimeout, TimeSpan.FromMilliseconds(10), nameof(ReadTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(WriteTimeout, TimeSpan.FromMilliseconds(10), nameof(WriteTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPendingJobsPerUser, 1, nameof(MaxPendingJobsPerUser));

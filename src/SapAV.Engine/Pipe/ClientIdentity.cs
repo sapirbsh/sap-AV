@@ -84,6 +84,9 @@ public sealed class TokenClientIdentity : IClientIdentity
     public static TokenClientIdentity ForCurrentProcess() =>
         FromToken(PipeNative.DuplicateProcessTokenForIdentification(), Environment.ProcessId);
 
+    /// <summary>The held token's SECURITY_IMPERSONATION_LEVEL (1 = identification), for tests.</summary>
+    internal int? TokenImpersonationLevel => PipeNative.TokenImpersonationLevel(_token);
+
     public bool IsGranted(byte[] securityDescriptor, uint desiredAccess)
     {
         ArgumentNullException.ThrowIfNull(securityDescriptor);
@@ -127,6 +130,23 @@ public sealed class PipeClientIdentityResolver : IClientIdentityResolver
             token.Dispose();
             failure = "the client token is anonymous";
             return null;
+        }
+
+        // Review B4 L5: keep only an identification-level copy (enough for AccessCheck and membership); the engine never
+        // holds a token it could impersonate the client with.
+        var original = token;
+        try
+        {
+            token = PipeNative.DuplicateIdentification(original);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            failure = $"the client token can't be copied ({ex.NativeErrorCode})";
+            return null;
+        }
+        finally
+        {
+            original.Dispose();
         }
 
         if (PipeNative.TokenIntegrityRid(token) is not { } rid || rid < MediumIntegrityRid)

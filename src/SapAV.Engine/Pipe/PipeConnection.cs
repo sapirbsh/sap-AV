@@ -109,7 +109,7 @@ internal sealed class PipeConnection : IPipeEventSink
                 }
 
                 TimeSpan wait = !session.HelloDone ? helloDeadline - DateTime.UtcNow
-                    : session.HasSubscriptions ? Timeout.InfiniteTimeSpan
+                    : session.HasSubscriptions ? _options.SubscribedIdleTimeout
                     : _options.IdleTimeout;
                 if (!session.HelloDone && wait <= TimeSpan.Zero)
                 {
