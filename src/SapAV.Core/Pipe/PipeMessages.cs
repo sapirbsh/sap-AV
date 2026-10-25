@@ -196,6 +196,7 @@ public enum QuarantineOutcome
     Failed,
     StoreFull,
     EngineFolder,
+    QuotaExceeded,
 }
 
 [JsonConverter(typeof(StrictEnumConverter<RestoreOutcome>))]

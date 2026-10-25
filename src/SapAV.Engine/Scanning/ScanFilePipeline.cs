@@ -13,12 +13,31 @@ internal sealed record ScanVerdictOutcome(ScanFileAction Action, string? Detail 
 }
 
 /// <summary>
+/// Section B M1 / M2: whose budgets a job's alerts, auto-quarantines and quarantine quota count against. Engine jobs
+/// (no requester) use the engine's budget for their trigger; a job requested over the pipe uses the requesting user's,
+/// and a standard user's auto-quarantines also count against that user's quarantine quota.
+/// </summary>
+internal sealed record ScanBudget(ScanTrigger Trigger, System.Security.Principal.SecurityIdentifier? Requester = null, bool IsStandardUser = false)
+{
+    public global::SapAV.Engine.Alerts.AlertBudget Alerts => Requester is null
+        ? global::SapAV.Engine.Alerts.AlertBudget.ForEngine(Trigger)
+        : global::SapAV.Engine.Alerts.AlertBudget.ForRequester(Requester);
+
+    /// <summary>The per-user quarantine quota applies (standard users only; administrators and the engine use the global quota).</summary>
+    public Quarantine.QuarantineRequester? Quota => IsStandardUser && Requester is not null ? new(Requester) : null;
+
+    public static ScanBudget Of(ScanJobRequest request) =>
+        new(request.Trigger, request.Requester, request.Origin == ScanJobOrigin.StandardUser);
+}
+
+/// <summary>
 /// Runs after a file is scanned, while the scan's handle is still open: alerts and the quarantine decision. Fake it in tests.
 /// </summary>
 internal interface IScanVerdictHandler
 {
     /// <param name="opened">The scan's own handle (null if the file couldn't be opened). Not closed here.</param>
-    Task<ScanVerdictOutcome> HandleAsync(FileScanReport report, OpenedScanFile? opened, CancellationToken cancellationToken);
+    /// <param name="budget">The job's budgets; null = the engine's for the report's trigger.</param>
+    Task<ScanVerdictOutcome> HandleAsync(FileScanReport report, OpenedScanFile? opened, ScanBudget? budget, CancellationToken cancellationToken);
 
     /// <summary>The job ended (any final state): e.g. emit the alert summary.</summary>
     void JobFinished(ScanJob job);
@@ -49,7 +68,7 @@ internal sealed class ScanFilePipeline(
     /// <param name="priority">Who the scan is for, for the next free worker (review B H3).</param>
     public async Task<ScanJobFileResult?> ProcessAsync(
         string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
-        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false)
+        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false, ScanBudget? budget = null)
     {
         string step = "open";
         try
@@ -89,7 +108,7 @@ internal sealed class ScanFilePipeline(
             bytesScanned(report.Hash.Length ?? 0);
 
             step = "post-scan";
-            var outcome = handler is null ? ScanVerdictOutcome.Nothing : await handler.HandleAsync(report, opened, jobToken).ConfigureAwait(false);
+            var outcome = handler is null ? ScanVerdictOutcome.Nothing : await handler.HandleAsync(report, opened, budget, jobToken).ConfigureAwait(false);
             var result = ToResult(report, outcome);
             return skip is { } why ? result with { SkipReason = why } : result;
         }

@@ -96,11 +96,24 @@ internal sealed class RecordingQuarantine : IQuarantineService
 
     public List<QuarantineEntry> Entries { get; } = [];
 
-    public Task<QuarantineResult> QuarantineAsync(FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default)
+    /// <summary>The requester of each quarantine, in order (null = engine-initiated).</summary>
+    public List<QuarantineRequester?> Requesters { get; } = [];
+
+    /// <summary>When set, every quarantine returns this status instead.</summary>
+    public QuarantineStatus? Answer { get; set; }
+
+    public Task<QuarantineResult> QuarantineAsync(
+        FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default, QuarantineRequester? requester = null)
     {
         lock (Quarantined)
         {
             Quarantined.Add(report);
+            Requesters.Add(requester);
+        }
+
+        if (Answer is { } answer)
+        {
+            return Task.FromResult(new QuarantineResult(answer, "answer"));
         }
 
         return Task.FromResult(new QuarantineResult(QuarantineStatus.Quarantined, "ok",
@@ -108,7 +121,7 @@ internal sealed class RecordingQuarantine : IQuarantineService
     }
 
     public Task<QuarantineResult> QuarantineHandleAsync(SafeFileHandle handle, FileScanReport report, Guid? alertId = null,
-        CancellationToken cancellationToken = default) => QuarantineAsync(report, alertId, cancellationToken);
+        CancellationToken cancellationToken = default, QuarantineRequester? requester = null) => QuarantineAsync(report, alertId, cancellationToken, requester);
 
     public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default)
     {

@@ -35,9 +35,11 @@ internal sealed class HandlerHarness : IDisposable
 
     private readonly List<PipeSession> _sessions = [];
 
-    public HandlerHarness(TimeProvider? time = null, Action<PipeServerOptions>? configure = null, Func<string, int>? driveType = null)
+    public HandlerHarness(
+        TimeProvider? time = null, Action<PipeServerOptions>? configure = null, Func<string, int>? driveType = null, Action<ScanJobHarness>? setup = null)
     {
         Jobs = new ScanJobHarness(time);
+        setup?.Invoke(Jobs); // before the job service exists (e.g. a verdict handler)
         configure?.Invoke(Options);
         Handler = new PipeRequestHandler(Jobs.Service, Quarantine, Options, Jobs.Time, NullLogger.Instance, driveType ?? (_ => 3));
     }

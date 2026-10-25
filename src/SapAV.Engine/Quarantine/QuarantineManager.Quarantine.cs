@@ -18,7 +18,8 @@ public sealed partial class QuarantineManager
     private const uint RequiredGranted = 0x1 | N.Delete | N.WriteDac;
 
     /// <inheritdoc/>
-    public Task<QuarantineResult> QuarantineAsync(FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default)
+    public Task<QuarantineResult> QuarantineAsync(
+        FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default, QuarantineRequester? requester = null)
     {
         ArgumentNullException.ThrowIfNull(report);
         cancellationToken.ThrowIfCancellationRequested();
@@ -29,12 +30,13 @@ public sealed partial class QuarantineManager
         }
 
         // Cancellation is honoured until the journal is written; after that the operation always runs to a consistent end.
-        return Task.Run(() => QuarantineByPath(store, key, report, scannedPath, alertId, cancellationToken), CancellationToken.None);
+        return Task.Run(() => QuarantineByPath(store, key, report, scannedPath, alertId, requester, cancellationToken), CancellationToken.None);
     }
 
     /// <inheritdoc/>
     public Task<QuarantineResult> QuarantineHandleAsync(
-        SafeFileHandle handle, FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default)
+        SafeFileHandle handle, FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default,
+        QuarantineRequester? requester = null)
     {
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(report);
@@ -51,7 +53,7 @@ public sealed partial class QuarantineManager
                 "The handle must be open with read, DELETE and WRITE_DAC access (and deny writers)."));
         }
 
-        return Task.Run(() => QuarantineByHandle(store, key, handle, report, scannedPath, alertId, cancellationToken), CancellationToken.None);
+        return Task.Run(() => QuarantineByHandle(store, key, handle, report, scannedPath, alertId, requester, cancellationToken), CancellationToken.None);
     }
 
     /// <summary>
@@ -142,6 +144,43 @@ public sealed partial class QuarantineManager
         }
     }
 
+    /// <summary>
+    /// Section B M1: the items the requester already has in the store (by the signed <see cref="QuarantineMetadata.RequestedBy"/>),
+    /// plus this one, must stay within <see cref="QuarantineOptions.MaxItemsPerRequester"/> and
+    /// <see cref="QuarantineOptions.MaxBytesPerRequester"/>. Unreadable metadata doesn't count for anyone.
+    /// </summary>
+    private QuarantineResult? CheckRequesterQuota(QuarantineStore store, byte[] key, QuarantineRequester requester, long length)
+    {
+        string sid = requester.User.Value;
+        long items = 0, bytes = 0;
+        foreach (var id in store.EnumerateItemIds())
+        {
+            QuarantineMetadata metadata;
+            try
+            {
+                metadata = store.ReadMetadata(id, key);
+            }
+            catch (Exception ex) when (ex is QuarantineMetadataException || IsIoFailure(ex))
+            {
+                continue;
+            }
+
+            if (metadata.State != QuarantineState.Restored && string.Equals(metadata.RequestedBy, sid, StringComparison.Ordinal))
+            {
+                items++;
+                bytes += metadata.SizeBytes;
+            }
+        }
+
+        string? why =
+            items + 1 > _options.MaxItemsPerRequester ? $"you already have {items} item(s) in quarantine (the limit is {_options.MaxItemsPerRequester})"
+            : bytes + length > _options.MaxBytesPerRequester
+                ? $"your items take {bytes} bytes and this file needs {length} more, over your {_options.MaxBytesPerRequester}-byte quota"
+            : null;
+        return why is null ? null
+            : new QuarantineResult(QuarantineStatus.QuotaExceeded, $"Your quarantine quota is used up: {why}. Ask an administrator, or restore or remove items.");
+    }
+
     private bool TryGetStore(out QuarantineStore store, out byte[] key, out QuarantineResult refusal)
     {
         refusal = new QuarantineResult(QuarantineStatus.StoreUnavailable, "The quarantine store is not available.");
@@ -149,7 +188,8 @@ public sealed partial class QuarantineManager
     }
 
     /// <summary>Path entry: opens the scanned path with no reparse point anywhere (folders and the file itself).</summary>
-    private QuarantineResult QuarantineByPath(QuarantineStore store, byte[] key, FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
+    private QuarantineResult QuarantineByPath(
+        QuarantineStore store, byte[] key, FileScanReport report, string scannedPath, Guid? alertId, QuarantineRequester? requester, CancellationToken ct)
     {
         using var lease = _locks.TryAcquire("path:" + scannedPath);
         if (lease is null)
@@ -166,13 +206,14 @@ public sealed partial class QuarantineManager
                 return Log(scannedPath, new(MapOpenFailure(failure, error), $"Can't open the file: {reason}"));
             }
 
-            return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: true, directory!, report, scannedPath, alertId, ct));
+            return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: true, directory!, report, scannedPath, alertId, requester, ct));
         }
     }
 
     /// <summary>Handle entry (B3): the scan's own writer-denied handle; it is never reopened by path and not closed here.</summary>
     private QuarantineResult QuarantineByHandle(
-        QuarantineStore store, byte[] key, SafeFileHandle file, FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
+        QuarantineStore store, byte[] key, SafeFileHandle file, FileScanReport report, string scannedPath, Guid? alertId, QuarantineRequester? requester,
+        CancellationToken ct)
     {
         using var lease = _locks.TryAcquire("path:" + scannedPath);
         if (lease is null)
@@ -191,7 +232,7 @@ public sealed partial class QuarantineManager
             return Log(scannedPath, new(MapOpenFailure(failure, 0), $"The file's folder can't be verified: {reason}"));
         }
 
-        return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: false, directory, report, scannedPath, alertId, ct));
+        return Log(scannedPath, QuarantineCore(store, key, file, ownsHandle: false, directory, report, scannedPath, alertId, requester, ct));
     }
 
     private QuarantineResult Log(string path, QuarantineResult result)
@@ -210,7 +251,7 @@ public sealed partial class QuarantineManager
 
     private QuarantineResult QuarantineCore(
         QuarantineStore store, byte[] key, SafeFileHandle file, bool ownsHandle, SafeFileHandle originalDirectory,
-        FileScanReport report, string scannedPath, Guid? alertId, CancellationToken ct)
+        FileScanReport report, string scannedPath, Guid? alertId, QuarantineRequester? requester, CancellationToken ct)
     {
         // Bound to the scanned object: same volume + 128-bit file ID, and the handle is at exactly the scanned path.
         var now = FileIdentity.TryCapture(file);
@@ -244,6 +285,18 @@ public sealed partial class QuarantineManager
             return full;
         }
 
+        // Section B M1: one request of a user at a time (so two can't both pass the quota check), within their quota.
+        using var requesterLease = requester is null ? null : _locks.TryAcquire("requester:" + requester.User.Value);
+        if (requester is not null && requesterLease is null)
+        {
+            return new(QuarantineStatus.Busy, "Another quarantine requested by the same user is running.");
+        }
+
+        if (requester is not null && CheckRequesterQuota(store, key, requester, report.Hash.Length!.Value) is { } over)
+        {
+            return over;
+        }
+
         // The path lock doesn't see other spellings of the same file: lock the file object itself.
         using var fileLease = _locks.TryAcquire($"file:{now.VolumeSerialNumber:x16}:{now.FileId}");
         if (fileLease is null)
@@ -255,7 +308,7 @@ public sealed partial class QuarantineManager
         QuarantineMetadata metadata;
         try
         {
-            metadata = BuildMetadata(file, info, now, report, scannedPath, alertId, sameVolume);
+            metadata = BuildMetadata(file, info, now, report, scannedPath, alertId, sameVolume) with { RequestedBy = requester?.User.Value };
             ct.ThrowIfCancellationRequested();
             store.WriteMetadata(metadata, key);
         }

@@ -112,6 +112,12 @@ public sealed record QuarantineMetadata
     /// <summary>The alert that led to the quarantine, if any.</summary>
     public Guid? AlertId { get; init; }
 
+    /// <summary>
+    /// Section B M1: the SID of the standard user the quarantine was done for (their own request, or an auto-quarantine in
+    /// their own scan job), counted against that user's quota; null for engine-initiated quarantines.
+    /// </summary>
+    public string? RequestedBy { get; init; }
+
     /// <summary>Always <see cref="QuarantineContentTransform.Algorithm"/>.</summary>
     public required string TransformAlgorithm { get; init; }
 
@@ -148,11 +154,17 @@ public sealed record QuarantineMetadata
         Check(TransformAlgorithm == QuarantineContentTransform.Algorithm, "Unknown transform.");
         Check(TransformKey is { Length: QuarantineContentTransform.KeyLength }, "Invalid transform key.");
         Check(AlertId != Guid.Empty, "Empty alert ID.");
+        Check(RequestedBy is null || IsSidString(RequestedBy), "Invalid requester SID.");
         Check(State == QuarantineState.Restoring
                 ? RestoreTempName is not null && QuarantinePath.IsRestoreTempName(RestoreTempName)
                 : RestoreTempName is null,
             "The restore temp name must be set exactly while restoring.");
     }
+
+    /// <summary>S-1-… with decimal parts only, at most 184 characters (the longest SID string).</summary>
+    private static bool IsSidString(string value) =>
+        value.Length is > 4 and <= 184 && value.StartsWith("S-1-", StringComparison.Ordinal)
+        && value[4..].Split('-').All(p => p.Length is > 0 and <= 20 && p.All(char.IsAsciiDigit));
 
     private static void Check(bool condition, string message)
     {

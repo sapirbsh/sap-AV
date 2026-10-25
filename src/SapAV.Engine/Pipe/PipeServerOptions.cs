@@ -68,6 +68,15 @@ public sealed class PipeServerOptions
     /// <summary>Request burst per user (token bucket size).</summary>
     public int RequestBurst { get; set; } = 40;
 
+    /// <summary>
+    /// Section B M1: QuarantineFromResult requests per minute per standard user (token bucket refill; administrators are not
+    /// limited). Each one also counts against the user's quarantine quota (<c>Quarantine:MaxItemsPerRequester</c> / bytes).
+    /// </summary>
+    public double QuarantineRequestsPerMinute { get; set; } = 10;
+
+    /// <summary>QuarantineFromResult burst per standard user (token bucket size).</summary>
+    public int QuarantineRequestBurst { get; set; } = 10;
+
     /// <summary>Test seam: the pipe name. Internal so configuration can't move the engine's pipe.</summary>
     internal string PipeName { get; set; } = Core.Pipe.PipeProtocol.PipeName;
 
@@ -92,6 +101,8 @@ public sealed class PipeServerOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(EventQueueCapacity, 1, nameof(EventQueueCapacity));
         ArgumentOutOfRangeException.ThrowIfLessThan(RequestsPerSecond, 0.01, nameof(RequestsPerSecond));
         ArgumentOutOfRangeException.ThrowIfLessThan(RequestBurst, 1, nameof(RequestBurst));
+        ArgumentOutOfRangeException.ThrowIfLessThan(QuarantineRequestsPerMinute, 0.01, nameof(QuarantineRequestsPerMinute));
+        ArgumentOutOfRangeException.ThrowIfLessThan(QuarantineRequestBurst, 1, nameof(QuarantineRequestBurst));
         ArgumentException.ThrowIfNullOrWhiteSpace(PipeName, nameof(PipeName));
     }
 }

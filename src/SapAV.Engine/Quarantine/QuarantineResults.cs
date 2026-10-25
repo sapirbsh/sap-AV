@@ -56,6 +56,9 @@ public enum QuarantineStatus
 
     /// <summary>The file is in one of the engine's own folders (data, store, install, rules); those are never quarantined.</summary>
     EngineFolder,
+
+    /// <summary>Section B M1: the requesting user's quarantine quota (items or bytes) would be exceeded; the file is left in place.</summary>
+    QuotaExceeded,
 }
 
 /// <summary>Result of a quarantine attempt.</summary>
@@ -158,7 +161,9 @@ public interface IQuarantineService
     /// client and checks that the client token is granted DELETE on the file (or DELETE_CHILD on its folder), and refuses
     /// otherwise. Engine-initiated quarantine (real-time / scan jobs acting on a Malicious verdict) needs no such check.
     /// </remarks>
-    Task<QuarantineResult> QuarantineAsync(Core.Scanning.FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default);
+    /// <param name="requester">Section B M1: the standard user it is done for (their quota applies); null = engine-initiated.</param>
+    Task<QuarantineResult> QuarantineAsync(
+        Core.Scanning.FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default, QuarantineRequester? requester = null);
 
     /// <summary>
     /// Quarantines through an already-open handle (the scan.s own handle, B3), so the file is never reopened by path.
@@ -169,7 +174,7 @@ public interface IQuarantineService
     /// <remarks>The B4 authorisation rule of <see cref="QuarantineAsync"/> applies here too.</remarks>
     Task<QuarantineResult> QuarantineHandleAsync(
         Microsoft.Win32.SafeHandles.SafeFileHandle handle, Core.Scanning.FileScanReport report, Guid? alertId = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, QuarantineRequester? requester = null);
 
     /// <summary>
     /// Restores an item to its recorded original path only (explicit user request). Emits a QuarantineRestored alert.
@@ -182,3 +187,11 @@ public interface IQuarantineService
     /// <summary>One item, or null if there is none with that ID.</summary>
     QuarantineEntry? Get(string itemId);
 }
+
+/// <summary>
+/// Section B M1: the standard user a quarantine is done for (QuarantineFromResult over the pipe, or an auto-quarantine in
+/// that user's own job). Such quarantines count against <see cref="QuarantineOptions.MaxBytesPerRequester"/> and
+/// <see cref="QuarantineOptions.MaxItemsPerRequester"/> (recorded in the item's signed metadata), so one user can't fill the
+/// store for everyone. Engine-initiated quarantines (no requester) are bound only by the global quota.
+/// </summary>
+public sealed record QuarantineRequester(System.Security.Principal.SecurityIdentifier User);

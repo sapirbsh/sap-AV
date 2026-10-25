@@ -250,10 +250,12 @@ public sealed class ScanVerdictHandlerTests : IDisposable
     {
         public bool IsAvailable => false;
 
-        public Task<QuarantineResult> QuarantineAsync(FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default) =>
+        public Task<QuarantineResult> QuarantineAsync(FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default,
+            QuarantineRequester? requester = null) =>
             throw new NotSupportedException();
 
-        public Task<QuarantineResult> QuarantineHandleAsync(SafeFileHandle handle, FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default) =>
+        public Task<QuarantineResult> QuarantineHandleAsync(SafeFileHandle handle, FileScanReport report, Guid? alertId = null, CancellationToken cancellationToken = default,
+            QuarantineRequester? requester = null) =>
             throw new NotSupportedException();
 
         public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default) => throw new NotSupportedException();

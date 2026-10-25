@@ -51,6 +51,7 @@ public sealed class ScanJob : IDisposable
     private readonly List<ScanJobWarning> _warnings = [];
     private readonly string?[] _current;
     private readonly TimeSpan _budget;
+    private readonly ScanBudget _budgets;
 
     private ScanJobState _state = ScanJobState.Created;
     private int _busy;
@@ -82,6 +83,7 @@ public sealed class ScanJob : IDisposable
         _time = time;
         _logger = logger;
         _budget = request.TimeBudget ?? options.TimeBudget;
+        _budgets = ScanBudget.Of(request);
         _estimator = new ThroughputEstimator(time);
         _current = new string?[options.ThreadsPerJob];
         _queue = Channel.CreateBounded<ScanTreeEntry>(new BoundedChannelOptions(options.QueueCapacity)
@@ -507,7 +509,7 @@ public sealed class ScanJob : IDisposable
         try
         {
             result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name,
-                    PriorityOf(Request.Origin), Request.AllowRemoteFiles)
+                    PriorityOf(Request.Origin), Request.AllowRemoteFiles, _budgets)
                 .GetAwaiter().GetResult();
         }
         finally

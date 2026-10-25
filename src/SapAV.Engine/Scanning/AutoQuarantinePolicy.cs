@@ -136,43 +136,99 @@ internal sealed class AutoQuarantinePolicy
         sid == LocalSystem || sid == Administrators || sid == TrustedInstaller || sid == OwnerRights || sid == CreatorOwner;
 }
 
-/// <summary>Sliding-window limit on automatic quarantines (review B5 M3); thread-safe.</summary>
+/// <summary>
+/// Sliding-window limit on automatic quarantines (review B5 M3); thread-safe. Section B M2 / D1 L2: one window per
+/// budget (<see cref="Alerts.AlertBudget.Key"/>: the engine's per trigger, each requesting user's own), so a user's own
+/// scans can't use up the slots real-time protection needs. At most <see cref="MaxRequesterWindows"/> users get their own
+/// window; further users share one.
+/// </summary>
 internal sealed class AutoQuarantineLimiter(TimeProvider time, int maxPerWindow, TimeSpan window)
 {
-    private readonly Queue<DateTimeOffset> _recent = new();
+    public const int MaxRequesterWindows = 256;
+
+    private const string EngineKey = "engine:*";
+    private const string RequesterOverflowKey = "user:*";
+
+    private readonly Dictionary<string, Slots> _windows = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
-    private DateTimeOffset _burstReportedAt = DateTimeOffset.MinValue;
 
     public int MaxPerWindow => maxPerWindow;
 
     public TimeSpan Window => window;
 
-    /// <summary>Takes one slot; false when <see cref="MaxPerWindow"/> were used in the last <see cref="Window"/>.</summary>
-    /// <param name="firstRefusalInWindow">True for the first refusal of a burst (raise the burst alert once).</param>
-    public bool TryAcquire(out bool firstRefusalInWindow)
+    /// <summary>Takes one slot of the engine's shared window (callers without a budget).</summary>
+    public bool TryAcquire(out bool firstRefusalInWindow) => TryAcquire(EngineKey, out firstRefusalInWindow);
+
+    /// <summary>Takes one slot of <paramref name="budgetKey"/>'s window; false when <see cref="MaxPerWindow"/> were used in the last <see cref="Window"/>.</summary>
+    /// <param name="firstRefusalInWindow">True for the first refusal of a burst in this budget (raise the burst alert once).</param>
+    public bool TryAcquire(string budgetKey, out bool firstRefusalInWindow)
     {
+        ArgumentException.ThrowIfNullOrEmpty(budgetKey);
         var now = time.GetUtcNow();
         lock (_lock)
         {
-            while (_recent.TryPeek(out var oldest) && now - oldest >= window)
+            var slots = SlotsLocked(budgetKey, now);
+            while (slots.Recent.TryPeek(out var oldest) && now - oldest >= window)
             {
-                _recent.Dequeue();
+                slots.Recent.Dequeue();
             }
 
-            if (_recent.Count < maxPerWindow)
+            if (slots.Recent.Count < maxPerWindow)
             {
-                _recent.Enqueue(now);
+                slots.Recent.Enqueue(now);
                 firstRefusalInWindow = false;
                 return true;
             }
 
-            firstRefusalInWindow = now - _burstReportedAt >= window;
+            firstRefusalInWindow = now - slots.BurstReportedAt >= window;
             if (firstRefusalInWindow)
             {
-                _burstReportedAt = now;
+                slots.BurstReportedAt = now;
             }
 
             return false;
         }
+    }
+
+    private Slots SlotsLocked(string key, DateTimeOffset now)
+    {
+        if (_windows.TryGetValue(key, out var slots))
+        {
+            return slots;
+        }
+
+        bool requester = key.StartsWith("user:", StringComparison.Ordinal);
+        if (requester && _windows.Keys.Count(k => k.StartsWith("user:", StringComparison.Ordinal)) >= MaxRequesterWindows)
+        {
+            // Forget idle users first (nothing in their window, no burst to remember); only then share the overflow window.
+            var idle = _windows.Where(w => w.Key.StartsWith("user:", StringComparison.Ordinal) && w.Key != RequesterOverflowKey && IsIdle(w.Value))
+                .Select(w => w.Key).ToArray();
+            foreach (var user in idle)
+            {
+                _windows.Remove(user);
+            }
+
+            if (_windows.Keys.Count(k => k.StartsWith("user:", StringComparison.Ordinal)) >= MaxRequesterWindows)
+            {
+                key = RequesterOverflowKey;
+                if (_windows.TryGetValue(key, out slots))
+                {
+                    return slots;
+                }
+            }
+        }
+
+        slots = new Slots();
+        _windows[key] = slots;
+        return slots;
+
+        bool IsIdle(Slots w) => w.Recent.All(t => now - t >= window) && now - w.BurstReportedAt >= window;
+    }
+
+    private sealed class Slots
+    {
+        public Queue<DateTimeOffset> Recent { get; } = new();
+
+        public DateTimeOffset BurstReportedAt { get; set; } = DateTimeOffset.MinValue;
     }
 }

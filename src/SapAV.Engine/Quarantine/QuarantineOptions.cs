@@ -27,6 +27,15 @@ public sealed class QuarantineOptions
     public long MinFreeSpaceBytes { get; set; } = 2L * 1024 * 1024 * 1024;
 
     /// <summary>
+    /// Section B M1: what one standard user may have in the store through their own requests (QuarantineFromResult, and
+    /// auto-quarantines in their own scan jobs): at most this many bytes (default 512 MiB) ...
+    /// </summary>
+    public long MaxBytesPerRequester { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>... and at most this many items (default 200). Engine-initiated quarantines use only the global quota.</summary>
+    public int MaxItemsPerRequester { get; set; } = 200;
+
+    /// <summary>
     /// Test seam only (internal, so configuration binding can't set it): extra SIDs trusted like SYSTEM and
     /// Administrators, so a non-elevated test process can use a store on a temp root.
     /// </summary>

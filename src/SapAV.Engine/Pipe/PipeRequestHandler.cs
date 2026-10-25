@@ -38,6 +38,7 @@ internal sealed class PipeRequestHandler : IDisposable
     private readonly IQuarantineService? _quarantine;
     private readonly JobRegistry _registry;
     private readonly UserRateLimiter _rate;
+    private readonly UserRateLimiter _quarantineRate;
     private readonly PipeServerOptions _options;
     private readonly ILogger _logger;
     private readonly Func<string, int> _driveType;
@@ -53,6 +54,7 @@ internal sealed class PipeRequestHandler : IDisposable
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _registry = new JobRegistry(jobs, options, time);
         _rate = new UserRateLimiter(time, options.RequestsPerSecond, options.RequestBurst);
+        _quarantineRate = new UserRateLimiter(time, options.QuarantineRequestsPerMinute / 60, options.QuarantineRequestBurst);
         _driveType = driveType ?? PipeNative.DriveType;
 
         // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
@@ -194,6 +196,7 @@ internal sealed class PipeRequestHandler : IDisposable
         {
             Origin = client.IsAdmin ? ScanJobOrigin.Administrator : ScanJobOrigin.StandardUser, // review B H3
             AllowRemoteFiles = request.AllowRemote && client.IsAdmin, // A2 W-A: administrator opt-in only
+            Requester = client.User, // section B M1 / M2: the job's alerts, auto-quarantines and quota count against this user
         };
         var (job, status, error) = _registry.TryCreate(client, session, jobRequest, access);
         if (job is null)
@@ -405,6 +408,13 @@ internal sealed class PipeRequestHandler : IDisposable
             return PipeReply.Fail(PipeStatus.Unavailable, "The quarantine is not available.");
         }
 
+        // Section B M1: a standard user's requests are rate-limited (before the access checks, which cost file opens) and
+        // count against that user's quota (QuotaExceeded); engine-initiated quarantines keep only the global quota.
+        if (!client.IsAdmin && !_quarantineRate.TryAcquire(client.User))
+        {
+            return PipeReply.Fail(PipeStatus.RateLimited, "Too many quarantine requests; try again in a minute.");
+        }
+
         if (!client.IsAdmin)
         {
             switch (ClientAccess.CanDelete(client, report))
@@ -421,7 +431,8 @@ internal sealed class PipeRequestHandler : IDisposable
             }
         }
 
-        var outcome = await quarantine.QuarantineAsync(report, result.AlertId, cancellationToken).ConfigureAwait(false);
+        var requester = client.IsAdmin ? null : new QuarantineRequester(client.User);
+        var outcome = await quarantine.QuarantineAsync(report, result.AlertId, cancellationToken, requester).ConfigureAwait(false);
         _logger.LogInformation("Pipe: user {User} asked to quarantine result {ResultId} of job {JobId}: {Status}.",
             client.User.Value, request.ResultId, job.Id, outcome.Status);
         return PipeReply.Ok(new QuarantineFromResultReply(PipeMapping.Map(outcome.Status), PipeMapping.Text(outcome.Reason), outcome.Entry?.Id));
