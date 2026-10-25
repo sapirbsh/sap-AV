@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1 starting |
+| C — Scan modes | **In progress:** C1 built (review running) |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -99,7 +99,18 @@ machine; 0 build warnings.
 
 ## Current status (2026-10-25)
 
-**Section B is done.** **Now:** section C (scan modes), starting with C1 (Custom Scan).
+**Section B is done.** Section C (scan modes) is in progress.
+
+**C1 (Custom Scan) is built and pushed** (`77be4e0`, `6506d1a`, `9403690`, `83b78d7`):
+- results carry what the results screen needs (verdict, reasons, MITRE, signature, download source, hash, action);
+- network files are refused after open unless an admin allows them;
+- standard users learn nothing about files they can't read;
+- per-user quarantine quota and rate limit, and separate alert/auto-quarantine budgets so user scans can't starve
+  engine alerts;
+- quarantine items are visible only to users who could read the original file;
+- a restored file is owned by the requesting user again.
+
+Tests: Core 1179 + 1 skipped, Engine 399 + 8 skipped. **Now:** C1's immediate review.
 
 **Open for the user**
 - In an **elevated** PowerShell in `C:\Projects\sap-AV`, run
