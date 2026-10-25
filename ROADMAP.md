@@ -606,6 +606,11 @@ YARA rules may override with their own `mitre` meta value.
   | 9002 | AutoQuarantineBurst | Warning | Auto-quarantine rate limit hit (B3) |
   | 9003 | ScanRulesDegraded | Warning | Zero rules loaded, rule-file errors or a failed rule load (B3; counts only, no worker text) |
   | 9004 | QuarantineStoreFull | Error | Quarantine store over quota or below the free-space floor (B3) |
+  | 9005 | QuarantineStoreUnavailable | Error | Quarantine store can't be opened (retried with backoff) (section B) |
+  | 9006 | SandboxUnavailable | Error | No scan worker can start or load rules (section B) |
+  | 9007 | PipeUnavailable | Error | The pipe name is taken or the server can't listen (section B) |
+  | 9008 | EngineFolderUntrusted | Warning | An engine folder failed its ownership/ACL check, so it is scanned, not excluded (section B) |
+  | 9009 | EventLogIntegrityDegraded | Error | The `sap-AV` log's CustomSD or message DLL location changed (section B) |
 
   `AlertAction.NeedsUserConfirmation` (B3) marks a Malicious file that auto-quarantine refused (protected location,
   SYSTEM/TrustedInstaller owner, or unknown owner).

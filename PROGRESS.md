@@ -7,16 +7,15 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | Section | Status |
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
-| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **In progress:** B1 + B2 done, B5 done, B3 done, B1–B6 done, section test + review done; review fixes in progress |
-| C — Scan modes | Not started |
+| B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
+| C — Scan modes | **In progress:** C1 starting |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after the section B test pass): Core 1179 passed + 1 skipped (opt-in on-disk EICAR), Engine 303 passed + 6 skipped (elevated / opt-in
-tests). Core runs in about 14 s after the slow loop tests were shortened. Simulated clean machine: 0 failed.
-Build: 0 warnings (Debug and Release). CI on windows-latest: green.
+Tests (after section B): Core 1179 passed + 1 skipped, Engine 353 passed + 8 skipped. Simulated clean machine: 0 failed.
+Build: 0 warnings (Debug and Release). CI on windows-latest: green up to section B (check the run for `92ce762`).
 
 ## Section A — Detection engine (done)
 
@@ -52,67 +51,66 @@ Build: 0 warnings (Debug and Release). CI on windows-latest: green.
 - CI on GitHub `windows-latest` is green (runs 1–16, confirmed by the user), including the `cmd.exe` Microsoft-signature test.
 - Heuristic thresholds were tested on synthetic PE files only; tune them on real software (A5 follow-up).
 
-## Section B — Engine infrastructure (in progress)
+## Section B — Engine infrastructure (done)
 
-**Order:** B1 → B2 → **B5** → B3 → B4. B5 (the scan-worker sandbox) comes before B3, because B3's scan jobs hand files to
-the worker. B1, B2, B4 and B5 each get their own reviewer pass right after they're built; the section tester + reviewer
-pass comes at the end.
+**Order built:** B1 → B2 → B5 → B3 → B4 → B6, then the section tester + reviewer pass.
 
 | Step | What | Status |
 |---|---|---|
-| B1 | Alert model + Windows Event Log writer (source "sap-AV", structured JSON, event IDs 1001/1002/1003/3001); `Reason` length cap and SIEM-safe URL sanitizing (carried over from A) | **Done** (`6b0e586`, review fixes `80f29a9`) |
-| B2 | Reversible quarantine | **Done** (`08fe657`; review fixes incl. Critical C1 `66b91bb`, `ee4c38d`, `f8b7d76`; follow-up review CLEAN) |
-| B5 | Privilege separation: all file parsing in a low-privilege scan worker | **Done** (`b21a8fb`…`c61d8b2`; review H1 fixed and confirmed closed; Medium/Low → ROADMAP, M-A done in B3) |
-| B3 | Scan job framework (queue, background-priority workers, progress/ETA, pause/resume/cancel) | **Done** (`4523493`…`fa9a712`; review H1 fixed `e2c440d`, follow-ups `ba20903`) |
-| B4 | Named-pipe protocol v1 (engine ↔ GUI) | **Done** (`009d580`…`3b12c01`; review fixes `96a44de`, `d6b7cb2`, `866958e`, `88bac75`) |
-| B6 | Dedicated `sap-AV` event log (only SYSTEM writes), decision X2 M1 | **Done** (`6f44479`, `f28b0d1`; review CLEAN, Medium/Low → ROADMAP) |
+| B1 | Alert model + Windows Event Log writer, `Reason` cap, SIEM-safe URLs | **Done** (`6b0e586`; review: 2 High fixed `80f29a9`) |
+| B2 | Reversible quarantine | **Done** (`08fe657`; review: **Critical C1** fixed `66b91bb`, follow-up review clean) |
+| B5 | Sandboxed scan worker (AppContainer, Job Object, brokered read-only handles) | **Done** (`b21a8fb`…`006ac72`; review H1 fixed and confirmed) |
+| B3 | Scan jobs (queue, pause/resume/cancel, ETA, alert dispatcher, auto-quarantine policy) | **Done** (`4523493`…`ba20903`; review H1 fixed) |
+| B4 | Named pipe engine ↔ GUI (identity, authorization, caps, client library) | **Done** (`009d580`…`88bac75`; review: 3 High fixed) |
+| B6 | Dedicated `sap-AV` event log only SYSTEM + Administrators can write | **Done** (`6f44479`, `f28b0d1`; review clean) |
+
+**What was built**
+- **Alerts:** structured JSON alerts in a dedicated `sap-AV` event log that normal users can't write. They are aggregated
+  and rate-limited, Malicious alerts are never dropped, and health alerts 9001–9009 cover suppression, store full,
+  sandbox/pipe/store unavailable, untrusted engine folders and a widened log.
+- **Quarantine:** reversible, scrambled storage with signed metadata, bound to the exact file that was scanned (by file ID).
+  Restore never follows links or overwrites, and crash recovery leaves either the original or the stored copy intact.
+- **Sandbox:** the SYSTEM engine never parses file contents. A Low-integrity AppContainer worker with no network and
+  Job Object limits does all parsing on read-only handles; crashes, hangs and kept handle copies are detected.
+- **Scan jobs:** low-priority dedicated threads and a handle-bound folder walk with exact names (trailing dots/spaces).
+  Files open without following links. Auto-quarantine refuses system/protected files, user scans can't block admin or
+  engine scans, and paused or abandoned jobs time out.
+- **Pipe:** `\.\pipe\ProtectedPrefix\Administrators\sap-AV.engine`, identity from the pipe, strict 64 KiB JSON frames.
+  Users can only scan what they can read, only see their own jobs, and need delete/write rights to quarantine or restore.
+  The engine survives connection floods and always holds the pipe name.
+- **Resilience:** one failing component never stops the engine; the store retries, and health alerts report problems.
+- **Engine data folder:** `%ProgramData%\sap-AV` is created with a SYSTEM + Administrators ACL. Only verified engine
+  subfolders are excluded from scanning.
+
+**Section review:** the tester pass (`a39440b`) added end-to-end tests through the real pipe → sandboxed worker →
+auto-quarantine → restore. The cross-step reviewer pass found 3 High (user-writable `%ProgramData%\sap-AV`, link-following
+file opens in admin jobs, one user blocking all scans), all fixed (`06fccf1`, `369c037`, `c6b3f5f`, `92ce762`).
+All Medium/Low findings are recorded in `ROADMAP.md` under the step they belong to.
+
+**Tests after section B:** Core 1179 passed + 1 skipped, Engine 353 passed + 8 skipped; 0 failures on the simulated clean
+machine; 0 build warnings.
+
+**Open items carried forward**
+- **To confirm on CI (elevated):** creating the pipe under `ProtectedPrefix\Administrators` as an elevated engine, with a
+  standard user still able to connect. The test only runs elevated, so the next CI run is the real check. If it fails,
+  the pipe-name fallback needs a decision.
+- Admin-configured `ScanJobs:ExcludedFolders` are honoured without the ownership check (an admin setting).
+- A non-elevated dev console run sees its own bin folder as unverified, so it scans it and raises health alert 9008.
 
 ## Current status (2026-10-25)
 
-**B4 (named pipe, engine ↔ GUI) is built and pushed** (`009d580`…`3b12c01`): pipe locked to local authenticated
-users (SYSTEM owns it, first-instance protection), client identity from the pipe, strict 64 KiB JSON frames, `ScanPathPolicy`,
-scans run with the requester's access, per-user job isolation, quarantine/restore authorization, per-user caps, sanitized
-output, and a client library for the GUI (F1). B4's immediate review came back **NOT CLEAN** (3 High, 3 Medium, no Critical): a user could stop the pipe server
-for good (H1), take over the pipe name after draining all instances (H2), or list another user's folders through a
-junction swap during a paused scan (H3); a symlinked root could make SYSTEM authenticate to an attacker's SMB server (M2).
-**All fixed** (`96a44de`, `d6b7cb2`, `866958e`, `88bac75`): the server survives early-close floods and always holds the pipe
-name; folder walks are bound to handles (junction swaps can't redirect, which also closes B3 M1); client roots never
-follow links; admin-created jobs are admin-only. Low findings are in ROADMAP.md.
-
-**B6 is built** (`6f44479`, `f28b0d1`): a dedicated `sap-AV` log only SYSTEM + Administrators can write (Event Log Readers
-read), migration from the Application log, and the installer refuses a message DLL in a user-writable folder (so it works
-once D3 installs under Program Files, not from a dev build). B6's review came back **CLEAN** (the permission bits match the live Windows defaults). The **section B tester pass** is done (`a39440b`): end-to-end tests through the real pipe, sandboxed worker,
-auto-quarantine and restore (also inside the real AppContainer), pause/resume/cancel and disconnect through the pipe,
-and a positive control for the real Event Log test. It also fixed a test-cleanup bug that leaked old sandbox profiles.
-No production bugs found.
-
-The **section B reviewer pass** (cross-step) came back **NOT CLEAN**, with 3 High and no Critical:
-- **H1:** standard users can write into `%ProgramData%sap-AV`, which was excluded from scanning as a whole, so it was a
-  hiding place.
-- **H2:** admin and engine jobs still followed links when opening files.
-- **H3:** one user could block all scanning with two paused jobs.
-These are being fixed now, together with startup resilience + health alerts and a protected pipe name. The other
-Medium/Low findings are in ROADMAP.md. After the fixes, section B is done and section C (scan modes) starts. After that, section B is done and section C (scan modes) starts.
-
-**Done in section B so far**
-- **B1** Event Log alerts; review found 2 High (sources auto-registering), fixed.
-- **B2** reversible quarantine; review found **Critical C1** (quarantine could be redirected into deleting another
-  file as SYSTEM), fixed and confirmed closed.
-- **B5** sandboxed scan worker (AppContainer, Job Object, read-only brokered handles). The 0xc0000142 startup failure
-  was a blocked `conhost.exe`; fixed by starting the worker detached. Review H1 (worker process DACL) fixed and confirmed.
-- **B3** scan jobs (queue, pause/resume/cancel, ETA, alert aggregation, auto-quarantine policy). Review H1 (trailing
-  dot/space names) fixed.
-- All Medium/Low findings are recorded in `ROADMAP.md` under the step they belong to.
+**Section B is done.** **Now:** section C (scan modes), starting with C1 (Custom Scan).
 
 **Open for the user**
-- **Ready now:** in an **elevated** PowerShell in `C:\Projects\sap-AV`, run
+- In an **elevated** PowerShell in `C:\Projects\sap-AV`, run
   `$env:SAPAV_TEST_ALLOW_HKLM='1'; dotnet test tests/SapAV.Engine.Tests --filter "FullyQualifiedName~RealEventLogTests"`.
-  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused). It now
-  also runs a positive control (the same filtered token can write to a permissive throwaway log). It cleans up
-  after itself (only a throwaway .evtx file and a "log cleared" record remain).
-- Decision X2 M1 is made (dedicated `sap-AV` event log, step B6). No other decisions are pending.
+  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused, plus a
+  positive control). It cleans up after itself (only a throwaway .evtx file and a "log cleared" record remain).
+- Check the GitHub **Actions** run for `92ce762`: it is the first CI run of the elevated ProtectedPrefix pipe tests.
+- Optional: delete the ~212 old empty folders in `%TEMP%\sapav-tests` (from Oct 19 and 22).
 
 ## What's left
 
-- **B:** finish B4 → its review → B6 (with its review) → section B tester + reviewer pass.
-- Then C → D → E → F → G, ending with the Phase 1 security review (G5).
+- **C:** C1 Custom Scan → C2+C3 persistence collectors/judgement → C4 Quick Scan → C5+C6 scan cache + Full Scan,
+  then the section C tester + reviewer pass.
+- Then D → E → F → G, ending with the Phase 1 security review (G5).
