@@ -281,7 +281,7 @@ internal sealed class PipeRequestHandler : IDisposable
         int limit = request.ResultsLimit;
         while (true)
         {
-            var page = results.Skip(request.ResultsOffset).Take(limit).Select((r, i) => PipeMapping.Result(request.ResultsOffset + i, r)).ToArray();
+            var page = results.Skip(request.ResultsOffset).Take(limit).Select((r, i) => PipeMapping.Result(request.ResultsOffset + i, r, session.Identity.IsAdmin)).ToArray();
             int end = request.ResultsOffset + page.Length;
             var (links, unreadable) = job.Skipped;
             var details = new JobDetails(

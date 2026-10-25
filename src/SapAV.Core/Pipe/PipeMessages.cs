@@ -267,12 +267,48 @@ public sealed record JobProgressInfo(
     Guid JobId, JobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
     WirePath? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, JobCountersInfo Counters);
 
+/// <summary>Why a file wasn't scanned (C1), engine-classified. <see cref="NoAccess"/> deliberately tells nothing else.</summary>
+[JsonConverter(typeof(StrictEnumConverter<NotScannedReason>))]
+public enum NotScannedReason
+{
+    /// <summary>The requesting user can't read the file (or it couldn't be checked): no details are given.</summary>
+    NoAccess,
+    AccessDenied,
+    Locked,
+    TooLarge,
+    Offline,
+    NotFound,
+    NotRegularFile,
+
+    /// <summary>The file is on a network share; remote files are scanned only when an administrator allows it.</summary>
+    RemoteFile,
+    DifferentFile,
+    ChangedDuringScan,
+    BlockedByAntivirus,
+    Error,
+}
+
 /// <param name="ResultId">Stable index of the result in its job (results are only ever appended).</param>
 /// <param name="Detail">Engine text only (never scan-worker text), sanitised and capped.</param>
 /// <param name="CanQuarantine">The engine kept what it needs to quarantine this file on request (QuarantineFromResult).</param>
+/// <param name="Sha256">Only when the requesting user could read the file.</param>
+/// <param name="Reasons">One line per detection, worst first (at most 8). Administrators get the scanner's own text
+/// (sanitised, capped); everyone else gets engine templates built from the detection source, verdict and MITRE ID.</param>
+/// <param name="TechniqueIds">MITRE ATT&amp;CK technique IDs of the detections, primary first, distinct (at most 8).</param>
+/// <param name="SignatureStatus">The Authenticode outcome, if checked.</param>
+/// <param name="Signer">The trusted signer's name (Microsoft / OtherTrusted only), sanitised and capped.</param>
+/// <param name="SourceUrl">The Mark-of-the-Web download URL in log form (no user info, query or fragment), capped.</param>
+/// <param name="NotScannedReason">Why the file wasn't scanned; null when it was.</param>
 public sealed record JobFileResultInfo(
     int ResultId, WirePath Path, ScanStatus Status, Verdict? Verdict, FileAction Action, string? Detail, string? Sha256,
-    string? QuarantineItemId, Guid? AlertId, bool CanQuarantine);
+    string? QuarantineItemId, Guid? AlertId, bool CanQuarantine, IReadOnlyList<string>? Reasons = null,
+    IReadOnlyList<string>? TechniqueIds = null, Signatures.SignatureStatus? SignatureStatus = null, string? Signer = null,
+    string? SourceUrl = null, NotScannedReason? NotScannedReason = null)
+{
+    public IReadOnlyList<string> Reasons { get; init; } = Reasons ?? [];
+
+    public IReadOnlyList<string> TechniqueIds { get; init; } = TechniqueIds ?? [];
+}
 
 /// <param name="NextResultsOffset">The offset of the next page, or null when this page reached the end.</param>
 public sealed record JobDetails(

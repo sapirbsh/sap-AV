@@ -205,6 +205,32 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
             detail is null ? null : SafeText.SingleLine(detail, MaxDetailLength), result.Sha256, outcome.QuarantineItemId, outcome.AlertId)
         {
             Report = keepReport ? report : null,
+            Detections = result.Detections,
+            SignatureStatus = result.SignatureStatus,
+            Signer = result.Signer,
+            SourceUrl = Core.Motw.MarkOfTheWeb.SanitizeUrlForLog(report.SourceUrl),
+            SkipReason = result.Status == ScanStatus.Scanned ? null : SkipReasonOf(report.Hash.FailureReason, result.Status),
         };
     }
+
+    /// <summary>The engine's classification of a not-scanned report (from the enum the hasher / opener set, never from text).</summary>
+    internal static ScanSkipReason SkipReasonOf(HashFailureReason reason, ScanStatus status) => reason switch
+    {
+        HashFailureReason.AccessDenied => ScanSkipReason.AccessDenied,
+        HashFailureReason.Locked => ScanSkipReason.Locked,
+        HashFailureReason.TooLarge => ScanSkipReason.TooLarge,
+        HashFailureReason.Offline => ScanSkipReason.Offline,
+        HashFailureReason.NotFound => ScanSkipReason.NotFound,
+        HashFailureReason.NotRegularFile or HashFailureReason.Directory or HashFailureReason.InvalidPath => ScanSkipReason.NotRegularFile,
+        HashFailureReason.ChangedDuringHashing => ScanSkipReason.ChangedDuringScan,
+        HashFailureReason.BlockedByAntivirus => ScanSkipReason.BlockedByAntivirus,
+        _ => status switch
+        {
+            ScanStatus.Locked => ScanSkipReason.Locked,
+            ScanStatus.SkippedTooLarge => ScanSkipReason.TooLarge,
+            ScanStatus.SkippedOffline => ScanSkipReason.Offline,
+            ScanStatus.AccessDenied => ScanSkipReason.AccessDenied,
+            _ => ScanSkipReason.Error,
+        },
+    };
 }

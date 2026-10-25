@@ -102,6 +102,63 @@ public sealed record ScanJobFileResult(
 
     /// <summary>True if the file can be quarantined on request (<see cref="Report"/> is kept).</summary>
     public bool CanQuarantine => Report is not null;
+
+    /// <summary>
+    /// The detections, worst first (C1, for the results screen). Their reasons are scan-worker text: the pipe sends them
+    /// only to administrators and builds engine templates for everyone else (<see cref="Pipe.PipeMapping"/>).
+    /// </summary>
+    public IReadOnlyList<Core.Models.Detection> Detections { get; init; } = [];
+
+    /// <summary>The Authenticode outcome, if the signature was checked.</summary>
+    public Core.Signatures.SignatureStatus? SignatureStatus { get; init; }
+
+    /// <summary>The trusted signer's name (only with a Microsoft / OtherTrusted signature), scan-worker text.</summary>
+    public string? Signer { get; init; }
+
+    /// <summary>The Mark-of-the-Web download URL in log form (<see cref="Core.Motw.MarkOfTheWeb.SanitizeUrlForLog"/>), or null.</summary>
+    public string? SourceUrl { get; init; }
+
+    /// <summary>Why the file wasn't scanned (null when it was), engine-classified.</summary>
+    public ScanSkipReason? SkipReason { get; init; }
+
+    /// <summary>
+    /// C1 / B4 L3: false when the job runs with a requester's access and that user could not read the file (or it could not
+    /// be checked). Such a result carries nothing about the file: no hash, verdict or details.
+    /// </summary>
+    public bool RequesterCouldRead { get; init; } = true;
+}
+
+/// <summary>Why a file wasn't scanned (C1), as the engine classified it. Never derived from scan-worker text.</summary>
+public enum ScanSkipReason
+{
+    /// <summary>
+    /// B4 L3: the requester can't read the file, or it couldn't be checked. Deliberately says nothing else (whether it
+    /// exists, is locked, too large, excluded, or reached a different file).
+    /// </summary>
+    NoAccess,
+
+    AccessDenied,
+    Locked,
+    TooLarge,
+    Offline,
+    NotFound,
+
+    /// <summary>A directory, device, refused link, or another object that isn't a regular file.</summary>
+    NotRegularFile,
+
+    /// <summary>A2 W-A: the opened object is on a remote file system and the job doesn't allow remote files.</summary>
+    RemoteFile,
+
+    /// <summary>B3 H1: the open reached a different file than the one requested.</summary>
+    DifferentFile,
+
+    /// <summary>The file changed while it was being scanned.</summary>
+    ChangedDuringScan,
+
+    /// <summary>Another antivirus blocked the read.</summary>
+    BlockedByAntivirus,
+
+    Error,
 }
 
 /// <summary>Exact counters of a job (results lists may be capped; these never are).</summary>

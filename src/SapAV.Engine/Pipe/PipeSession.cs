@@ -61,7 +61,7 @@ internal sealed class PipeSession(IClientIdentity identity, IPipeEventSink sink)
                 }
             };
             Action<ScanJobProgress> progress = p => sink.TryPost(PipeEventKind.JobProgress, PipeMapping.Progress(p));
-            Action<int, ScanJobFileResult> file = (id, r) => sink.TryPost(PipeEventKind.JobFileResult, new JobFileResultEvent(job.Id, PipeMapping.Result(id, r)));
+            Action<int, ScanJobFileResult> file = (id, r) => sink.TryPost(PipeEventKind.JobFileResult, new JobFileResultEvent(job.Id, PipeMapping.Result(id, r, Identity.IsAdmin)));
             job.StateChanged += state;
             job.ProgressChanged += progress;
             job.FileRecorded += file;

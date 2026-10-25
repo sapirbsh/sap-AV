@@ -65,3 +65,89 @@ public sealed class PipeMappingTests
         Assert.Equal(progress.CurrentFile, PipeJson.Body<JobProgressInfo>(back.Body).CurrentFile);
     }
 }
+
+/// <summary>C1: the result fields the results screen (F2) needs, and what each kind of client may see.</summary>
+public sealed class PipeResultFieldsTests
+{
+    private const string Sha = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f";
+
+    private static ScanJobFileResult Flagged(bool couldRead = true) =>
+        new(@"C:\x\mal.bin", ScanStatus.Scanned, Verdict.Malicious, ScanFileAction.Quarantined, null, Sha, "item", Guid.NewGuid())
+        {
+            Detections =
+            [
+                new Detection(Verdict.Suspicious, "Heuristic: <worker text \u2063 secret>", "T1036.007", DetectionSource.Heuristic),
+                new Detection(Verdict.Malicious, "YARA rule Leak_" + new string('x', 900), "T1204.002", DetectionSource.Yara, ["T1027.002"]),
+            ],
+            SignatureStatus = Core.Signatures.SignatureStatus.OtherTrusted,
+            Signer = "Contoso \u202E" + new string('s', 400),
+            SourceUrl = "https://example.test/" + new string('u', 900),
+            RequesterCouldRead = couldRead,
+        };
+
+    [Fact]
+    public void StandardUsers_GetEngineTemplatedReasons_WorstFirst_WithTechniques()
+    {
+        var info = PipeMapping.Result(0, Flagged());
+
+        Assert.Equal(2, info.Reasons.Count);
+        Assert.StartsWith("Malicious: a YARA rule matched (MITRE ATT&CK T1204.002", info.Reasons[0], StringComparison.Ordinal);
+        Assert.StartsWith("Suspicious: heuristic analysis flagged it", info.Reasons[1], StringComparison.Ordinal);
+        Assert.DoesNotContain(info.Reasons, r => r.Contains("Leak_", StringComparison.Ordinal) || r.Contains("secret", StringComparison.Ordinal));
+        Assert.Equal(["T1204.002", "T1027.002", "T1036.007"], info.TechniqueIds);
+        Assert.Equal(Sha, info.Sha256);
+    }
+
+    [Fact]
+    public void Administrators_GetTheScannerText_SanitisedAndCapped()
+    {
+        var info = PipeMapping.Result(0, Flagged(), forAdmin: true);
+
+        Assert.StartsWith("YARA rule Leak_", info.Reasons[0], StringComparison.Ordinal);
+        Assert.All(info.Reasons, r => Assert.True(r.Length <= PipeMapping.MaxReasonLength));
+        Assert.DoesNotContain('\u2063', info.Reasons[1]);
+    }
+
+    [Fact]
+    public void SignerAndUrl_AreCappedAndCleaned_HashOnlyWhenTheRequesterCouldRead()
+    {
+        var info = PipeMapping.Result(0, Flagged());
+        var hidden = PipeMapping.Result(0, Flagged(couldRead: false));
+
+        Assert.Equal(Core.Signatures.SignatureStatus.OtherTrusted, info.SignatureStatus);
+        Assert.True(info.Signer!.Length <= PipeMapping.MaxSignerLength);
+        Assert.DoesNotContain('\u202E', info.Signer);
+        Assert.True(info.SourceUrl!.Length <= PipeMapping.MaxUrlLength);
+        Assert.Null(hidden.Sha256);
+    }
+
+    [Fact]
+    public void NotScanned_HasAnEngineReasonAndTemplate_NeverTheStoredDetail()
+    {
+        var remote = new ScanJobFileResult(@"C:\x\r.bin", ScanStatus.Error, null, ScanFileAction.None, "worker said: secret", null, null, null)
+        {
+            SkipReason = ScanSkipReason.RemoteFile,
+        };
+
+        var info = PipeMapping.Result(0, remote);
+
+        Assert.Equal(NotScannedReason.RemoteFile, info.NotScannedReason);
+        Assert.Contains("network share", info.Detail, StringComparison.Ordinal);
+        foreach (var v in Enum.GetValues<ScanSkipReason>())
+        {
+            Assert.Equal(v.ToString(), PipeMapping.Map(v).ToString());
+        }
+    }
+
+    [Fact]
+    public void NewFields_RoundTripWithTheStrictOptions()
+    {
+        var info = PipeMapping.Result(3, Flagged());
+
+        var back = JsonSerializer.Deserialize<JobFileResultInfo>(JsonSerializer.SerializeToUtf8Bytes(info, PipeJson.Options), PipeJson.Options)!;
+
+        Assert.Equal(info.Reasons, back.Reasons);
+        Assert.Equal(info.TechniqueIds, back.TechniqueIds);
+        Assert.Equal((info.SignatureStatus, info.Signer, info.SourceUrl), (back.SignatureStatus, back.Signer, back.SourceUrl));
+    }
+}
