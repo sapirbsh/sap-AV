@@ -21,15 +21,20 @@ internal static class RestorePrivilege
     private const uint TokenQuery = 0x0008;
     private const uint SePrivilegeEnabled = 0x2;
     private const int ErrorNotAllAssigned = 1300;
+    private const int ErrorNoToken = 1008;
 
     /// <summary>
     /// Runs <paramref name="action"/> (which returns a Win32 error, 0 = success) with SeRestorePrivilege enabled on this
     /// thread. Returns the action's result, or the Win32 error that kept the privilege from being enabled (e.g. 1300,
     /// ERROR_NOT_ALL_ASSIGNED, when the account doesn't hold it); the action doesn't run then.
     /// </summary>
-    public static int Run(Func<int> action)
+    public static int Run(Func<int> action) => Run(action, "SeRestorePrivilege");
+
+    /// <param name="privilege">Test seam: another privilege (e.g. SeChangeNotifyPrivilege, which every token holds) to run the flow unelevated.</param>
+    internal static int Run(Func<int> action, string privilege)
     {
         ArgumentNullException.ThrowIfNull(action);
+
         if (!ImpersonateSelf(SecurityImpersonation))
         {
             return Marshal.GetLastPInvokeError();
@@ -44,7 +49,7 @@ internal static class RestorePrivilege
 
             using (token)
             {
-                if (!LookupPrivilegeValueW(null, "SeRestorePrivilege", out long luid))
+                if (!LookupPrivilegeValueW(null, privilege, out long luid))
                 {
                     return Marshal.GetLastPInvokeError();
                 }
@@ -74,17 +79,16 @@ internal static class RestorePrivilege
         }
     }
 
-    /// <summary>True if the calling thread is impersonating (has its own token). For tests: after <see cref="Run"/> it must not be.</summary>
+    /// <summary>
+    /// True if the calling thread is impersonating (has its own token). Only ERROR_NO_TOKEN counts as "no": any other failure
+    /// to look is treated as a token (fails closed).
+    /// </summary>
     internal static bool ThreadHasToken()
     {
-        if (OpenThreadToken(GetCurrentThread(), TokenQuery, openAsSelf: true, out var token))
-        {
-            token.Dispose();
-            return true;
-        }
-
+        bool opened = OpenThreadToken(GetCurrentThread(), TokenQuery, openAsSelf: true, out var token);
+        int error = opened ? 0 : Marshal.GetLastPInvokeError();
         token.Dispose();
-        return false;
+        return opened || error != ErrorNoToken;
     }
 
     private static unsafe int Adjust(SafeAccessTokenHandle token, long luid, uint attributes)

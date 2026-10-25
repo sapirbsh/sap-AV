@@ -190,8 +190,8 @@ public interface IQuarantineService
     /// Restores an item to its recorded original path only (explicit user request). Emits a QuarantineRestored alert.
     /// </summary>
     /// <param name="requester">
-    /// Section B M3: the user who asked; the restored file is made theirs (owner), so it isn't later taken for a
-    /// SYSTEM-protected file. Null = keep the recorded original owner where the engine may set it.
+    /// Section B M3: the user who asked. The restored file gets its recorded original owner; only when none was recorded
+    /// is it given to the requester (review C1 H1).
     /// </param>
     Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, System.Security.Principal.SecurityIdentifier? requester = null);
 

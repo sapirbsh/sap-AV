@@ -24,7 +24,7 @@ public sealed partial class QuarantineManager
     /// verified, then renamed (no replace) to the original name, or <c>name (restored N).ext</c> (N = 1..99) if that is
     /// taken. If every name is taken the restore fails with <see cref="RestoreStatus.TargetExists"/>.</para>
     /// <para>Restored: content, attributes, creation/last-write/last-access times, the DACL (explicit entries, or the
-    /// whole protected DACL), the owner (the requesting user, section B M3; otherwise the original owner where allowed), and
+    /// whole protected DACL), the original owner (section B M3 / review C1 H1; the requester only when none was recorded), and
     /// the Zone.Identifier stream.</para>
     /// </remarks>
     public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, SecurityIdentifier? requester = null)
@@ -223,7 +223,9 @@ public sealed partial class QuarantineManager
         }
 
         var originalOwner = metadata.SecurityDescriptor is { } sddl ? ApplySecurity(target, sddl, notes) : null;
-        ApplyOwner(target, requester ?? originalOwner, requester is not null, canSetOwner, notes);
+        // Review C1 H1: the recorded original owner always wins (an admin restoring a TrustedInstaller-owned System32 file must
+        // not become its owner; user B restoring A's file must not take it from A). The requester only when none was recorded.
+        ApplyOwner(target, originalOwner ?? requester, originalOwner is null && requester is not null, canSetOwner, notes);
 
         var attributes = (uint)((FileAttributes)metadata.Attributes & RestorableAttributes);
         N.SetBasicInfo(target,
@@ -296,9 +298,10 @@ public sealed partial class QuarantineManager
     }
 
     /// <summary>
-    /// Section B M3: the restored file's owner. With a requester it becomes the requesting user's (so it isn't later taken
-    /// for a SYSTEM-protected file and refused for auto-quarantine, and the user can manage it), otherwise the recorded
-    /// original owner. Giving a file to another account needs SeRestorePrivilege: it is enabled on this thread only, for
+    /// Section B M3 / review C1 H1: the restored file's owner is the <b>recorded original owner</b> from the signed SDDL (a
+    /// user's own file recorded that user, so it is never left owned by SYSTEM; a TrustedInstaller / SYSTEM / Administrators
+    /// file stays theirs, so an administrator restoring it doesn't get implicit WRITE_DAC on it through their own SID). Only
+    /// when no owner was recorded is it given to the requesting user. Giving a file to another account needs SeRestorePrivilege: it is enabled on this thread only, for
     /// this one call (<see cref="Native.RestorePrivilege"/>), and only if setting the owner without it was refused.
     /// </summary>
     private static void ApplyOwner(SafeFileHandle target, SecurityIdentifier? owner, bool isRequester, bool canSetOwner, List<string> notes)

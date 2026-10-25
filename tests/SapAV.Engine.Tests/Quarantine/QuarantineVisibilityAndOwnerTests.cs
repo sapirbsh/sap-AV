@@ -51,38 +51,71 @@ public sealed class QuarantineVisibilityAndOwnerTests
     }
 
     [Fact]
-    public async Task RestoredFile_IsOwnedByTheRequester()
+    public async Task AUsersOwnFile_IsRestoredToThem()
     {
         using var ctx = new QuarantineTestContext();
-        var (id, path) = await QuarantineOneAsync(ctx);
+        var (id, path) = await QuarantineOneAsync(ctx); // recorded owner: this (test) user
 
         var restored = await ctx.Manager.RestoreAsync(id, requester: QuarantineTestContext.CurrentUser);
 
         Assert.Equal(RestoreStatus.Restored, restored.Status);
-        Assert.Equal(QuarantineTestContext.CurrentUser, new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier)));
+        Assert.Equal(QuarantineTestContext.CurrentUser, OwnerOf(path));
         Assert.Empty(restored.Notes);
     }
 
-    [Fact]
-    public async Task GivingTheFileToAnotherUser_UsesSeRestorePrivilegeOnThatThreadOnly_OrRestoresWithANote()
+    /// <summary>
+    /// Review C1 H1: an administrator restoring a TrustedInstaller / SYSTEM / Administrators file, or user B restoring user
+    /// A's file, never becomes its owner: the recorded original owner is restored. Giving a file to those accounts needs
+    /// SeRestorePrivilege (SYSTEM, an elevated run); without it the restore says so and the file is never the requester's.
+    /// </summary>
+    [Theory]
+    [InlineData("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")] // TrustedInstaller
+    [InlineData("S-1-5-18")] // SYSTEM
+    [InlineData("S-1-5-32-544")] // Administrators
+    [InlineData("S-1-5-21-1111-2222-3333-4444")] // user A
+    public async Task TheRecordedOriginalOwner_IsRestored_NeverTheRequester(string originalOwner)
     {
         using var ctx = new QuarantineTestContext();
         var (id, path) = await QuarantineOneAsync(ctx);
-        var other = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null); // stands in for another requesting user
+        var original = new SecurityIdentifier(originalOwner);
+        RewriteRecordedOwner(ctx, id, original);
+        var requester = FakeClientIdentity.NewUserSid(); // the admin or user B
 
-        var restored = await ctx.Manager.RestoreAsync(id, requester: other);
+        var restored = await ctx.Manager.RestoreAsync(id, requester: requester);
 
         Assert.Equal(RestoreStatus.Restored, restored.Status);
-        var owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier));
+        var owner = OwnerOf(path);
+        Assert.NotEqual(requester, owner);
+        Assert.DoesNotContain(restored.Notes, n => n.Contains(requester.Value, StringComparison.Ordinal));
         if (restored.Notes.Count == 0)
         {
-            Assert.Equal(other, owner); // the process holds SeRestorePrivilege (SYSTEM, an elevated run)
+            Assert.Equal(original, owner); // the process holds SeRestorePrivilege
         }
         else
         {
-            // A normal test run doesn't hold the privilege: the restore still succeeds, says why, and the file stays the caller's.
-            Assert.Contains(restored.Notes, n => n.Contains(other.Value, StringComparison.Ordinal) && n.Contains("1300", StringComparison.Ordinal));
+            Assert.Contains(restored.Notes, n => n.Contains($"the original owner ({original.Value})", StringComparison.Ordinal));
             Assert.Equal(QuarantineTestContext.CurrentUser, owner);
+        }
+    }
+
+    [Fact]
+    public async Task WithNoRecordedOwner_TheFileGoesToTheRequester()
+    {
+        using var ctx = new QuarantineTestContext();
+        var (id, path) = await QuarantineOneAsync(ctx);
+        RewriteRecordedOwner(ctx, id, null);
+        var requester = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null); // needs SeRestorePrivilege to be made owner
+
+        var restored = await ctx.Manager.RestoreAsync(id, requester: requester);
+
+        Assert.Equal(RestoreStatus.Restored, restored.Status);
+        if (restored.Notes.Count == 0)
+        {
+            Assert.Equal(requester, OwnerOf(path));
+        }
+        else
+        {
+            Assert.Contains(restored.Notes, n => n.Contains($"the requesting user ({requester.Value})", StringComparison.Ordinal) && n.Contains("1300", StringComparison.Ordinal));
         }
     }
 
@@ -102,7 +135,21 @@ public sealed class QuarantineVisibilityAndOwnerTests
     }
 
     [Fact]
+    public void RestorePrivilege_LeavesNoThreadToken_WhenTheActionThrows()
+    {
+        // SeChangeNotifyPrivilege is held by every token, so the action really runs on the private thread token here.
+        Assert.Throws<IOException>(() => RestorePrivilege.Run(() =>
+        {
+            Assert.True(RestorePrivilege.ThreadHasToken());
+            throw new IOException("simulated failure inside the privileged call");
+        }, "SeChangeNotifyPrivilege"));
+
+        Assert.False(RestorePrivilege.ThreadHasToken());
+    }
+
+    [Fact]
     public async Task RuleErrors_AreCountsOnly_ForAStandardUsersJob_ButNamedForOthers()
+
     {
         using var h = new ScanJobHarness();
         h.Broker.Rules = new RulesLoadSummary(5, [@"secret-rule.yar: syntax error near 'leaked text'"], 0, "fp", 1, 0);
@@ -122,7 +169,21 @@ public sealed class QuarantineVisibilityAndOwnerTests
         Assert.Contains("secret-rule.yar", Assert.Single(admin.Warnings).Message, StringComparison.Ordinal);
     }
 
+    private static SecurityIdentifier OwnerOf(string path) =>
+        (SecurityIdentifier)new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier))!;
+
+    /// <summary>Re-signs the item's metadata with another recorded owner (null = none), as if the original file had had it.</summary>
+    private static void RewriteRecordedOwner(QuarantineTestContext ctx, string id, SecurityIdentifier? owner)
+    {
+        string file = Path.Combine(ctx.StoreRoot, id + ".json");
+        var metadata = Core.Quarantine.QuarantineMetadataCodec.Decode(File.ReadAllBytes(file), id, ctx.Key);
+        var sd = new RawSecurityDescriptor(metadata.SecurityDescriptor!) { Owner = owner };
+        var changed = metadata with { SecurityDescriptor = sd.GetSddlForm(AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access) };
+        File.WriteAllBytes(file, Core.Quarantine.QuarantineMetadataCodec.Encode(changed, ctx.Key));
+    }
+
     private static async Task<(string Id, string Path)> QuarantineOneAsync(QuarantineTestContext ctx)
+
     {
         var content = QuarantineTestContext.SampleContent();
         var path = ctx.WriteFile("owned.bin", content);
