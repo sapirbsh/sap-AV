@@ -17,8 +17,11 @@ public enum AccessDecision
     /// <summary>The object isn't the expected one (a different file object at the path now).</summary>
     Mismatch,
 
-    /// <summary>The path goes through a junction, symlink or mount point (or is one), or is on a network drive: refused.</summary>
+    /// <summary>The path goes through a junction, symlink or mount point (or is one): refused.</summary>
     Redirected,
+
+    /// <summary>A2 W-A: a UNC path, a network drive, or an object that reports itself remote (and remote isn't allowed).</summary>
+    Remote,
 }
 
 /// <summary>
@@ -34,14 +37,16 @@ internal static class ClientAccess
     /// <summary>
     /// Opens <paramref name="path"/> safely (see the class remarks); null with the decision when it can't be opened.
     /// </summary>
-    public static SafeFileHandle? OpenForCheck(string path, out AccessDecision failure)
+    /// <param name="allowRemote">Only for an administrator's job that explicitly allows remote files (A2 W-A).</param>
+    public static SafeFileHandle? OpenForCheck(string path, out AccessDecision failure, bool allowRemote = false)
     {
-        var handle = SafeTree.Open(path, SafeTree.InspectAccess, SafeTree.ShareAll, 0, out var why, out _);
+        var handle = SafeTree.Open(path, SafeTree.InspectAccess, SafeTree.ShareAll, 0, out var why, out _, allowRemote);
         failure = why switch
         {
             SafeTreeFailure.None => AccessDecision.Granted,
             SafeTreeFailure.NotFound => AccessDecision.NotFound,
             SafeTreeFailure.Redirected or SafeTreeFailure.Unsupported => AccessDecision.Redirected,
+            SafeTreeFailure.Remote => AccessDecision.Remote,
             _ => AccessDecision.Denied,
         };
         return handle;
@@ -92,7 +97,7 @@ internal static class ClientAccess
 
         string path = report.Result.Item.Path;
         var onFile = Check(client, path, PipeNative.Delete, identity);
-        if (onFile is AccessDecision.Granted or AccessDecision.NotFound or AccessDecision.Mismatch or AccessDecision.Redirected)
+        if (onFile is AccessDecision.Granted or AccessDecision.NotFound or AccessDecision.Mismatch or AccessDecision.Redirected or AccessDecision.Remote)
         {
             return onFile;
         }

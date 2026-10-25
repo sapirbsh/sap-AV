@@ -26,6 +26,12 @@ internal enum SafeTreeFailure
     Locked,
 
     Error,
+
+    /// <summary>
+    /// A2 W-A: a UNC path or network drive, or the opened object reports itself remote (<see cref="RemoteFileProbe"/>),
+    /// and the caller didn't allow remote objects.
+    /// </summary>
+    Remote,
 }
 
 /// <summary>One entry of a folder listing (from the folder's own handle).</summary>
@@ -69,21 +75,19 @@ internal static unsafe class SafeTree
     /// Opens <paramref name="path"/> (fully qualified drive path, plain or <c>\\?\</c>; names kept exactly) with
     /// <paramref name="access"/> on the target. Ancestors are opened for traverse only. Null with the failure otherwise.
     /// </summary>
-    public static SafeFileHandle? Open(string path, uint access, uint share, uint options, out SafeTreeFailure failure, out int win32Error)
+    /// <param name="allowRemote">
+    /// A2 W-A: also open UNC paths (<c>\\server\share\…</c>) and network drives, and accept a target that reports itself
+    /// remote. Only for jobs an administrator explicitly allowed to scan remote files; everything else (the default) gets
+    /// <see cref="SafeTreeFailure.Remote"/> before anything is opened (UNC, network drive letter), or right after the open
+    /// for a target that turns out to be remote. That after-open check can't undo SMB authentication; refusing UNC paths and
+    /// network drives up front, and never following a reparse point, is what keeps SYSTEM from contacting a server.
+    /// </param>
+    public static SafeFileHandle? Open(
+        string path, uint access, uint share, uint options, out SafeTreeFailure failure, out int win32Error, bool allowRemote = false)
     {
         win32Error = 0;
-        if (ExactPath.ToExtended(path) is not { } exact || exact.Length < 7 || exact[5] != ':' || !exact.StartsWith(@"\\?\", StringComparison.Ordinal))
+        if (!TrySplitRoot(path, allowRemote, out string root, out string[] parts, out failure))
         {
-            failure = SafeTreeFailure.Unsupported;
-            return null;
-        }
-
-        string root = exact[..7]; // \\?\C:\
-        var parts = exact[7..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        int type = Pipe.Native.PipeNative.DriveType(root[4..]);
-        if (type is 0 or 1 or Pipe.Native.PipeNative.DriveRemote)
-        {
-            failure = type == Pipe.Native.PipeNative.DriveRemote ? SafeTreeFailure.Unsupported : SafeTreeFailure.NotFound;
             return null;
         }
 
@@ -109,8 +113,59 @@ internal static unsafe class SafeTree
             current = next;
         }
 
+        if (!allowRemote && RemoteFileProbe.Instance.Classify(current) != FileLocation.Local)
+        {
+            current.Dispose();
+            failure = SafeTreeFailure.Remote;
+            return null;
+        }
+
         failure = SafeTreeFailure.None;
         return current;
+    }
+
+    /// <summary>
+    /// The root to open first (<c>\\?\C:\</c>, or <c>\\?\UNC\server\share\</c> when <paramref name="allowRemote"/>) and the
+    /// components below it. False for anything else, a missing drive, or a remote one that isn't allowed.
+    /// </summary>
+    private static bool TrySplitRoot(string path, bool allowRemote, out string root, out string[] parts, out SafeTreeFailure failure)
+    {
+        root = string.Empty;
+        parts = [];
+        if (ExactPath.ToExtended(path) is not { } exact || !exact.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            failure = SafeTreeFailure.Unsupported;
+            return false;
+        }
+
+        if (exact.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            var pieces = exact[8..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (!allowRemote || pieces.Length < 2)
+            {
+                failure = allowRemote ? SafeTreeFailure.Unsupported : SafeTreeFailure.Remote;
+                return false;
+            }
+
+            root = $@"\\?\UNC\{pieces[0]}\{pieces[1]}\";
+            parts = pieces[2..];
+            failure = SafeTreeFailure.None;
+            return true;
+        }
+
+        if (exact.Length < 7 || exact[5] != ':')
+        {
+            failure = SafeTreeFailure.Unsupported;
+            return false;
+        }
+
+        root = exact[..7]; // \\?\C:\
+        parts = exact[7..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        int type = Pipe.Native.PipeNative.DriveType(root[4..]);
+        failure = type is 0 or 1 ? SafeTreeFailure.NotFound
+            : type == Pipe.Native.PipeNative.DriveRemote && !allowRemote ? SafeTreeFailure.Remote
+            : SafeTreeFailure.None;
+        return failure == SafeTreeFailure.None;
     }
 
     /// <summary>

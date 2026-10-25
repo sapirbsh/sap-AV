@@ -33,7 +33,8 @@ internal interface IScanVerdictHandler
 /// cancel only when the <b>job's own</b> token is cancelled (an OperationCanceledException from anywhere else, e.g. a
 /// timed-out HTTP call inside a step, is just an error).
 /// </remarks>
-internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger)
+internal sealed class ScanFilePipeline(
+    IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger, IRemoteFileProbe? remote = null)
 {
     /// <summary>Longest <see cref="ScanJobFileResult.Detail"/> kept.</summary>
     public const int MaxDetailLength = 512;
@@ -48,16 +49,25 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
     /// <param name="priority">Who the scan is for, for the next free worker (review B H3).</param>
     public async Task<ScanJobFileResult?> ProcessAsync(
         string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
-        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal)
+        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false)
     {
         string step = "open";
         try
         {
             var item = new ScanItem(path, trigger);
             var notes = new List<ScanNote>();
+
             // Blocking: we are on a dedicated thread. Review B H2: every job (standard user, administrator, engine) opens
             // without following links, relative to the folder handle the walker listed when there is one (review B4 M2).
-            using var opened = SafeScanOpen.Open(item, notes, time, out var failure, folder, name);
+            // C1 / B4 L3: the requester's read access is checked inside the open, before anything else about the file
+            // (exclusion, different file, lock, size, remote) can show in the result.
+            using var opened = SafeScanOpen.Open(item, notes, time, out var failure, out var skip, new ScanOpenChecks(access, allowRemote, remote),
+                folder, name);
+            if (skip == ScanSkipReason.NoAccess)
+            {
+                return NoAccessResult(path);
+            }
+
             if (opened is not null && excluded.Contains(opened.Identity?.FinalPath))
             {
                 return null; // e.g. reached through an 8.3 name: the final path is an engine folder
@@ -66,14 +76,10 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
             if (DifferentFile(item, opened) is { } different)
             {
                 logger.LogWarning("Scan of {Path}: {Why}", path, different);
-                return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null);
-            }
-
-            if (access is not null && opened is not null && !access.CanRead(opened.Handle))
-            {
-                // B4: checked on the scan's own handle, so it is the scanned object; nothing about the file is reported.
-                return new ScanJobFileResult(path, ScanStatus.AccessDenied, null, ScanFileAction.None,
-                    "Not scanned: the user who requested the scan can't read this file.", null, null, null);
+                return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null)
+                {
+                    SkipReason = ScanSkipReason.DifferentFile,
+                };
             }
 
             item = Canonical(item, opened);
@@ -84,7 +90,8 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
 
             step = "post-scan";
             var outcome = handler is null ? ScanVerdictOutcome.Nothing : await handler.HandleAsync(report, opened, jobToken).ConfigureAwait(false);
-            return ToResult(report, outcome);
+            var result = ToResult(report, outcome);
+            return skip is { } why ? result with { SkipReason = why } : result;
         }
         catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
         {
@@ -93,10 +100,27 @@ internal sealed class ScanFilePipeline(IScanBroker broker, ExclusionSet excluded
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             logger.LogWarning(ex, "Scan job step '{Step}' failed for {Path}; the file is NotScanned (Error).", step, path);
+            if (access is not null && step == "open")
+            {
+                return NoAccessResult(path); // B4 L3: nothing was checked yet, so nothing is told
+            }
+
             return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None,
-                $"Not scanned (Error): the {step} step failed ({ex.GetType().Name}).", null, null, null);
+                $"Not scanned (Error): the {step} step failed ({ex.GetType().Name}).", null, null, null)
+            {
+                SkipReason = ScanSkipReason.Error,
+            };
         }
     }
+
+    /// <summary>B4 L3: the requester can't read the file: AccessDenied, with nothing about the file (no hash, no reason).</summary>
+    private static ScanJobFileResult NoAccessResult(string path) =>
+        new(path, ScanStatus.AccessDenied, null, ScanFileAction.None, "Not scanned: you can't read this file, or it couldn't be checked.",
+            null, null, null)
+        {
+            SkipReason = ScanSkipReason.NoAccess,
+            RequesterCouldRead = false,
+        };
 
     /// <summary>
     /// True if the requested path names the same location as the handle's final path (drive-letter form): equal exactly

@@ -339,7 +339,7 @@ public sealed class ScanJob : IDisposable
         try
         {
             RunPreflight(token);
-            _walker.Walk(Request.Paths, entry => Emit(entry, token), token, Request.Access);
+            _walker.Walk(Request.Paths, entry => Emit(entry, token), token, Request.Access, Request.AllowRemoteFiles);
             lock (_lock)
             {
                 _enumerationDone = true;
@@ -507,7 +507,7 @@ public sealed class ScanJob : IDisposable
         try
         {
             result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name,
-                    PriorityOf(Request.Origin))
+                    PriorityOf(Request.Origin), Request.AllowRemoteFiles)
                 .GetAwaiter().GetResult();
         }
         finally

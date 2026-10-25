@@ -170,10 +170,15 @@ internal sealed class PipeRequestHandler : IDisposable
             return PipeReply.Fail(PipeStatus.BadRequest, $"A scan needs 1-{PipeProtocol.MaxScanPaths} paths.");
         }
 
+        if (request.AllowRemote && !client.IsAdmin)
+        {
+            return PipeReply.Fail(PipeStatus.AccessDenied, "Only an administrator may scan network paths.");
+        }
+
         var roots = new List<string>();
         for (int i = 0; i < request.Paths.Count; i++)
         {
-            if (CheckRoot(client, request.Paths[i], i, out string normalized) is { } refused)
+            if (CheckRoot(client, request.Paths[i], i, request.AllowRemote, out string normalized) is { } refused)
             {
                 return refused;
             }
@@ -188,6 +193,7 @@ internal sealed class PipeRequestHandler : IDisposable
         var jobRequest = new ScanJobRequest(roots, ScanTrigger.CustomScan)
         {
             Origin = client.IsAdmin ? ScanJobOrigin.Administrator : ScanJobOrigin.StandardUser, // review B H3
+            AllowRemoteFiles = request.AllowRemote && client.IsAdmin, // A2 W-A: administrator opt-in only
         };
         var (job, status, error) = _registry.TryCreate(client, session, jobRequest, access);
         if (job is null)
@@ -201,28 +207,34 @@ internal sealed class PipeRequestHandler : IDisposable
     }
 
     /// <summary>Policy, drive type and (standard users) the client's own read access to the root.</summary>
-    private PipeReply? CheckRoot(IClientIdentity client, string? path, int index, out string normalized)
+    /// <param name="allowRemote">An administrator asked for network paths (already checked to be an administrator).</param>
+    private PipeReply? CheckRoot(IClientIdentity client, string? path, int index, bool allowRemote, out string normalized)
     {
         normalized = string.Empty;
-        var decision = ScanPathPolicy.Evaluate(path);
+        var decision = ScanPathPolicy.Evaluate(path, allowNetwork: allowRemote);
         if (!decision.IsAllowed)
         {
             return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1}: {decision.Reason}");
         }
 
         normalized = decision.NormalizedPath!;
-        string drive = Core.Hashing.ExactPath.StripPrefix(normalized)[..3];
-        if (_driveType(drive) == PipeNative.DriveRemote)
+        string plain = Core.Hashing.ExactPath.StripPrefix(normalized);
+        if (!allowRemote && _driveType(plain[..3]) == PipeNative.DriveRemote)
         {
             return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1}: network drives are not scanned.");
         }
 
         // Review B4 M2: every root (admins' too) is opened component by component without following any reparse point;
         // a root reached through (or being) a junction, symlink or mount point is refused before the job exists.
-        using var handle = ClientAccess.OpenForCheck(normalized, out var opened);
+        using var handle = ClientAccess.OpenForCheck(normalized, out var opened, allowRemote);
         if (opened == AccessDecision.Redirected)
         {
-            return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1} goes through a junction, symbolic link or mount point, or a network drive.");
+            return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1} goes through a junction, symbolic link or mount point.");
+        }
+
+        if (opened == AccessDecision.Remote)
+        {
+            return PipeReply.Fail(PipeStatus.InvalidPath, $"Path {index + 1} is on a network share; remote files are not scanned.");
         }
 
         if (client.IsAdmin)
@@ -230,15 +242,21 @@ internal sealed class PipeRequestHandler : IDisposable
             return null; // a missing or unreadable root is reported by the job
         }
 
-        if (handle is null)
+        if (handle is not null && ClientAccess.IsGranted(client, handle, PipeNative.FileReadData))
         {
-            return opened == AccessDecision.NotFound
-                ? PipeReply.Fail(PipeStatus.NotFound, $"Path {index + 1} does not exist.")
-                : PipeReply.Fail(PipeStatus.AccessDenied, $"Path {index + 1}: you don't have read access to it.");
+            return null;
         }
 
-        return ClientAccess.IsGranted(client, handle, PipeNative.FileReadData)
-            ? null
+        // B4 L3: "doesn't exist" and "you can't read it" are told apart only when the user can list the folder it is in
+        // (they could see the name there anyway); otherwise one answer for both, so a scan request can't probe for names.
+        bool canListParent = ClientAccess.ParentOf(normalized) is { } parent && ClientAccess.CanReadOrList(client, parent) == AccessDecision.Granted;
+        if (!canListParent)
+        {
+            return PipeReply.Fail(PipeStatus.NotFound, $"Path {index + 1} does not exist, or you don't have read access to it.");
+        }
+
+        return handle is null && opened == AccessDecision.NotFound
+            ? PipeReply.Fail(PipeStatus.NotFound, $"Path {index + 1} does not exist.")
             : PipeReply.Fail(PipeStatus.AccessDenied, $"Path {index + 1}: you don't have read access to it.");
     }
 

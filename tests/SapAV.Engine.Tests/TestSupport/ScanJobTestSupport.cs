@@ -126,10 +126,14 @@ internal sealed class ScanJobHarness : IDisposable
 
     public Func<string, uint?>? ReparseTag { get; set; }
 
+    /// <summary>Classifies opened handles as local / remote (null = the real probe).</summary>
+    public IRemoteFileProbe? RemoteProbe { get; set; }
+
     private ScanJobService? _service;
 
     public ScanJobService Service => _service ??= new ScanJobService(
-        Options, Broker, Exclusions ?? ExclusionSet.Always(new FolderSet(Excluded)), Handler, Preflight, Time, NullLogger.Instance, ReparseTag);
+        Options, Broker, Exclusions ?? ExclusionSet.Always(new FolderSet(Excluded)), Handler, Preflight, Time, NullLogger.Instance, ReparseTag,
+        RemoteProbe);
 
     public string Write(string relative, string content = "plain test content")
     {

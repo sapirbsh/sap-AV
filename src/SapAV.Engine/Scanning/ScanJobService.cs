@@ -53,7 +53,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
 
     internal ScanJobService(
         ScanJobOptions options, IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, IScanJobPreflight? preflight,
-        TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null)
+        TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remoteProbe = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -64,8 +64,8 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         _preflight = preflight;
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger);
-        _walker = new ScanTreeWalker(excluded, reparseTag);
+        _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger, remoteProbe);
+        _walker = new ScanTreeWalker(excluded, reparseTag, remoteProbe);
         Excluded = excluded;
         // Review B H3: the pause limit is checked every minute (or more often for a shorter limit).
         var period = TimeSpan.FromTicks(Math.Min(TimeSpan.FromMinutes(1).Ticks, options.MaxPauseTime.Ticks));

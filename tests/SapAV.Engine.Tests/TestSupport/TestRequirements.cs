@@ -43,6 +43,12 @@ public enum Requires
     /// and read back (no real antivirus removes it). Off by default because a real antivirus alerts on it.
     /// </summary>
     EicarFileOnDisk,
+
+    /// <summary>
+    /// The local administrative share of the temp drive (<c>\\localhost\C$</c>) is reachable from the test process: needs an
+    /// elevated administrator and the Server service. Used to exercise the remote-file refusal (A2 W-A) on a real SMB handle.
+    /// </summary>
+    AdminShare,
 }
 
 internal static class TestRequirements
@@ -62,7 +68,28 @@ internal static class TestRequirements
         [Requires.SecondVolume] = new(ProbeSecondVolume),
         [Requires.AppContainer] = new(ProbeAppContainer),
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
+        [Requires.AdminShare] = new(ProbeAdminShare),
     };
+
+    /// <summary>The <c>\\localhost\X$\…</c> form of a local fully qualified path (valid when <see cref="Requires.AdminShare"/> is met).</summary>
+    public static string ToAdminShare(string localPath)
+    {
+        var full = Path.GetFullPath(localPath);
+        return $@"\\localhost\{full[0]}$\{full[3..]}";
+    }
+
+    private static string? ProbeAdminShare()
+    {
+        var temp = Path.GetTempPath();
+        if (temp.Length < 3 || temp[1] != ':')
+        {
+            return "the temp folder isn't on a drive letter";
+        }
+
+        return Directory.Exists(ToAdminShare(temp))
+            ? null
+            : $"{ToAdminShare(temp)} isn't reachable (needs an elevated administrator and the Server service)";
+    }
 
     public static IReadOnlyCollection<Requires> All => Probes.Keys;
 

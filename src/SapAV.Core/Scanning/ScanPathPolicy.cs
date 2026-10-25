@@ -80,8 +80,20 @@ public static class ScanPathPolicy
     };
 
     /// <summary>Checks and normalises one path (see the class remarks). Never throws.</summary>
-    public static ScanPathDecision Evaluate(string? path)
+    public static ScanPathDecision Evaluate(string? path) => Evaluate(path, allowNetwork: false);
+
+    /// <summary>
+    /// Like <see cref="Evaluate(string?)"/>; with <paramref name="allowNetwork"/> (A2 W-A: an administrator explicitly asked
+    /// to scan remote files) a UNC path <c>\\server\share\…</c> or <c>\\?\UNC\server\share\…</c> is also accepted, with the
+    /// same character, stream, reserved-name and normalisation rules. Device namespaces stay refused either way.
+    /// </summary>
+    public static ScanPathDecision Evaluate(string? path, bool allowNetwork)
     {
+        if (allowNetwork && IsUnc(path))
+        {
+            return EvaluateUnc(path!);
+        }
+
         if (string.IsNullOrWhiteSpace(path))
         {
             return Reject(ScanPathRejection.Empty, "The path is empty.");
@@ -125,6 +137,60 @@ public static class ScanPathPolicy
         }
 
         foreach (var component in exact[(ExtendedPrefix.Length + 3)..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (component.Length > MaxComponentLength)
+            {
+                return Reject(ScanPathRejection.TooLong, "A name in the path is longer than 255 characters.");
+            }
+
+            if (IsReservedDeviceName(component))
+            {
+                return Reject(ScanPathRejection.ReservedDeviceName, "The path contains a reserved device name.");
+            }
+        }
+
+        return new ScanPathDecision(ExactPath.ForOpening(exact), ScanPathRejection.None, string.Empty);
+    }
+
+    /// <summary><c>\\server\…</c> (not <c>\\.\</c> or <c>\\?\</c>) or the literal <c>\\?\UNC\…</c>; backslashes only.</summary>
+    private static bool IsUnc(string? path) =>
+        path is { Length: > 2 } && path.StartsWith(@"\\", StringComparison.Ordinal)
+        && (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) || path[2] is not ('.' or '?' or '\\' or '/'));
+
+    private static ScanPathDecision EvaluateUnc(string path)
+    {
+        if (path.Length > MaxPathLength)
+        {
+            return Reject(ScanPathRejection.TooLong, "The path is too long.");
+        }
+
+        if (FirstInvalidCharacter(path) is { } bad)
+        {
+            return Reject(ScanPathRejection.InvalidCharacter, $"The path contains an invalid character (U+{(int)bad:X4}).");
+        }
+
+        if (path.Contains('/'))
+        {
+            return Reject(ScanPathRejection.InvalidCharacter, "A network path must use '\\' only.");
+        }
+
+        if (path.Contains(':'))
+        {
+            return Reject(ScanPathRejection.AlternateDataStream, "Alternate data streams and ':' in names are not allowed.");
+        }
+
+        if (ExactPath.ToExtended(path) is not { } exact || !exact.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+        {
+            return Reject(ScanPathRejection.Malformed, "The network path needs a server and a share and can't be normalised exactly.");
+        }
+
+        var components = exact[@"\\?\UNC\".Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length < 2 || components[0] is "." or "?")
+        {
+            return Reject(ScanPathRejection.Malformed, "The network path needs a server and a share.");
+        }
+
+        foreach (var component in components)
         {
             if (component.Length > MaxComponentLength)
             {

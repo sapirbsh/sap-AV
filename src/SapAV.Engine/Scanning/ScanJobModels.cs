@@ -20,6 +20,20 @@ public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Tri
     /// <summary>Who asked (review B H3): capacity reservation, the pause / orphan limits and the worker priority depend on it.</summary>
     internal ScanJobOrigin Origin { get; init; } = ScanJobOrigin.Engine;
 
+    /// <summary>
+    /// A2 W-A: scan files and folders on remote file systems (UNC paths, network drives, objects that report themselves
+    /// remote). Off by default: remote objects are refused before they are opened where possible, and reported NotScanned
+    /// (<see cref="ScanSkipReason.RemoteFile"/>) when they turn out remote after the open. The pipe sets it only for an
+    /// administrator who asked for it.
+    /// </summary>
+    internal bool AllowRemoteFiles { get; init; }
+
+    /// <summary>
+    /// Section B M1 / M2: whose budget the job's alerts, auto-quarantines and quarantine quota count against. Null =
+    /// the engine's own (per trigger). The pipe sets the requesting user.
+    /// </summary>
+    internal System.Security.Principal.SecurityIdentifier? Requester { get; init; }
+
     /// <exception cref="ArgumentException">No paths, or a path that isn't fully qualified.</exception>
     internal void Validate()
     {

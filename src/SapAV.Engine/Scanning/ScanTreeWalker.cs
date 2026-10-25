@@ -43,7 +43,7 @@ internal readonly record struct ScanTreeEntry(
 /// that handle (review B H2) and a parent renamed or replaced after the listing can't redirect the open.
 /// Runs on the job's enumerator thread; nothing here reads file content.
 /// </summary>
-internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>? reparseTag = null)
+internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remote = null)
 {
     /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
     public ScanTreeWalker(FolderSet excluded, Func<string, uint?>? reparseTag = null)
@@ -56,16 +56,17 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
 
     /// <summary>Walks every root in order, calling <paramref name="emit"/> for each entry (it may block for back-pressure or pause).</summary>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    public void Walk(IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access = null)
+    public void Walk(
+        IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access = null, bool allowRemote = false)
     {
         foreach (var root in roots)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            WalkRoot(root, emit, cancellationToken, access);
+            WalkRoot(root, emit, cancellationToken, access, allowRemote);
         }
     }
 
-    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access)
+    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote)
     {
         // B3 review H1: walk in the exact \\?\ form, so "x." and "evil.exe." keep their names.
         if (ExactPath.ToExtended(requested) is not { } root)
@@ -81,7 +82,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return;
         }
 
-        var handle = SafeTree.Open(root, SafeTree.DirectoryAccess, SafeTree.ShareAll, 0, out var failure, out _);
+        var handle = SafeTree.Open(root, SafeTree.DirectoryAccess, SafeTree.ShareAll, 0, out var failure, out _, allowRemote);
         if (handle is null)
         {
             // A link (on the way or the root itself) is skipped; anything else goes to the opener, which reports why.
@@ -97,7 +98,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return;
         }
 
-        WalkTree(root, handle, emit, cancellationToken, access);
+        WalkTree(root, handle, emit, cancellationToken, access, allowRemote);
     }
 
     private sealed class Frame(string path, SharedFolder folder, List<string> subdirectories) : IDisposable
@@ -115,12 +116,13 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     }
 
     /// <summary>Depth first; one handle per level is open (the chain from the root to the current folder).</summary>
-    private void WalkTree(string root, SafeFileHandle rootHandle, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access)
+    private void WalkTree(
+        string root, SafeFileHandle rootHandle, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote)
     {
         var stack = new Stack<Frame>();
         try
         {
-            if (Visit(root, rootHandle, emit, access) is { } first)
+            if (Visit(root, rootHandle, emit, access, allowRemote) is { } first)
             {
                 stack.Push(first);
             }
@@ -153,7 +155,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
                     continue;
                 }
 
-                if (Visit(path, child, emit, access) is { } frame)
+                if (Visit(path, child, emit, access, allowRemote) is { } frame)
                 {
                     stack.Push(frame);
                 }
@@ -169,7 +171,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     }
 
     /// <summary>Checks and lists one folder from its handle; emits its files. Null (handle disposed) if it can't be listed.</summary>
-    private Frame? Visit(string directory, SafeFileHandle handle, Action<ScanTreeEntry> emit, IScanAccessCheck? access)
+    private Frame? Visit(string directory, SafeFileHandle handle, Action<ScanTreeEntry> emit, IScanAccessCheck? access, bool allowRemote)
     {
         string shown = ExactPath.ForOpening(directory);
         if (access is not null && !access.CanList(handle))
@@ -177,6 +179,14 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             // B4: the requester can't list this folder, so the job doesn't either (and never descends below it).
             handle.Dispose();
             emit(new(shown, ScanTreeEntryKind.Unreadable, Detail: "AccessDenied (requester)"));
+            return null;
+        }
+
+        if (!allowRemote && (remote ?? RemoteFileProbe.Instance).Classify(handle) != FileLocation.Local)
+        {
+            // A2 W-A / B3 M1: a folder on a remote file system is never listed (see RemoteFileProbe for what this can't prevent).
+            handle.Dispose();
+            emit(new(shown, ScanTreeEntryKind.Unreadable, Detail: "RemoteFolder"));
             return null;
         }
 

@@ -237,7 +237,11 @@ public sealed record HelloReply(int Version, string EngineVersion, ClientInfo Cl
 
 public sealed record EngineStatusReply(string EngineVersion, bool QuarantineAvailable, int VisibleJobs, int RunningJobs);
 
-public sealed record ScanCreateRequest(IReadOnlyList<string> Paths);
+/// <param name="AllowRemote">
+/// Administrators only (a standard user asking for it is refused): also scan UNC paths and network drives. Off by default,
+/// because opening a remote path makes the SYSTEM engine authenticate to that server.
+/// </param>
+public sealed record ScanCreateRequest(IReadOnlyList<string> Paths, bool AllowRemote = false);
 
 /// <param name="Paths">The normalised paths the job will scan.</param>
 public sealed record ScanCreateReply(Guid JobId, IReadOnlyList<WirePath> Paths);

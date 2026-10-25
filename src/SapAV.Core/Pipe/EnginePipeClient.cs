@@ -164,8 +164,8 @@ public sealed class EnginePipeClient : IAsyncDisposable
 
     // ---- Typed helpers ----
 
-    public Task<ScanCreateReply> CreateScanAsync(IReadOnlyList<string> paths, CancellationToken cancellationToken = default) =>
-        SendAsync<ScanCreateReply>(PipeRequestKind.ScanCreate, new ScanCreateRequest(paths), cancellationToken);
+    public Task<ScanCreateReply> CreateScanAsync(IReadOnlyList<string> paths, CancellationToken cancellationToken = default, bool allowRemote = false) =>
+        SendAsync<ScanCreateReply>(PipeRequestKind.ScanCreate, new ScanCreateRequest(paths, allowRemote), cancellationToken);
 
     public Task<JobActionReply> StartScanAsync(Guid jobId, CancellationToken cancellationToken = default) =>
         SendAsync<JobActionReply>(PipeRequestKind.ScanStart, new JobRequest(jobId), cancellationToken);
