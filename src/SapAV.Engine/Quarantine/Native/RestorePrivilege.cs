@@ -35,6 +35,13 @@ internal static class RestorePrivilege
     {
         ArgumentNullException.ThrowIfNull(action);
 
+        // Review C1 L1: RevertToSelf below drops *any* thread token. A caller that is impersonating (e.g. a pipe client)
+        // would silently continue as the process (SYSTEM) afterwards, so that is refused outright.
+        if (ThreadHasToken())
+        {
+            throw new InvalidOperationException("RestorePrivilege.Run must not be called while the thread is impersonating.");
+        }
+
         if (!ImpersonateSelf(SecurityImpersonation))
         {
             return Marshal.GetLastPInvokeError();

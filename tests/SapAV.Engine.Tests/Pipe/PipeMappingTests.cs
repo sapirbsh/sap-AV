@@ -109,17 +109,38 @@ public sealed class PipeResultFieldsTests
     }
 
     [Fact]
-    public void SignerAndUrl_AreCappedAndCleaned_HashOnlyWhenTheRequesterCouldRead()
+    public void SignerAndUrl_AreCappedAndCleanedForAdmins_HashOnlyWhenTheRequesterCouldRead()
     {
-        var info = PipeMapping.Result(0, Flagged());
+        var info = PipeMapping.Result(0, Flagged(), forAdmin: true);
         var hidden = PipeMapping.Result(0, Flagged(couldRead: false));
 
         Assert.Equal(Core.Signatures.SignatureStatus.OtherTrusted, info.SignatureStatus);
         Assert.True(info.Signer!.Length <= PipeMapping.MaxSignerLength);
-        Assert.DoesNotContain('\u202E', info.Signer);
+        Assert.DoesNotContain('‮', info.Signer);
         Assert.True(info.SourceUrl!.Length <= PipeMapping.MaxUrlLength);
         Assert.Null(hidden.Sha256);
     }
+
+    [Theory]
+    [InlineData("OtherTrusted", "Contoso Ltd", null)] // a worker-supplied name is never shown to a standard user
+    [InlineData("Microsoft", "Totally Microsoft ‮exe.", "Microsoft")] // only the fixed word
+    [InlineData("UnsignedOrInvalid", null, null)]
+    public void StandardUsers_GetOnlyAFixedSignerWord(string status, string? signer, string? expected)
+    {
+        var r = Flagged() with { SignatureStatus = Enum.Parse<Core.Signatures.SignatureStatus>(status), Signer = signer };
+
+        Assert.Equal(expected, PipeMapping.Result(0, r).Signer);
+    }
+
+    [Theory]
+    [InlineData("https://***@Downloads.Example.TEST/path/x.exe", "downloads.example.test")]
+    [InlineData("https://bücher.example/x", "xn--bcher-kva.example")] // IDN to punycode
+    [InlineData("http://[::1]/x", null)] // not a plain host name
+    [InlineData("https://example.test/leak/of/other/file/content", "example.test")] // the path never reaches the user
+    [InlineData("not a url", null)]
+    public void StandardUsers_GetOnlyTheValidatedDownloadHost(string url, string? expected) =>
+        Assert.Equal(expected, PipeMapping.Result(0, Flagged() with { SourceUrl = url }).SourceUrl);
+
 
     [Fact]
     public void NotScanned_HasAnEngineReasonAndTemplate_NeverTheStoredDetail()
@@ -142,7 +163,7 @@ public sealed class PipeResultFieldsTests
     [Fact]
     public void NewFields_RoundTripWithTheStrictOptions()
     {
-        var info = PipeMapping.Result(3, Flagged());
+        var info = PipeMapping.Result(3, Flagged(), forAdmin: true);
 
         var back = JsonSerializer.Deserialize<JobFileResultInfo>(JsonSerializer.SerializeToUtf8Bytes(info, PipeJson.Options), PipeJson.Options)!;
 

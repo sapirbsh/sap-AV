@@ -301,8 +301,10 @@ public enum NotScannedReason
 /// (sanitised, capped); everyone else gets engine templates built from the detection source, verdict and MITRE ID.</param>
 /// <param name="TechniqueIds">MITRE ATT&amp;CK technique IDs of the detections, primary first, distinct (at most 8).</param>
 /// <param name="SignatureStatus">The Authenticode outcome, if checked.</param>
-/// <param name="Signer">The trusted signer's name (Microsoft / OtherTrusted only), sanitised and capped.</param>
-/// <param name="SourceUrl">The Mark-of-the-Web download URL in log form (no user info, query or fragment), capped.</param>
+/// <param name="Signer">Administrators: the trusted signer's name (Microsoft / OtherTrusted only), sanitised and capped. Everyone
+/// else: "Microsoft" for a Microsoft signature, otherwise absent (scanner text never reaches a standard user).</param>
+/// <param name="SourceUrl">Administrators: the Mark-of-the-Web download URL in log form (no user info, query or fragment), capped.
+/// Everyone else: only the download host (punycode, lowercase, a-z 0-9 . -), or absent.</param>
 /// <param name="NotScannedReason">Why the file wasn't scanned; null when it was.</param>
 public sealed record JobFileResultInfo(
     int ResultId, WirePath Path, ScanStatus Status, Verdict? Verdict, FileAction Action, string? Detail, string? Sha256,

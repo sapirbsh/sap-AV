@@ -57,9 +57,42 @@ internal static class PipeMapping
             Reasons: ordered.Take(MaxReasons).Select(d => forAdmin ? Text(d.Reason, MaxReasonLength) : ReasonTemplate(d)).ToArray(),
             TechniqueIds: TechniqueIds(ordered),
             SignatureStatus: r.SignatureStatus,
-            Signer: r.Signer is null ? null : Text(r.Signer, MaxSignerLength),
-            SourceUrl: r.SourceUrl is null ? null : Text(r.SourceUrl, MaxUrlLength),
+            Signer: forAdmin ? (r.Signer is null ? null : Text(r.Signer, MaxSignerLength)) : SignerForUser(r),
+            SourceUrl: forAdmin ? (r.SourceUrl is null ? null : Text(r.SourceUrl, MaxUrlLength)) : SourceHostForUser(r.SourceUrl),
             NotScannedReason: r.SkipReason is { } skip ? Map(skip) : null);
+    }
+
+    /// <summary>
+    /// Review C1 M1: the signer name and the URL are scan-worker text, and worker slots are shared by every requester, so a
+    /// compromised worker could use them to pass other scans' content to a standard user, or spoof them in the UI. A standard
+    /// user gets the fixed word "Microsoft" for a Microsoft signature and nothing otherwise (the status enum still says
+    /// OtherTrusted / UnsignedOrInvalid).
+    /// </summary>
+    internal static string? SignerForUser(ScanJobFileResult r) =>
+        r.SignatureStatus == Core.Signatures.SignatureStatus.Microsoft ? "Microsoft" : null;
+
+    /// <summary>
+    /// Review C1 M1: a standard user gets only the download host, IDN-normalised to punycode, lowercase, and only if it is
+    /// 1-253 characters of a-z, 0-9, '.' and '-'; anything else (IP literals with brackets, odd hosts) is left out.
+    /// </summary>
+    internal static string? SourceHostForUser(string? url)
+    {
+        if (url is null || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        string host;
+        try
+        {
+            host = uri.IdnHost.ToLowerInvariant();
+        }
+        catch (Exception ex) when (ex is UriFormatException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+
+        return host.Length is >= 1 and <= 253 && host.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '.' or '-') ? host : null;
     }
 
     public static NotScannedReason Map(ScanSkipReason reason) => Enum.Parse<NotScannedReason>(reason.ToString());

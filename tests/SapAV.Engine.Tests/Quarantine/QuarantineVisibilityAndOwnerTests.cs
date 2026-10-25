@@ -148,6 +148,23 @@ public sealed class QuarantineVisibilityAndOwnerTests
     }
 
     [Fact]
+    public void RestorePrivilege_RefusesAnImpersonatingThread_AndLeavesItsTokenAlone()
+    {
+        using var me = WindowsIdentity.GetCurrent();
+        bool ran = false;
+
+        WindowsIdentity.RunImpersonated(me.AccessToken, () =>
+        {
+            Assert.True(RestorePrivilege.ThreadHasToken());
+            Assert.Throws<InvalidOperationException>(() => RestorePrivilege.Run(() => { ran = true; return 0; }, "SeChangeNotifyPrivilege"));
+            Assert.True(RestorePrivilege.ThreadHasToken()); // still impersonating: nothing was reverted
+        });
+
+        Assert.False(ran);
+        Assert.False(RestorePrivilege.ThreadHasToken());
+    }
+
+    [Fact]
     public async Task RuleErrors_AreCountsOnly_ForAStandardUsersJob_ButNamedForOthers()
 
     {

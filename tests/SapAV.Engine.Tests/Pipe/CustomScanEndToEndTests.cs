@@ -47,7 +47,7 @@ public sealed class CustomScanEndToEndTests
         Assert.DoesNotContain("B5_Marker", reason, StringComparison.Ordinal); // worker text never reaches a standard user
         Assert.NotEmpty(bad.TechniqueIds);
         Assert.NotNull(bad.SignatureStatus);
-        Assert.Equal("https://***@downloads.example.test/files/dropper.bin", bad.SourceUrl); // user info redacted, no query / fragment
+        Assert.Equal("downloads.example.test", bad.SourceUrl); // review C1 M1: a standard user gets the host only
         var alert = Assert.Single(engine.Sink.Alerts);
         Assert.Equal((ScanTrigger.CustomScan, AlertAction.Quarantined), (alert.Trigger, alert.Action));
     }
