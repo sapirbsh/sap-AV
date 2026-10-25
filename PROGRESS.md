@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1 built (review running) |
+| C — Scan modes | **In progress:** C1 built, review fixes in progress |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -110,7 +110,10 @@ machine; 0 build warnings.
 - quarantine items are visible only to users who could read the original file;
 - a restored file is owned by the requesting user again.
 
-Tests: Core 1179 + 1 skipped, Engine 399 + 8 skipped. **Now:** C1's immediate review.
+Tests: Core 1179 + 1 skipped, Engine 399 + 8 skipped. C1's review came back **NOT CLEAN** (1 High): restoring always made the requester the owner, so an admin restoring a
+Program Files or System32 file would let non-elevated malware in their session replace it. **Being fixed now:** restore
+the original owner, reduce Signer/SourceUrl for standard users, and guard the restore privilege. Medium/Low findings
+are in ROADMAP.md. Then C2+C3 (autostart collectors and judgement).
 
 **Open for the user**
 - In an **elevated** PowerShell in `C:\Projects\sap-AV`, run

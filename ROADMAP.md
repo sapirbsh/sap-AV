@@ -400,6 +400,30 @@ the live Windows defaults for classic logs.
 - **X2 docs (L7):** users can still write Application events with look-alike sources (`sap-AV ` with a trailing space,
   homoglyphs). SIEM docs must say: filter on `Channel == "sap-AV"`, never on the provider name alone.
 
+**Carried over from the C1 review (Medium/Low).** H1 (restore gave the file to the requester, including admins →
+silent elevation path), M1 (Signer/SourceUrl as a worker → standard-user channel) and L1 (RestorePrivilege refusing an
+already-impersonating thread) are fixed in C1.
+- **Before F1 exposes it (M2):** the admin `AllowRemote` opt-in makes SYSTEM authenticate to the server with the machine
+  account (NTLM relay risk on domain-joined machines), and the scan runs with the computer's rights on the share. Open
+  remote paths while impersonating the admin client, or at least show the server name for explicit confirmation in the
+  UI and document the risk.
+- **C5 / C6 (L2):** a file root's size goes into BytesTotal before the access check. Run the access check first for
+  standard-user jobs.
+- **C6 (L3, acceptable):** remaining access-first side channels: NotFound is faster than "exists but denied"; the
+  CheckRoot parent-list check is path-based; subfolder Unreadable details are visible in folders the user can list.
+- **C6 (L4):** the RemoteFileProbe error mapping (87/1/50 = local) is verified only on NTFS. On ReFS/Dev Drive, FAT,
+  exFAT or UDF an unexpected code would make every file look remote (fails closed, but a coverage gap). Log Unknown once per
+  volume with the error code; add a VHD-based ReFS/FAT test under a RequiresFact.
+- **F1 (L5):** an owner whose DACL denies them read can't see their own quarantined item, and dropping the parent-list
+  check shows paths from folders the user can't list. Optionally also show the item to `RequestedBy == user`.
+- **D1 (L6):** the requester quota check decrypts every metadata file per request (O(N); bounded by the rate limit, not
+  for auto-quarantines in user jobs). The global 4 GiB quota is reachable by 8 users. Real-time quarantines of files a
+  user drops use only the engine budget and the global quota.
+- **D1 (L7):** a Malicious alert from a user's own job can be dropped when that user's half of the alert queue is full
+  (counted, with hashes, in the summary). Document this next to "Malicious alerts are never dropped".
+- **Tests:** add an end-to-end "local file symlink → `\\localhost\C$\…` is refused" test (RequiresFact DeveloperMode +
+  AdminShare) that exercises the post-open remote check; visibility tests with a null DACL and inherited ACEs.
+
 **Carried over from the section B review (cross-step; Medium/Low).** H1 (`%ProgramData%\sap-AV` writable by users and
 wholly excluded), H2 (admin/engine jobs following links on file opens) and H3 (one user blocking all scans with paused
 jobs) are fixed in section B. M4 (startup resilience + health alerts, incl. B6 M2), M5 (pipe name in
