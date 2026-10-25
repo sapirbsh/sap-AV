@@ -24,9 +24,10 @@ public sealed partial class QuarantineManager
     /// verified, then renamed (no replace) to the original name, or <c>name (restored N).ext</c> (N = 1..99) if that is
     /// taken. If every name is taken the restore fails with <see cref="RestoreStatus.TargetExists"/>.</para>
     /// <para>Restored: content, attributes, creation/last-write/last-access times, the DACL (explicit entries, or the
-    /// whole protected DACL), the owner when the engine is allowed to set it, and the Zone.Identifier stream.</para>
+    /// whole protected DACL), the owner (the requesting user, section B M3; otherwise the original owner where allowed), and
+    /// the Zone.Identifier stream.</para>
     /// </remarks>
-    public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default)
+    public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, SecurityIdentifier? requester = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!QuarantineItemId.IsValid(itemId))
@@ -39,10 +40,10 @@ public sealed partial class QuarantineManager
             return Task.FromResult(new RestoreResult(RestoreStatus.StoreUnavailable, "The quarantine store is not available."));
         }
 
-        return Task.Run(() => RestoreLocked(store, key, itemId), CancellationToken.None);
+        return Task.Run(() => RestoreLocked(store, key, itemId, requester), CancellationToken.None);
     }
 
-    private RestoreResult RestoreLocked(QuarantineStore store, byte[] key, string id)
+    private RestoreResult RestoreLocked(QuarantineStore store, byte[] key, string id, SecurityIdentifier? requester)
     {
         RestoreResult result;
         QuarantineMetadata? metadata;
@@ -53,7 +54,7 @@ public sealed partial class QuarantineManager
                 return new(RestoreStatus.Busy, "Another operation on this item is running.");
             }
 
-            (result, metadata) = RestoreCore(store, key, id);
+            (result, metadata) = RestoreCore(store, key, id, requester);
         }
 
         if (result.Status != RestoreStatus.Restored)
@@ -67,7 +68,7 @@ public sealed partial class QuarantineManager
         return result;
     }
 
-    private (RestoreResult, QuarantineMetadata?) RestoreCore(QuarantineStore store, byte[] key, string id)
+    private (RestoreResult, QuarantineMetadata?) RestoreCore(QuarantineStore store, byte[] key, string id, SecurityIdentifier? requester)
     {
         if (!TryLoadForRestore(store, key, id, out var metadata, out var refusal))
         {
@@ -92,7 +93,7 @@ public sealed partial class QuarantineManager
         }
 
         Hook(QuarantineStep.RestoreJournalWritten);
-        var written = WriteTarget(store, directory, restoring, out var notes);
+        var written = WriteTarget(store, directory, restoring, requester, out var notes);
         if (written.Status != RestoreStatus.Restored)
         {
             Revert(store, key, metadata);
@@ -148,7 +149,8 @@ public sealed partial class QuarantineManager
     /// renames it to a free name. On success <see cref="RestoreResult.RestoredPath"/> holds the final <b>file name</b>.
     /// On failure the temp file is deleted by handle.
     /// </summary>
-    private RestoreResult WriteTarget(QuarantineStore store, SafeFileHandle directory, QuarantineMetadata metadata, out List<string> notes)
+    private RestoreResult WriteTarget(
+        QuarantineStore store, SafeFileHandle directory, QuarantineMetadata metadata, SecurityIdentifier? requester, out List<string> notes)
     {
         notes = [];
         var target = CreateTemp(directory, metadata.RestoreTempName!, out bool canSetOwner, out int error);
@@ -173,7 +175,7 @@ public sealed partial class QuarantineManager
                     throw new InvalidDataException("The restored content did not verify.");
                 }
 
-                ApplyMetadata(target, metadata, canSetOwner, notes);
+                ApplyMetadata(target, metadata, canSetOwner, requester, notes);
                 Hook(QuarantineStep.RestoreTempWritten);
                 string? name = RenameToFreeName(target, directory, Path.GetFileName(metadata.OriginalPath));
                 if (name is null)
@@ -212,17 +214,16 @@ public sealed partial class QuarantineManager
     }
 
     /// <summary>MOTW stream, DACL, owner, then attributes and times last (writes would change the times).</summary>
-    private static void ApplyMetadata(SafeFileHandle target, QuarantineMetadata metadata, bool canSetOwner, List<string> notes)
+    private static void ApplyMetadata(
+        SafeFileHandle target, QuarantineMetadata metadata, bool canSetOwner, SecurityIdentifier? requester, List<string> notes)
     {
         if (metadata.ZoneIdentifier is { } zone)
         {
             WriteZoneIdentifier(target, zone, notes);
         }
 
-        if (metadata.SecurityDescriptor is { } sddl)
-        {
-            ApplySecurity(target, sddl, canSetOwner, notes);
-        }
+        var originalOwner = metadata.SecurityDescriptor is { } sddl ? ApplySecurity(target, sddl, notes) : null;
+        ApplyOwner(target, requester ?? originalOwner, requester is not null, canSetOwner, notes);
 
         var attributes = (uint)((FileAttributes)metadata.Attributes & RestorableAttributes);
         N.SetBasicInfo(target,
@@ -249,10 +250,10 @@ public sealed partial class QuarantineManager
 
     /// <summary>
     /// A protected original DACL is restored as is. An inheriting one: only its explicit entries are set (unprotected, possibly
-    /// none), so the inherited part is recomputed from the folder the file is in. The owner is set only if allowed (SYSTEM needs
-    /// SeRestorePrivilege to give a file to another user; it is not enabled, so that becomes a note).
+    /// none), so the inherited part is recomputed from the folder the file is in. Returns the original owner (set by
+    /// <see cref="ApplyOwner"/>).
     /// </summary>
-    private static void ApplySecurity(SafeFileHandle target, string sddl, bool canSetOwner, List<string> notes)
+    private static SecurityIdentifier? ApplySecurity(SafeFileHandle target, string sddl, List<string> notes)
     {
         RawSecurityDescriptor original;
         try
@@ -262,7 +263,7 @@ public sealed partial class QuarantineManager
         catch (ArgumentException)
         {
             notes.Add("The original security descriptor could not be parsed; the folder's default ACL applies.");
-            return;
+            return null;
         }
 
         if (original.DiscretionaryAcl is { } dacl)
@@ -291,23 +292,45 @@ public sealed partial class QuarantineManager
             }
         }
 
-        if (original.Owner is { } owner && owner != CurrentOwner(target))
-        {
-            if (!canSetOwner)
-            {
-                notes.Add($"The original owner ({owner.Value}) could not be restored (no permission to change the owner).");
-                return;
-            }
+        return original.Owner;
+    }
 
-            var sid = new byte[owner.BinaryLength];
-            owner.GetBinaryForm(sid, 0);
-            int result = N.SetSecurity(target, N.OwnerSecurityInformation, sid, null);
-            if (result != 0)
-            {
-                notes.Add($"The original owner ({owner.Value}) could not be restored (Win32 error {result}).");
-            }
+    /// <summary>
+    /// Section B M3: the restored file's owner. With a requester it becomes the requesting user's (so it isn't later taken
+    /// for a SYSTEM-protected file and refused for auto-quarantine, and the user can manage it), otherwise the recorded
+    /// original owner. Giving a file to another account needs SeRestorePrivilege: it is enabled on this thread only, for
+    /// this one call (<see cref="Native.RestorePrivilege"/>), and only if setting the owner without it was refused.
+    /// </summary>
+    private static void ApplyOwner(SafeFileHandle target, SecurityIdentifier? owner, bool isRequester, bool canSetOwner, List<string> notes)
+    {
+        if (owner is null || owner == CurrentOwner(target))
+        {
+            return;
+        }
+
+        string who = isRequester ? $"the requesting user ({owner.Value})" : $"the original owner ({owner.Value})";
+        if (!canSetOwner)
+        {
+            notes.Add($"The file could not be given to {who} (no permission to change the owner).");
+            return;
+        }
+
+        var sid = new byte[owner.BinaryLength];
+        owner.GetBinaryForm(sid, 0);
+        int result = N.SetSecurity(target, N.OwnerSecurityInformation, sid, null);
+        if (result == ErrorInvalidOwner)
+        {
+            result = Native.RestorePrivilege.Run(() => N.SetSecurity(target, N.OwnerSecurityInformation, sid, null));
+        }
+
+        if (result != 0)
+        {
+            notes.Add($"The file could not be given to {who} (Win32 error {result}).");
         }
     }
+
+    /// <summary>ERROR_INVALID_OWNER: the SID may not be made owner without SeRestorePrivilege.</summary>
+    private const int ErrorInvalidOwner = 1307;
 
     private static SecurityIdentifier? CurrentOwner(SafeFileHandle handle)
     {

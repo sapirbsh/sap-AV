@@ -452,7 +452,7 @@ public sealed partial class QuarantineManager
             var notes = new List<string>();
             if (metadata.SecurityDescriptor is { } sddl)
             {
-                ApplySecurity(source.File, sddl, canSetOwner: false, notes);
+                ApplySecurity(source.File, sddl, notes); // the rename kept the owner
             }
 
             DeleteMetadataQuietly(store, metadata.Id);

@@ -123,9 +123,13 @@ internal sealed class RecordingQuarantine : IQuarantineService
     public Task<QuarantineResult> QuarantineHandleAsync(SafeFileHandle handle, FileScanReport report, Guid? alertId = null,
         CancellationToken cancellationToken = default, QuarantineRequester? requester = null) => QuarantineAsync(report, alertId, cancellationToken, requester);
 
-    public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default)
+    /// <summary>The requester of each restore, in order.</summary>
+    public List<SecurityIdentifier?> RestoreRequesters { get; } = [];
+
+    public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, SecurityIdentifier? requester = null)
     {
         Restored.Add(itemId);
+        RestoreRequesters.Add(requester);
         return Task.FromResult(new RestoreResult(RestoreStatus.Restored, "restored", Get(itemId)?.OriginalPath));
     }
 
@@ -133,9 +137,15 @@ internal sealed class RecordingQuarantine : IQuarantineService
 
     public QuarantineEntry? Get(string itemId) => Entries.FirstOrDefault(e => e.Id == itemId);
 
-    public static QuarantineEntry Entry(string originalPath, string id = "item1", IReadOnlyList<string>? reasons = null) =>
+    /// <param name="sddl">The recorded original security descriptor (default: Everyone may read it).</param>
+    public static QuarantineEntry Entry(string originalPath, string id = "item1", IReadOnlyList<string>? reasons = null, string? sddl = EveryoneReads) =>
         new(id, QuarantineEntryIntegrity.Valid, Core.Quarantine.QuarantineState.Quarantined, originalPath, 3, new string('a', 64),
-            Verdict.Malicious, reasons ?? ["YARA rule Test matched"], ["T1204.002"], DateTimeOffset.UnixEpoch, null, false);
+            Verdict.Malicious, reasons ?? ["YARA rule Test matched"], ["T1204.002"], DateTimeOffset.UnixEpoch, null, false)
+        {
+            OriginalSecurityDescriptor = sddl,
+        };
+
+    public const string EveryoneReads = "O:BAG:BAD:(A;;FA;;;BA)(A;;FR;;;WD)";
 }
 
 /// <summary>Deny ACEs for the current user on a test folder or file, removed again on dispose.</summary>

@@ -27,7 +27,7 @@ internal readonly record struct PipeReply(PipeStatus Status, object? Body = null
 /// <item><b>Quarantine a result</b>: by job + result ID only (the engine's own report); a standard user needs DELETE on the
 /// file or FILE_DELETE_CHILD on its folder.</item>
 /// <item><b>Restore</b>: an administrator, or a user with FILE_ADD_FILE on the original folder.</item>
-/// <item><b>Quarantine list/get</b>: an administrator, or a user who can list the item's original folder.</item>
+/// <item><b>Quarantine list/get</b>: an administrator, or a user who could read the original file (its recorded DACL).</item>
 /// <item><b>Caps</b>: request rate per user, pending / active jobs per user, pending jobs in total, subscriptions.</item>
 /// </list>
 /// Malformed bodies (<see cref="JsonException"/>, model <see cref="ArgumentException"/>s) become BadRequest replies.
@@ -340,10 +340,15 @@ internal sealed class PipeRequestHandler : IDisposable
 
     // ---- Quarantine ----
 
-    private bool CanSeeItem(IClientIdentity client, QuarantineEntry entry) =>
+    /// <summary>
+    /// Section B L3: a standard user sees an item only if they could have read the original file: AccessCheck against the
+    /// owner, group and DACL recorded in its signed metadata (no file system access, so it also works once the folder is
+    /// gone). Listing the folder isn't enough: the item shows the file's SHA-256 and reasons.
+    /// </summary>
+    private static bool CanSeeItem(IClientIdentity client, QuarantineEntry entry) =>
         client.IsAdmin
-        || (entry.Integrity == QuarantineEntryIntegrity.Valid && entry.OriginalPath is { } original
-            && ClientAccess.ParentOf(original) is { } folder && ClientAccess.CanReadOrList(client, folder) == AccessDecision.Granted);
+        || (entry.Integrity == QuarantineEntryIntegrity.Valid
+            && ClientAccess.IsGrantedByStoredDescriptor(client, entry.OriginalSecurityDescriptor, PipeNative.FileReadData));
 
     private PipeReply QuarantineList(PipeSession session)
     {
@@ -385,7 +390,7 @@ internal sealed class PipeRequestHandler : IDisposable
             return PipeReply.Fail(PipeStatus.AccessDenied, "You may not create files in the original folder; ask an administrator to restore it.");
         }
 
-        var result = await quarantine.RestoreAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+        var result = await quarantine.RestoreAsync(entry.Id, cancellationToken, client.User).ConfigureAwait(false); // section B M3: owned by the requester
         _logger.LogInformation("Pipe: user {User} restored quarantine item {Item}: {Status}.", client.User.Value, entry.Id, result.Status);
         return PipeReply.Ok(PipeMapping.Restore(result));
     }

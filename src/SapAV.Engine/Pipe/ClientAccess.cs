@@ -80,6 +80,40 @@ internal static class ClientAccess
         return sd is not null && client.IsGranted(sd, desiredAccess);
     }
 
+    /// <summary>
+    /// Section B L3: AccessCheck of the client against a descriptor recorded earlier (a quarantined file's original owner,
+    /// group and DACL, as SDDL from the signed metadata), e.g. "could this user have read the original file?". False when it
+    /// is missing, unparsable or has no owner (fails closed); a missing group is taken to be the owner (AccessCheck needs one).
+    /// </summary>
+    public static bool IsGrantedByStoredDescriptor(IClientIdentity client, string? sddl, uint desiredAccess)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        if (string.IsNullOrEmpty(sddl))
+        {
+            return false;
+        }
+
+        System.Security.AccessControl.RawSecurityDescriptor sd;
+        try
+        {
+            sd = new System.Security.AccessControl.RawSecurityDescriptor(sddl);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        if (sd.Owner is null)
+        {
+            return false;
+        }
+
+        sd.Group ??= sd.Owner;
+        var bytes = new byte[sd.BinaryLength];
+        sd.GetBinaryForm(bytes, 0);
+        return client.IsGranted(bytes, desiredAccess);
+    }
+
     /// <summary>The client may read (files) or list (folders) <paramref name="path"/>: FILE_READ_DATA / FILE_LIST_DIRECTORY.</summary>
     public static AccessDecision CanReadOrList(IClientIdentity client, string path) => Check(client, path, PipeNative.FileReadData);
 

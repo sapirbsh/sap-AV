@@ -379,13 +379,16 @@ public sealed class PipeAuthorizationTests
     }
 
     [Fact]
-    public async Task QuarantineItems_AreVisibleOnlyToUsersWhoCanListTheOriginalFolder()
+    public async Task QuarantineItems_AreVisibleOnlyToUsersWhoCouldReadTheOriginalFile_PerTheRecordedDacl()
     {
         using var h = new HandlerHarness();
         string hidden = Directory.CreateDirectory(Path.Combine(h.Jobs.Root, "other-user")).FullName;
         HandlerHarness.Mark(hidden);
+        string markedSddl = RecordingQuarantine.EveryoneReads + $"(A;;FR;;;{HandlerHarness.Marker.Value})"; // the user may not read it
         h.Quarantine.Entries.Add(RecordingQuarantine.Entry(Path.Combine(h.Jobs.Root, "mine.bin"), "mine"));
-        h.Quarantine.Entries.Add(RecordingQuarantine.Entry(Path.Combine(hidden, "theirs.bin"), "theirs"));
+        h.Quarantine.Entries.Add(RecordingQuarantine.Entry(Path.Combine(h.Jobs.Root, "theirs.bin"), "theirs", sddl: markedSddl)); // listable folder
+        h.Quarantine.Entries.Add(RecordingQuarantine.Entry(Path.Combine(hidden, "readable.bin"), "readable")); // unlistable folder, readable file
+        h.Quarantine.Entries.Add(RecordingQuarantine.Entry(Path.Combine(h.Jobs.Root, "nosd.bin"), "nosd", sddl: null));
         h.Quarantine.Entries.Add(QuarantineEntry.Invalid("broken"));
         var user = h.Session(HandlerHarness.MarkedUser());
         var admin = h.Session(new FakeClientIdentity(isAdmin: true));
@@ -393,8 +396,8 @@ public sealed class PipeAuthorizationTests
         var userList = (QuarantineListReply)(await h.SendAsync(user, PipeRequestKind.QuarantineList)).Body!;
         var adminList = (QuarantineListReply)(await h.SendAsync(admin, PipeRequestKind.QuarantineList)).Body!;
 
-        Assert.Equal(["mine"], userList.Items.Select(i => i.Id));
-        Assert.Equal(3, adminList.Items.Count);
+        Assert.Equal(["mine", "readable"], userList.Items.Select(i => i.Id));
+        Assert.Equal(5, adminList.Items.Count);
         Assert.Equal(PipeStatus.NotFound, (await h.SendAsync(user, PipeRequestKind.QuarantineGet, new QuarantineItemRequest("theirs"))).Status);
         Assert.Equal(PipeStatus.NotFound, (await h.SendAsync(user, PipeRequestKind.QuarantineRestore, new QuarantineItemRequest("theirs"))).Status);
     }

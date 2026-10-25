@@ -130,9 +130,19 @@ public sealed record QuarantineEntry(
     Guid? AlertId,
     bool HasMarkOfTheWeb)
 {
+    /// <summary>
+    /// The original file's owner, group and DACL (SDDL) from the signed metadata, for the engine's own checks only (section B
+    /// L3: who may see the item). Never sent to a client.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal string? OriginalSecurityDescriptor { get; init; }
+
     internal static QuarantineEntry From(QuarantineMetadata m) => new(
         m.Id, QuarantineEntryIntegrity.Valid, m.State, m.OriginalPath, m.SizeBytes, m.Sha256, m.Verdict,
-        m.Reasons.ToArray(), m.TechniqueIds.ToArray(), m.QuarantinedAtUtc, m.AlertId, m.ZoneIdentifier is not null);
+        m.Reasons.ToArray(), m.TechniqueIds.ToArray(), m.QuarantinedAtUtc, m.AlertId, m.ZoneIdentifier is not null)
+    {
+        OriginalSecurityDescriptor = m.SecurityDescriptor,
+    };
 
     internal static QuarantineEntry Invalid(string id) =>
         new(id, QuarantineEntryIntegrity.Invalid, null, null, null, null, null, [], [], null, null, false);
@@ -179,7 +189,11 @@ public interface IQuarantineService
     /// <summary>
     /// Restores an item to its recorded original path only (explicit user request). Emits a QuarantineRestored alert.
     /// </summary>
-    Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default);
+    /// <param name="requester">
+    /// Section B M3: the user who asked; the restored file is made theirs (owner), so it isn't later taken for a
+    /// SYSTEM-protected file. Null = keep the recorded original owner where the engine may set it.
+    /// </param>
+    Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, System.Security.Principal.SecurityIdentifier? requester = null);
 
     /// <summary>All items (invalid metadata is listed as <see cref="QuarantineEntryIntegrity.Invalid"/>).</summary>
     IReadOnlyList<QuarantineEntry> List();

@@ -258,7 +258,8 @@ public sealed class ScanVerdictHandlerTests : IDisposable
             QuarantineRequester? requester = null) =>
             throw new NotSupportedException();
 
-        public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<RestoreResult> RestoreAsync(string itemId, CancellationToken cancellationToken = default, System.Security.Principal.SecurityIdentifier? requester = null) =>
+            throw new NotSupportedException();
 
         public IReadOnlyList<QuarantineEntry> List() => [];
 

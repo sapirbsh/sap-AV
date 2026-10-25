@@ -21,7 +21,10 @@ internal sealed class RulesPreflight(IScanBroker broker, IAlertDispatcher alerts
         }
 
         alerts.Post(ScanAlerts.RulesDegraded(rulesLocation, alertText!, job.Request.Trigger, time.GetUtcNow()), health: true);
-        return [warning];
+
+        // Review B3 L3 / C1 (L4): the detailed warning quotes rule-file errors from the scan worker; a standard user's job
+        // gets the counts-only text, like the Event Log.
+        return [job.Request.Origin == ScanJobOrigin.StandardUser ? alertText! : warning];
     }
 
     /// <summary>The job warning (may name rule files) and the alert text (counts only), or nulls when the rules are fine.</summary>
