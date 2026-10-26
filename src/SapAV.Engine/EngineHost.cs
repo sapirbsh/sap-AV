@@ -85,6 +85,10 @@ public static class EngineHost
         builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
 
+        // Persistence collectors (C2): read-only; Quick Scan (C4) and real-time monitoring (D4) use them.
+        builder.Services.AddSingleton<Persistence.IPersistenceCollector>(sp =>
+            Persistence.PersistenceCollector.CreateDefault(sp.GetService<ILogger<Persistence.PersistenceCollector>>()));
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();
