@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C3 done; C4 (Quick Scan) next |
+| C — Scan modes | **In progress:** C1–C3 done; C4 (Quick Scan) being built |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -127,14 +127,15 @@ ACL), targets in Temp/Downloads, IFEO debugger hijacks (strongest on accessibili
 changes, unquoted paths users can exploit, remote payloads, COM hijacks. 60 points = Suspicious. Microsoft-signed system
 entries stay silent. New alerts 2001/2002 and 7 new MITRE IDs. Tests: Core 1272 + 1 skipped, Engine 460 + 8 skipped.
 
-**Now:** fix the CI failure (since `e72bd52`), then C4 (Quick Scan).
+**Now:** C4 (Quick Scan).
 
 **Open for the user**
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
   honours the `sap-AV` CustomSD, a filtered admin token is refused, and the positive control works.
 - ~~CI for `92ce762`~~: **green**, so the elevated ProtectedPrefix pipe tests pass on windows-latest.
-- **CI is red from `e72bd52` (C1 review follow-ups) on**: the Test step fails on windows-latest (elevated). Most
-  likely the restored-owner tests' elevated-only branch (SeRestorePrivilege). Being investigated.
+- ~~CI red from `e72bd52`~~: **fixed, CI green again at `1abd55c`** (build #57). Both failures were test assumptions on
+  the elevated runner (an elevated admin's new files are owned by Administrators; collecting every scheduled task took
+  10.1 s against a 10 s budget, now 30 s). CI now posts failed tests as public annotations (`fb65ca9`).
 - Optional: delete the ~212 old empty folders in `%TEMP%\sapav-tests` (from Oct 19 and 22).
 
 ## What's left
