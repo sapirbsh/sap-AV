@@ -650,6 +650,8 @@ YARA rules may override with their own `mitre` meta value.
   | 1001 | MaliciousFile | Error | File with a Malicious verdict |
   | 1002 | SuspiciousFile | Warning | File with a Suspicious verdict |
   | 1003 | PotentiallyUnwantedFile | Warning | PUP / hack tool (section E) |
+  | 2001 | MaliciousPersistence | Error | Autostart entry whose target is Malicious (C3) |
+  | 2002 | SuspiciousPersistence | Warning | Suspicious autostart entry (C3 rules) |
   | 3001 | QuarantineRestored | Information | User restored an item from quarantine (B2) |
   | 9001 | AlertsSuppressed | Warning | Summary of alerts held back by aggregation/rate limits (B3) |
   | 9002 | AutoQuarantineBurst | Warning | Auto-quarantine rate limit hit (B3) |
