@@ -436,6 +436,15 @@ already-impersonating thread) are fixed in C1.
   collected.
 - **Real task files untested so far:** the test process isn't elevated, so the real `System32\Tasks` gave AccessDenied.
   The first elevated / SYSTEM / CI run is the real check.
+- **From C3 (persistence judgement, built `f92aa33`, `f335c8e`):**
+  - New alerts: 2001 MaliciousPersistence (Error), 2002 SuspiciousPersistence (Warning); `Alert.Autostart` carries
+    the entry. New MITRE IDs: T1574.009, T1574.010, T1546.008, T1546.015, T1218.005, T1218.010, T1218.011.
+  - C4: register `PersistenceScanner` in `EngineHost`, use Parallelism 1 (so opens stay on the job's low-priority
+    thread), and plug the file verdict handler in as the target handler. F1: map findings to the pipe.
+  - E4: add script-persistence rules through `PersistenceJudge.WithRules(...)`.
+  - Known false positives: legitimate IFEO uses (Process Explorer replacing Task Manager, `vsjitdebugger`).
+  - The ACL writability check ignores deny ACEs and integrity labels (it only over-reports), and doesn't tell another
+    user's writable folder apart from the user's own.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.

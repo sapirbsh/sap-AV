@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1 + C2 done; C3 (judging autostart entries) being built |
+| C — Scan modes | **In progress:** C1–C3 done; C4 (Quick Scan) next |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -121,7 +121,13 @@ with external entities refused); command lines are resolved to the real target, 
 hosts flagged and the user's own environment variables used. Nothing is executed or opened. 847 entries in 428 ms on
 this PC. Tests: Core 1221 + 1 skipped, Engine 438 + 8 skipped.
 
-**Now:** C3 (judging each autostart entry), then C4 (Quick Scan).
+**C3 is done** (`f92aa33`, `f335c8e`): each autostart entry is judged from its target's scan result (Malicious
+carries over) plus point-based rules: a machine-wide autostart whose target users can modify (checked by the folder
+ACL), targets in Temp/Downloads, IFEO debugger hijacks (strongest on accessibility programs like sethc), Winlogon
+changes, unquoted paths users can exploit, remote payloads, COM hijacks. 60 points = Suspicious. Microsoft-signed system
+entries stay silent. New alerts 2001/2002 and 7 new MITRE IDs. Tests: Core 1272 + 1 skipped, Engine 460 + 8 skipped.
+
+**Now:** fix the CI failure (since `e72bd52`), then C4 (Quick Scan).
 
 **Open for the user**
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
