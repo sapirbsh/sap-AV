@@ -36,6 +36,14 @@ public class MitreCatalogTests
         { "T1036.002", "Masquerading: Right-to-Left Override" },
         { "T1211", "Exploitation for Defense Evasion" }, // B5: a file that crashes or hangs the scan worker
         { "T1562.001", "Impair Defenses: Disable or Modify Tools" }, // B3: engine-health alerts (no rules, store full)
+        // C3: persistence judgement
+        { "T1574.009", "Hijack Execution Flow: Path Interception by Unquoted Path" },
+        { "T1574.010", "Hijack Execution Flow: Services File Permissions Weakness" },
+        { "T1546.008", "Event Triggered Execution: Accessibility Features" },
+        { "T1546.015", "Event Triggered Execution: Component Object Model Hijacking" },
+        { "T1218.005", "System Binary Proxy Execution: Mshta" },
+        { "T1218.010", "System Binary Proxy Execution: Regsvr32" },
+        { "T1218.011", "System Binary Proxy Execution: Rundll32" },
     };
 
     [Theory]

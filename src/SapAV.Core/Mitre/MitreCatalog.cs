@@ -32,6 +32,13 @@ public static class MitreCatalog
         new(MitreTechniqueIds.StoredDataManipulation, "Data Manipulation: Stored Data Manipulation"),
         new(MitreTechniqueIds.ExploitationForDefenseEvasion, "Exploitation for Defense Evasion"),
         new(MitreTechniqueIds.DisableOrModifyTools, "Impair Defenses: Disable or Modify Tools"),
+        new(MitreTechniqueIds.PathInterceptionByUnquotedPath, "Hijack Execution Flow: Path Interception by Unquoted Path"),
+        new(MitreTechniqueIds.ServicesFilePermissionsWeakness, "Hijack Execution Flow: Services File Permissions Weakness"),
+        new(MitreTechniqueIds.AccessibilityFeatures, "Event Triggered Execution: Accessibility Features"),
+        new(MitreTechniqueIds.ComponentObjectModelHijacking, "Event Triggered Execution: Component Object Model Hijacking"),
+        new(MitreTechniqueIds.Mshta, "System Binary Proxy Execution: Mshta"),
+        new(MitreTechniqueIds.Regsvr32, "System Binary Proxy Execution: Regsvr32"),
+        new(MitreTechniqueIds.Rundll32, "System Binary Proxy Execution: Rundll32"),
     }.ToFrozenDictionary(t => t.Id, StringComparer.Ordinal);
 
     /// <summary>All techniques in the catalog.</summary>

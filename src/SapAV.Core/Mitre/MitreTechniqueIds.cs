@@ -31,4 +31,22 @@ public static class MitreTechniqueIds
     /// (no YARA rules loaded, quarantine store full), whether by accident or by an attacker.
     /// </summary>
     public const string DisableOrModifyTools = "T1562.001";
+
+    // C3: persistence judgement (autostart entries).
+
+    /// <summary>An unquoted program path with spaces where a standard user can plant the shorter path.</summary>
+    public const string PathInterceptionByUnquotedPath = "T1574.009";
+
+    /// <summary>A service (or other machine-wide autostart) whose program standard users can replace or plant.</summary>
+    public const string ServicesFilePermissionsWeakness = "T1574.010";
+
+    /// <summary>IFEO Debugger on an accessibility program (sethc, utilman, osk, ...): a logon-screen backdoor.</summary>
+    public const string AccessibilityFeatures = "T1546.008";
+
+    /// <summary>A scheduled-task COM handler taken from the user's own <c>Software\Classes</c>.</summary>
+    public const string ComponentObjectModelHijacking = "T1546.015";
+
+    public const string Mshta = "T1218.005";
+    public const string Regsvr32 = "T1218.010";
+    public const string Rundll32 = "T1218.011";
 }
