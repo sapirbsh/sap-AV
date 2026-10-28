@@ -424,6 +424,22 @@ already-impersonating thread) are fixed in C1.
 - **Tests:** add an end-to-end "local file symlink → `\\localhost\C$\…` is refused" test (RequiresFact DeveloperMode +
   AdminShare) that exercises the post-open remote check; visibility tests with a null DACL and inherited ACEs.
 
+**Notes from C2 (persistence collectors, built `ee7e59b`…`b5846c9`).**
+- **C3 / section C review (B5 rule):** the `.lnk` parser (`ShellLink`) and task XML parser (`TaskXml`) run inside the
+  SYSTEM engine, and Startup `.lnk` files are user-writable. Both are managed and bounded, but CLAUDE.md says the SYSTEM
+  engine never parses file contents. Move them into the sandboxed scan worker, or have the section C review accept them
+  explicitly with reasons.
+- **D4:** tasks that exist only in the registry TaskCache (no file under `System32\Tasks`) aren't seen. RunOnceEx,
+  `Windows\Load`/`Run`, App Paths and `conhost --headless` aren't covered yet.
+- **Unloaded user hives** are skipped (HiveNotLoaded issue), not loaded, because loading NTUSER.DAT as SYSTEM needs
+  SeBackup/SeRestore, parses a user-writable hive and can break that user's next logon. Their Startup folder is still
+  collected.
+- **Real task files untested so far:** the test process isn't elevated, so the real `System32\Tasks` gave AccessDenied.
+  The first elevated / SYSTEM / CI run is the real check.
+- **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
+  under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
+  mark it Slow at the section C tester pass.
+
 **Carried over from the section B review (cross-step; Medium/Low).** H1 (`%ProgramData%\sap-AV` writable by users and
 wholly excluded), H2 (admin/engine jobs following links on file opens) and H3 (one user blocking all scans with paused
 jobs) are fixed in section B. M4 (startup resilience + health alerts, incl. B6 M2), M5 (pipe name in

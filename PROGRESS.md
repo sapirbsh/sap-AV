@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1 done; C2 (autostart collectors) being built |
+| C — Scan modes | **In progress:** C1 + C2 done; C3 (judging autostart entries) being built |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -115,8 +115,13 @@ Program Files or System32 file would let non-elevated malware in their session r
 "Microsoft" as a signer and only the download host; the restore privilege refuses an already-impersonating thread.
 Medium/Low findings are in ROADMAP.md. **C1 is done** (tests: Core 1179 + 1 skipped, Engine 413 + 8 skipped).
 
-**Now:** C2 (read-only autostart collectors: Run/RunOnce, Winlogon, IFEO, services, startup folders, scheduled tasks),
-then C3 (judging each entry).
+**C2 is done** (`ee7e59b`, `d5c080b`, `e3d2bf7`, `b5846c9`): read-only collectors for Run/RunOnce, Winlogon, IFEO,
+services, startup-folder shortcuts (own bounded parser, nothing resolved through the shell) and scheduled tasks (XML
+with external entities refused); command lines are resolved to the real target, with unquoted paths and interpreter
+hosts flagged and the user's own environment variables used. Nothing is executed or opened. 847 entries in 428 ms on
+this PC. Tests: Core 1221 + 1 skipped, Engine 438 + 8 skipped.
+
+**Now:** C3 (judging each autostart entry), then C4 (Quick Scan).
 
 **Open for the user**
 - In an **elevated** PowerShell in `C:\Projects\sap-AV`, run
