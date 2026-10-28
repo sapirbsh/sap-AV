@@ -28,6 +28,28 @@ jobs:
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "trx" --results-directory TestResults
 
+      # Turn each failed test into a public check-run annotation (test name + first lines of the error),
+      # so failures can be read without downloading the log or the artifact.
+      - name: Annotate failed tests
+        if: failure()
+        shell: pwsh
+        run: |
+          $count = 0
+          foreach ($trx in Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue) {
+            [xml]$doc = Get-Content $trx.FullName -Raw
+            $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
+            foreach ($r in (Select-Xml -Xml $doc -XPath "//t:UnitTestResult[@outcome='Failed']" -Namespace $ns)) {
+              $name = $r.Node.testName
+              $msg  = ($r.Node.Output.ErrorInfo.Message + ' | ' + $r.Node.Output.ErrorInfo.StackTrace) -replace "`r?`n", ' '
+              if ($msg.Length -gt 900) { $msg = $msg.Substring(0, 900) }
+              $msg = $msg -replace '%', '%25'
+              Write-Output "::error title=$name::$msg"
+              $count++
+              if ($count -ge 20) { break }
+            }
+          }
+          Write-Output "Failed tests annotated: $count"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
