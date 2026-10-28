@@ -54,12 +54,16 @@ public sealed class QuarantineVisibilityAndOwnerTests
     public async Task AUsersOwnFile_IsRestoredToThem()
     {
         using var ctx = new QuarantineTestContext();
-        var (id, path) = await QuarantineOneAsync(ctx); // recorded owner: this (test) user
+        var (id, path) = await QuarantineOneAsync(ctx);
+        // The recorded owner is whatever Windows gave the file this process created: the user's own SID normally, but
+        // BUILTIN\Administrators when the test runs elevated (the default owner for objects made by an elevated admin,
+        // as on GitHub's windows-latest). A probe file created the same way shows which one applies here.
+        var expectedOwner = OwnerOfNewFileIn(Path.GetDirectoryName(path)!);
 
         var restored = await ctx.Manager.RestoreAsync(id, requester: QuarantineTestContext.CurrentUser);
 
         Assert.Equal(RestoreStatus.Restored, restored.Status);
-        Assert.Equal(QuarantineTestContext.CurrentUser, OwnerOf(path));
+        Assert.Equal(expectedOwner, OwnerOf(path));
         Assert.Empty(restored.Notes);
     }
 
@@ -188,6 +192,14 @@ public sealed class QuarantineVisibilityAndOwnerTests
 
     private static SecurityIdentifier OwnerOf(string path) =>
         (SecurityIdentifier)new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier))!;
+
+    private static SecurityIdentifier OwnerOfNewFileIn(string folder)
+    {
+        var probe = Path.Combine(folder, $"owner-probe-{Guid.NewGuid():N}.tmp");
+        File.WriteAllBytes(probe, [0]);
+        try { return OwnerOf(probe); }
+        finally { File.Delete(probe); }
+    }
 
     /// <summary>Re-signs the item's metadata with another recorded owner (null = none), as if the original file had had it.</summary>
     private static void RewriteRecordedOwner(QuarantineTestContext ctx, string id, SecurityIdentifier? owner)

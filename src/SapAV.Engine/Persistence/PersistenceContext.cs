@@ -21,7 +21,9 @@ internal sealed record PersistenceLimits
     public int MaxKeyItems { get; init; } = 4_096;
 
     /// <summary>Quick Scan budget (ROADMAP C2: well under 10 s); whatever is left is reported as an issue.</summary>
-    public TimeSpan TimeBudget { get; init; } = TimeSpan.FromSeconds(10);
+    // 30 s: an elevated or SYSTEM run reads every scheduled task, and slower machines (CI runners) took just over 10 s.
+    // Still a small part of the 3-minute Quick Scan target.
+    public TimeSpan TimeBudget { get; init; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>

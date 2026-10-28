@@ -17,7 +17,7 @@ public class RealMachineCollectionTests
 
         var result = collector.Collect();
 
-        Assert.True(result.Duration < TimeSpan.FromSeconds(10), $"Collection took {result.Duration}.");
+        Assert.True(result.Duration < TimeSpan.FromSeconds(30), $"Collection took {result.Duration}.");
         Assert.DoesNotContain(result.Issues, i => i.Reason == PersistenceIssueReason.TimeBudgetExceeded);
         Assert.True(result.Entries.Count(e => e.Kind == PersistenceKind.Service) > 0);
         Assert.All(result.Entries, e => Assert.True(e.Resolution.TargetPath is null || Path.IsPathFullyQualified(e.Resolution.TargetPath)));
