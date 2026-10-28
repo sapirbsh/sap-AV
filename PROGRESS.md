@@ -124,11 +124,11 @@ this PC. Tests: Core 1221 + 1 skipped, Engine 438 + 8 skipped.
 **Now:** C3 (judging each autostart entry), then C4 (Quick Scan).
 
 **Open for the user**
-- In an **elevated** PowerShell in `C:\Projects\sap-AV`, run
-  `$env:SAPAV_TEST_ALLOW_HKLM='1'; dotnet test tests/SapAV.Engine.Tests --filter "FullyQualifiedName~RealEventLogTests"`.
-  It is the only check of the real Event Log service behaviour (CustomSD honoured, a filtered token refused, plus a
-  positive control). It cleans up after itself (only a throwaway .evtx file and a "log cleared" record remain).
-- Check the GitHub **Actions** run for `92ce762`: it is the first CI run of the elevated ProtectedPrefix pipe tests.
+- ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
+  honours the `sap-AV` CustomSD, a filtered admin token is refused, and the positive control works.
+- ~~CI for `92ce762`~~: **green**, so the elevated ProtectedPrefix pipe tests pass on windows-latest.
+- **CI is red from `e72bd52` (C1 review follow-ups) on**: the Test step fails on windows-latest (elevated). Most
+  likely the restored-owner tests' elevated-only branch (SeRestorePrivilege). Being investigated.
 - Optional: delete the ~212 old empty folders in `%TEMP%\sapav-tests` (from Oct 19 and 22).
 
 ## What's left
