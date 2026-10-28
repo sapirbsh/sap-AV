@@ -23,8 +23,11 @@ internal sealed class RegistryTestRoot : IDisposable
         _users = Registry.CurrentUser.CreateSubKey(_path + @"\HKU");
         View = new WindowsRegistryView(_machine, _users);
         Machine(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion").SetValue("SystemRoot", @"C:\Windows");
-        Machine(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
-            .SetValue("Path", @"%SystemRoot%\system32;%SystemRoot%;C:\Tools", RegistryValueKind.ExpandString);
+        using (var environment = Machine(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"))
+        {
+            environment.SetValue("Path", @"%SystemRoot%\system32;%SystemRoot%;C:\Tools", RegistryValueKind.ExpandString);
+            environment.SetValue("windir", "%SystemRoot%", RegistryValueKind.ExpandString);
+        }
         Machine(@"SOFTWARE\Microsoft\Windows\CurrentVersion").SetValue("ProgramFilesDir", @"C:\Program Files");
     }
 

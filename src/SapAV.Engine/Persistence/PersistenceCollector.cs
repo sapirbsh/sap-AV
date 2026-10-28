@@ -36,7 +36,7 @@ internal sealed class PersistenceCollector(
     public static PersistenceCollector CreateDefault(ILogger<PersistenceCollector>? logger = null) =>
         new(new WindowsRegistryView(), new SafePathProbe(), DefaultSources(), logger: logger);
 
-    public static IReadOnlyList<IPersistenceSource> DefaultSources() => [new RegistryAutorunSource(), new ServiceSource(), new StartupFolderSource()];
+    public static IReadOnlyList<IPersistenceSource> DefaultSources() => [new RegistryAutorunSource(), new ServiceSource(), new StartupFolderSource(), new ScheduledTaskSource()];
 
     public PersistenceCollection Collect(CancellationToken cancellationToken = default)
     {
