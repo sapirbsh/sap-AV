@@ -64,7 +64,8 @@ public sealed record Alert
         string? sourceUrl,
         AlertAction action,
         ScanTrigger trigger,
-        string engineVersion)
+        string engineVersion,
+        AlertAutostart? autostart = null)
     {
         if (alertId == Guid.Empty)
         {
@@ -91,6 +92,7 @@ public sealed record Alert
         Action = action;
         Trigger = trigger;
         EngineVersion = ValidateEngineVersion(engineVersion);
+        Autostart = ValidateAutostart(type, autostart);
     }
 
     /// <summary>Always <see cref="CurrentSchemaVersion"/> (written to JSON; ignored when reading).</summary>
@@ -161,6 +163,40 @@ public sealed record Alert
     [JsonRequired]
     [JsonInclude]
     public string EngineVersion { get; private init; }
+
+    /// <summary>
+    /// The autostart entry of a persistence alert (C3); required for <see cref="AlertType.MaliciousPersistence"/> /
+    /// <see cref="AlertType.SuspiciousPersistence"/>, null for every other type. Older JSON without it still reads.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] // file and health alerts keep their B1 payload exactly
+    public AlertAutostart? Autostart { get; }
+
+    /// <summary>
+    /// Builds the alert for a judged autostart entry (C3), or returns null when it is Clean. FilePath is the entry's target
+    /// (or, without one, its location and value name); Sha256 and signature are the target's; the technique is the
+    /// judgement's primary one; the reasons are the judgement's (carried detections first, then the scored signals).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="finding"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="engineVersion"/>, <paramref name="action"/> or <paramref name="trigger"/> is invalid.</exception>
+    public static Alert? FromPersistence(
+        Persistence.PersistenceFinding finding, AlertAction action, ScanTrigger trigger, DateTimeOffset timestamp, string engineVersion)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        var judgement = finding.Judgement;
+        if (judgement.Verdict == Verdict.Clean)
+        {
+            return null;
+        }
+
+        var entry = finding.Entry;
+        var type = judgement.Verdict == Verdict.Malicious ? AlertType.MaliciousPersistence : AlertType.SuspiciousPersistence;
+        string path = entry.Resolution.TargetPath ?? (entry.ValueName is null ? entry.Location : entry.Location + @"\" + entry.ValueName);
+        var target = finding.Target is { Status: ScanStatus.Scanned } scanned ? scanned : null;
+        var utc = timestamp.ToUniversalTime();
+        var id = ComputeAlertId(type, utc, path + "\n" + entry.Key, target?.Sha256, trigger);
+        return new Alert(id, utc, type, judgement.Verdict, path, target?.Sha256, target?.SignatureStatus, target?.Signer,
+            judgement.TechniqueId, judgement.SecondaryTechniqueIds, judgement.Reasons, null, action, trigger, engineVersion, AlertAutostart.From(entry));
+    }
 
     /// <summary>
     /// Builds the alert for a scan, or returns null when there is nothing to report (Clean, or not scanned:
@@ -245,8 +281,8 @@ public sealed record Alert
     {
         bool fits = type switch
         {
-            AlertType.MaliciousFile => verdict == Verdict.Malicious,
-            AlertType.SuspiciousFile or AlertType.PotentiallyUnwantedFile => verdict == Verdict.Suspicious,
+            AlertType.MaliciousFile or AlertType.MaliciousPersistence => verdict == Verdict.Malicious,
+            AlertType.SuspiciousFile or AlertType.PotentiallyUnwantedFile or AlertType.SuspiciousPersistence => verdict == Verdict.Suspicious,
             _ => verdict != Verdict.Clean,
         };
 
@@ -256,8 +292,23 @@ public sealed record Alert
         }
     }
 
+    /// <summary>Detection types (files and autostart entries) need a technique and at least one reason.</summary>
     private static bool IsFileDetection(AlertType type) =>
-        type is AlertType.MaliciousFile or AlertType.SuspiciousFile or AlertType.PotentiallyUnwantedFile;
+        type is AlertType.MaliciousFile or AlertType.SuspiciousFile or AlertType.PotentiallyUnwantedFile || IsPersistence(type);
+
+    private static bool IsPersistence(AlertType type) => type is AlertType.MaliciousPersistence or AlertType.SuspiciousPersistence;
+
+    private static AlertAutostart? ValidateAutostart(AlertType type, AlertAutostart? autostart)
+    {
+        if (IsPersistence(type) != (autostart is not null))
+        {
+            throw new ArgumentException(
+                IsPersistence(type) ? $"Alert type {type} needs the autostart entry." : $"Alert type {type} can't carry an autostart entry.",
+                nameof(autostart));
+        }
+
+        return autostart;
+    }
 
     private static string ValidatePath(string filePath)
     {
@@ -383,7 +434,8 @@ public sealed record Alert
                 && string.Equals(SourceUrl, other.SourceUrl, StringComparison.Ordinal)
                 && Action == other.Action
                 && Trigger == other.Trigger
-                && string.Equals(EngineVersion, other.EngineVersion, StringComparison.Ordinal)));
+                && string.Equals(EngineVersion, other.EngineVersion, StringComparison.Ordinal)
+                && Equals(Autostart, other.Autostart)));
 
     public override int GetHashCode() => HashCode.Combine(AlertId, Timestamp, Type, Verdict, FilePath, Sha256, Action);
 }

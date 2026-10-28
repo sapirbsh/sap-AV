@@ -405,8 +405,9 @@ public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
         }
     }
 
+    /// <remarks>C3: two autostart entries running the same file are two incidents, so the entry is part of the key.</remarks>
     private static string Key(Alert alert) =>
-        string.Join('|', alert.Type.ToString(), alert.Sha256 ?? string.Empty, alert.FilePath.ToUpperInvariant());
+        string.Join('|', alert.Type.ToString(), alert.Sha256 ?? string.Empty, alert.FilePath.ToUpperInvariant(), alert.Autostart?.Key ?? string.Empty);
 
     private sealed class BudgetState(int maxKeys)
     {

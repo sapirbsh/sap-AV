@@ -61,4 +61,13 @@ public enum AlertType
     /// unsafe place: events in it may be forged or flooded (review B6 M2).
     /// </summary>
     EventLogIntegrityDegraded,
+
+    // System-change detections (C3, event IDs 2000-2999). FilePath = the entry's target (or its location when it has none);
+    // Autostart = the entry itself.
+
+    /// <summary>An autostart entry whose target (or host) is Malicious (C3).</summary>
+    MaliciousPersistence,
+
+    /// <summary>An autostart entry the persistence rules (or its target's scan) judged Suspicious (C3).</summary>
+    SuspiciousPersistence,
 }

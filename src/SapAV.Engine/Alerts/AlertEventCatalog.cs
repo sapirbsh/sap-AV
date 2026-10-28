@@ -19,6 +19,8 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 ///   1001   | MaliciousFile            | Error       | File with a Malicious verdict
 ///   1002   | SuspiciousFile           | Warning     | File with a Suspicious verdict
 ///   1003   | PotentiallyUnwantedFile  | Warning     | PUP / hack tool (threat pack, section E)
+///   2001   | MaliciousPersistence     | Error       | Autostart entry whose target or host is Malicious (C3)
+///   2002   | SuspiciousPersistence    | Warning     | Autostart entry judged Suspicious by the persistence rules (C3)
 ///   3001   | QuarantineRestored       | Information | User restored an item from quarantine (B2)
 ///   9001   | AlertsSuppressed         | Warning     | Summary of aggregated / rate-limited / dropped alerts (B3)
 ///   9002   | AutoQuarantineBurst      | Warning     | Auto-quarantine rate limit hit; the rest need the user (B3)
@@ -44,6 +46,8 @@ public static class AlertEventCatalog
     public const int MaliciousFileEventId = 1001;
     public const int SuspiciousFileEventId = 1002;
     public const int PotentiallyUnwantedFileEventId = 1003;
+    public const int MaliciousPersistenceEventId = 2001;
+    public const int SuspiciousPersistenceEventId = 2002;
     public const int QuarantineRestoredEventId = 3001;
     public const int AlertsSuppressedEventId = 9001;
     public const int AutoQuarantineBurstEventId = 9002;
@@ -61,6 +65,8 @@ public static class AlertEventCatalog
         AlertType.MaliciousFile => new(MaliciousFileEventId, EventLogEntryType.Error),
         AlertType.SuspiciousFile => new(SuspiciousFileEventId, EventLogEntryType.Warning),
         AlertType.PotentiallyUnwantedFile => new(PotentiallyUnwantedFileEventId, EventLogEntryType.Warning),
+        AlertType.MaliciousPersistence => new(MaliciousPersistenceEventId, EventLogEntryType.Error),
+        AlertType.SuspiciousPersistence => new(SuspiciousPersistenceEventId, EventLogEntryType.Warning),
         AlertType.QuarantineRestored => new(QuarantineRestoredEventId, EventLogEntryType.Information),
         AlertType.AlertsSuppressed => new(AlertsSuppressedEventId, EventLogEntryType.Warning),
         AlertType.AutoQuarantineBurst => new(AutoQuarantineBurstEventId, EventLogEntryType.Warning),

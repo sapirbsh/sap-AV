@@ -27,12 +27,44 @@ public static class ScanAlerts
     }
 
     /// <summary>The same alert (same ID) with another action, and the worker text caps applied.</summary>
+    /// <remarks>A persistence alert's reasons were capped by <see cref="ForPersistence"/> (worker text and engine text apart), so they stay.</remarks>
     public static Alert WithAction(Alert alert, AlertAction action)
     {
         ArgumentNullException.ThrowIfNull(alert);
-        var reasons = alert.Reasons.Take(MaxWorkerReasons).Select(r => SafeText.SingleLine(r, MaxWorkerReasonLength)).ToArray();
+        var reasons = alert.Autostart is not null
+            ? alert.Reasons
+            : alert.Reasons.Take(MaxWorkerReasons).Select(r => SafeText.SingleLine(r, MaxWorkerReasonLength)).ToArray();
         return new Alert(alert.AlertId, alert.Timestamp, alert.Type, alert.Verdict, alert.FilePath, alert.Sha256, alert.SignatureStatus,
-            alert.Signer, alert.TechniqueId, alert.SecondaryTechniqueIds, reasons, alert.SourceUrl, action, alert.Trigger, alert.EngineVersion);
+            alert.Signer, alert.TechniqueId, alert.SecondaryTechniqueIds, reasons, alert.SourceUrl, action, alert.Trigger, alert.EngineVersion,
+            alert.Autostart);
+    }
+
+    /// <summary>Most rule (signal) reasons a persistence alert keeps; they are engine text with the entry's values in them.</summary>
+    public const int MaxPersistenceSignalReasons = 8;
+
+    /// <summary>
+    /// The alert for a judged autostart entry (C3: 2001 / 2002), or null when it is Clean. Reasons carried over from the
+    /// target's or host's scan are worker text and get the file-alert caps (<see cref="MaxWorkerReasons"/> of
+    /// <see cref="MaxWorkerReasonLength"/>); the rules' own reasons follow (at most <see cref="MaxPersistenceSignalReasons"/>,
+    /// each already capped at <see cref="Core.Persistence.PersistenceSignal.MaxReasonLength"/>).
+    /// </summary>
+    public static Alert? ForPersistence(Core.Persistence.PersistenceFinding finding, AlertAction action, ScanTrigger trigger, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        var alert = Alert.FromPersistence(finding, action, trigger, now, EngineInfo.Version);
+        if (alert is null)
+        {
+            return null;
+        }
+
+        var judgement = finding.Judgement;
+        var carried = judgement.Detections.Where(d => d.Source != DetectionSource.Persistence)
+            .Take(MaxWorkerReasons).Select(d => SafeText.SingleLine(d.Reason, MaxWorkerReasonLength));
+        var signals = judgement.Signals.Where(s => s.Score > 0).Take(MaxPersistenceSignalReasons).Select(s => s.Reason);
+        string[] reasons = [.. carried, .. signals];
+        return new Alert(alert.AlertId, alert.Timestamp, alert.Type, alert.Verdict, alert.FilePath, alert.Sha256, alert.SignatureStatus,
+            alert.Signer, alert.TechniqueId, alert.SecondaryTechniqueIds, reasons.Length > 0 ? reasons : alert.Reasons.Take(1).ToArray(),
+            alert.SourceUrl, action, alert.Trigger, alert.EngineVersion, alert.Autostart);
     }
 
     /// <summary>The auto-quarantine rate limit was hit (review B5 M3): the file waits for the user.</summary>
