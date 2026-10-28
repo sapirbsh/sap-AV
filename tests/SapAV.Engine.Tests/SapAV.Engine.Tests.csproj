@@ -23,6 +23,8 @@
     <Compile Include="..\SapAV.Core.Tests\TestSupport\RawJunction.cs" Link="TestSupport\RawJunction.cs" />
     <!-- The runtime-assembled EICAR string (never stored whole), for the opt-in on-disk end-to-end test (B5). -->
     <Compile Include="..\SapAV.Core.Tests\TestSupport\AntivirusTestString.cs" Link="TestSupport\AntivirusTestString.cs" />
+    <!-- Synthetic .lnk bytes for the Startup folder collector tests (C2). -->
+    <Compile Include="..\SapAV.Core.Tests\TestSupport\ShellLinkBuilder.cs" Link="TestSupport\ShellLinkBuilder.cs" />
   </ItemGroup>
 
   <ItemGroup>
