@@ -57,16 +57,18 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     /// <summary>Walks every root in order, calling <paramref name="emit"/> for each entry (it may block for back-pressure or pause).</summary>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public void Walk(
-        IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access = null, bool allowRemote = false)
+        IEnumerable<string> roots, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access = null, bool allowRemote = false,
+        ScanWalkFilter? filter = null)
     {
         foreach (var root in roots)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            WalkRoot(root, emit, cancellationToken, access, allowRemote);
+            WalkRoot(root, emit, cancellationToken, access, allowRemote, filter);
         }
     }
 
-    private void WalkRoot(string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote)
+    private void WalkRoot(
+        string requested, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote, ScanWalkFilter? filter)
     {
         // B3 review H1: walk in the exact \\?\ form, so "x." and "evil.exe." keep their names.
         if (ExactPath.ToExtended(requested) is not { } root)
@@ -98,7 +100,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return;
         }
 
-        WalkTree(root, handle, emit, cancellationToken, access, allowRemote);
+        WalkTree(root, handle, emit, cancellationToken, access, allowRemote, filter);
     }
 
     private sealed class Frame(string path, SharedFolder folder, List<string> subdirectories) : IDisposable
@@ -117,12 +119,13 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
 
     /// <summary>Depth first; one handle per level is open (the chain from the root to the current folder).</summary>
     private void WalkTree(
-        string root, SafeFileHandle rootHandle, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote)
+        string root, SafeFileHandle rootHandle, Action<ScanTreeEntry> emit, CancellationToken cancellationToken, IScanAccessCheck? access, bool allowRemote,
+        ScanWalkFilter? filter)
     {
         var stack = new Stack<Frame>();
         try
         {
-            if (Visit(root, rootHandle, emit, access, allowRemote) is { } first)
+            if (Visit(root, rootHandle, emit, access, allowRemote, filter) is { } first)
             {
                 stack.Push(first);
             }
@@ -138,6 +141,12 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
 
                 string name = top.Subdirectories[top.Next++];
                 string path = SafeTree.Child(top.Path, name);
+                if (filter is not null && stack.Count > filter.MaxDepth)
+                {
+                    filter.FoldersTooDeep++; // C4: a deliberate depth limit, counted, not a warning per folder
+                    continue;
+                }
+
                 if (stack.Count >= MaxDepth)
                 {
                     emit(new(ExactPath.ForOpening(path), ScanTreeEntryKind.Unreadable, Detail: "TooDeep"));
@@ -155,7 +164,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
                     continue;
                 }
 
-                if (Visit(path, child, emit, access, allowRemote) is { } frame)
+                if (Visit(path, child, emit, access, allowRemote, filter) is { } frame)
                 {
                     stack.Push(frame);
                 }
@@ -171,7 +180,8 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     }
 
     /// <summary>Checks and lists one folder from its handle; emits its files. Null (handle disposed) if it can't be listed.</summary>
-    private Frame? Visit(string directory, SafeFileHandle handle, Action<ScanTreeEntry> emit, IScanAccessCheck? access, bool allowRemote)
+    private Frame? Visit(
+        string directory, SafeFileHandle handle, Action<ScanTreeEntry> emit, IScanAccessCheck? access, bool allowRemote, ScanWalkFilter? filter)
     {
         string shown = ExactPath.ForOpening(directory);
         if (access is not null && !access.CanList(handle))
@@ -208,7 +218,7 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         {
             foreach (var entry in entries)
             {
-                Classify(directory, folder, entry, subdirectories, emit);
+                Classify(directory, folder, entry, subdirectories, emit, filter);
             }
         }
         catch
@@ -220,7 +230,8 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         return new Frame(directory, folder, subdirectories);
     }
 
-    private void Classify(string directory, SharedFolder folder, SafeTreeEntry entry, List<string> subdirectories, Action<ScanTreeEntry> emit)
+    private void Classify(
+        string directory, SharedFolder folder, SafeTreeEntry entry, List<string> subdirectories, Action<ScanTreeEntry> emit, ScanWalkFilter? filter)
     {
         string path = SafeTree.Child(directory, entry.Name); // extended form: exact names
         string shown = ExactPath.ForOpening(path);
@@ -234,7 +245,17 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         }
         else if (entry.IsDirectory)
         {
+            if (filter?.SkipFolder is { } skip && skip(path))
+            {
+                filter.FoldersSkipped++;
+                return;
+            }
+
             subdirectories.Add(entry.Name);
+        }
+        else if (filter?.IncludeFile is { } include && !include(entry))
+        {
+            filter.FilesFiltered++;
         }
         else
         {
@@ -277,4 +298,27 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return 0;
         }
     }
+}
+
+/// <summary>
+/// C4: what a scan check walks (Quick Scan's folder phases): a depth limit, which listed files are emitted and which
+/// subfolders are not descended into. The walk itself is unchanged (handle-bound, no link followed, exclusions applied
+/// first). The counters are for the phase summary; one filter belongs to one walk on one thread.
+/// </summary>
+internal sealed class ScanWalkFilter
+{
+    /// <summary>Deepest folder nesting below a root that is listed (the root is depth 0); deeper folders are counted, not walked.</summary>
+    public int MaxDepth { get; init; } = ScanTreeWalker.MaxDepth;
+
+    /// <summary>Emits a listed file only when this says yes (null = every file). Sees the listing only: name, size, times.</summary>
+    public Func<SafeTreeEntry, bool>? IncludeFile { get; init; }
+
+    /// <summary>A subfolder (exact <c>\?\</c> path) that is not descended into (null = none).</summary>
+    public Func<string, bool>? SkipFolder { get; init; }
+
+    public long FilesFiltered { get; set; }
+
+    public long FoldersSkipped { get; set; }
+
+    public long FoldersTooDeep { get; set; }
 }

@@ -36,8 +36,26 @@ internal enum SafeTreeFailure
 
 /// <summary>One entry of a folder listing (from the folder's own handle).</summary>
 /// <param name="ReparseTag">The tag when <see cref="Attributes"/> has ReparsePoint (from the listing, no extra open).</param>
-internal readonly record struct SafeTreeEntry(string Name, FileAttributes Attributes, uint ReparseTag, long Length)
+/// <param name="CreationTime">FILETIME (UTC) from the listing; 0 if unknown.</param>
+/// <param name="LastWriteTime">FILETIME from the listing; 0 if unknown.</param>
+/// <param name="ChangeTime">FILETIME of the last metadata change from the listing; 0 if unknown.</param>
+internal readonly record struct SafeTreeEntry(
+    string Name, FileAttributes Attributes, uint ReparseTag, long Length, long CreationTime = 0, long LastWriteTime = 0, long ChangeTime = 0)
 {
+    /// <summary>
+    /// C4: the newest of creation, last-write and change time (UTC), or null if none is known. A file extracted from an
+    /// archive keeps an old last-write time but gets a new creation time, and the change time moves when the other two are
+    /// set back with SetFileTime (simple timestomping).
+    /// </summary>
+    public DateTimeOffset? NewestTimeUtc
+    {
+        get
+        {
+            long newest = Math.Max(CreationTime, Math.Max(LastWriteTime, ChangeTime));
+            return newest <= 0 || newest > DateTime.MaxValue.ToFileTimeUtc() ? null : new DateTimeOffset(DateTime.FromFileTimeUtc(newest));
+        }
+    }
+
     public bool IsDirectory => Attributes.HasFlag(FileAttributes.Directory);
 
     public bool IsNameSurrogate => Attributes.HasFlag(FileAttributes.ReparsePoint) && ScanNative.IsNameSurrogate(ReparseTag);
@@ -251,6 +269,9 @@ internal static unsafe class SafeTree
         {
             byte* entry = buffer + offset;
             uint next = *(uint*)entry;
+            long created = *(long*)(entry + 8);
+            long written = *(long*)(entry + 24);
+            long changed = *(long*)(entry + 32);
             long length = *(long*)(entry + 40);
             uint attributes = *(uint*)(entry + 56);
             int nameBytes = (int)*(uint*)(entry + 60);
@@ -261,7 +282,7 @@ internal static unsafe class SafeTree
                 if (name is not ("." or ".."))
                 {
                     bool reparse = (attributes & N.FileAttributeReparsePoint) != 0;
-                    entries.Add(new SafeTreeEntry(name, (FileAttributes)attributes, reparse ? tag : 0, length));
+                    entries.Add(new SafeTreeEntry(name, (FileAttributes)attributes, reparse ? tag : 0, length, created, written, changed));
                 }
             }
 
