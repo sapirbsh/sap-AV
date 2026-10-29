@@ -69,6 +69,12 @@ internal interface IScanCheckContext
     /// </summary>
     FileScanReport ScanNow(string path);
 
+    /// <summary>
+    /// C6: the bytes this phase expects to read (e.g. the used space of the drives it walks), so progress and the ETA can
+    /// be estimated before the walk has counted everything. Optional; 0 or less = unknown.
+    /// </summary>
+    void ExpectBytes(long bytes);
+
     /// <summary>Blocks until every file this job queued so far is handled (the job also does this at the end of each phase).</summary>
     void WaitForQueuedFiles();
 

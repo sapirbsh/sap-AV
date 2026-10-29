@@ -791,6 +791,7 @@ public sealed partial class ScanJob : IDisposable
                 _needsConfirmation, _quarantineFailed) { Cached = _cached })
         {
             Phase = CurrentPhaseLocked(),
+            PercentDone = PercentLocked(),
         };
     }
 

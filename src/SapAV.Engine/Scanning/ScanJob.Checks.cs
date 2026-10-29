@@ -62,6 +62,11 @@ public sealed partial class ScanJob
 
         public long QuarantinedAtStart { get; set; }
 
+        public long BytesDoneAtStart { get; set; }
+
+        /// <summary>C6: the bytes the phase expects to read (e.g. the used space of the drives), 0 = unknown.</summary>
+        public long ExpectedBytes { get; set; }
+
         public ScanPhaseSummary Snapshot(TimeSpan now) =>
             new(Check.Name, State, State == ScanPhaseState.Running ? now - Started : Duration, Files, Findings, Notes.ToArray());
     }
@@ -145,6 +150,7 @@ public sealed partial class ScanJob
                 phase.FoundAtStart = _filesFound;
                 phase.DoneAtStart = _filesDone;
                 phase.QuarantinedAtStart = _quarantined;
+                phase.BytesDoneAtStart = _bytesDone;
                 ProgressChangedLocked();
             }
 
@@ -303,12 +309,64 @@ public sealed partial class ScanJob
             return null;
         }
 
-        var current = _phases[_phaseIndex];
+        var elapsed = ElapsedLocked();
+        var eta = EstimateAcrossPhases(_phases.Select(p => p.Check.Weight).ToArray(), _phaseIndex, PhaseFractionLocked(_phases[_phaseIndex]), elapsed,
+            _budget - elapsed);
+        return eta > MaxShownEta ? null : eta; // C6: a Full Scan has no budget, so "the budget left" is no estimate
+    }
+
+    /// <summary>Longest ETA reported; beyond it the ETA is unknown (null).</summary>
+    internal static readonly TimeSpan MaxShownEta = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The running phase's own fraction done. C6: a phase that announced the bytes it expects (<see cref="IScanCheckContext.ExpectBytes"/>,
+    /// the drives' used space) uses bytes scanned over that, at most 99 % until its walk is done; otherwise files handled
+    /// over files queued, halved while it is still queuing.
+    /// </summary>
+    private double PhaseFractionLocked(PhaseState current)
+    {
+        if (current.ExpectedBytes > 0 && !current.WalkDone)
+        {
+            return Math.Clamp((double)(_bytesDone - current.BytesDoneAtStart) / current.ExpectedBytes, 0, 0.99);
+        }
+
         long found = _filesFound - current.FoundAtStart;
         long done = _filesDone - current.DoneAtStart;
-        double fraction = found <= 0 ? 0 : Math.Clamp((double)done / found, 0, 1) * (current.WalkDone ? 1.0 : 0.5);
-        var elapsed = ElapsedLocked();
-        return EstimateAcrossPhases(_phases.Select(p => p.Check.Weight).ToArray(), _phaseIndex, fraction, elapsed, _budget - elapsed);
+        return found <= 0 ? 0 : Math.Clamp((double)done / found, 0, 1) * (current.WalkDone ? 1.0 : 0.5);
+    }
+
+    /// <summary>C6: the job's estimated percent done across phases (null for a plain job until its total is known).</summary>
+    private double? PercentLocked()
+    {
+        if (ScanJobStateMachine.IsTerminal(_state))
+        {
+            return _state == ScanJobState.Completed ? 100 : null;
+        }
+
+        if (_phases is null)
+        {
+            return _enumerationDone && _bytesFound > 0 ? Math.Clamp(100.0 * _bytesDone / _bytesFound, 0, 100) : null;
+        }
+
+        if (_phaseIndex < 0)
+        {
+            return 0;
+        }
+
+        return 100 * ProgressAcrossPhases(_phases.Select(p => p.Check.Weight).ToArray(), _phaseIndex, PhaseFractionLocked(_phases[_phaseIndex]));
+    }
+
+    /// <summary>The weights of the finished phases plus the running phase's weight times its fraction, over the total weight.</summary>
+    internal static double ProgressAcrossPhases(IReadOnlyList<double> weights, int current, double currentFraction)
+    {
+        double total = weights.Sum(w => Math.Max(w, 0));
+        if (total <= 0 || current < 0 || current >= weights.Count)
+        {
+            return 0;
+        }
+
+        double before = weights.Take(current).Sum(w => Math.Max(w, 0));
+        return Math.Clamp((before + Math.Max(weights[current], 0) * Math.Clamp(currentFraction, 0, 1)) / total, 0, 1);
     }
 
     /// <summary>
@@ -546,6 +604,14 @@ public sealed partial class ScanJob
         }
 
         public void WaitForQueuedFiles() => job.WaitForQueued(token);
+
+        public void ExpectBytes(long bytes)
+        {
+            lock (job._lock)
+            {
+                Phase.ExpectedBytes = Math.Max(0, bytes);
+            }
+        }
 
         public void AddFinding(ScanFinding finding)
         {

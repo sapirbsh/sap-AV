@@ -102,6 +102,10 @@ public static class EngineHost
         builder.Services.Configure<Scanning.Checks.QuickScanOptions>(builder.Configuration.GetSection(Scanning.Checks.QuickScanOptions.SectionName));
         builder.Services.AddSingleton(Scanning.Checks.QuickScanFactory.Create);
 
+        // Full Scan (C6): the same checks plus every file on every fixed drive; no time budget, the scan cache skips repeats.
+        builder.Services.Configure<Scanning.Checks.FullScanOptions>(builder.Configuration.GetSection(Scanning.Checks.FullScanOptions.SectionName));
+        builder.Services.AddSingleton(Scanning.Checks.FullScanFactory.Create);
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();

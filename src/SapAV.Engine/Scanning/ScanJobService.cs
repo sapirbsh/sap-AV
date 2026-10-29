@@ -87,6 +87,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var alerts = services.GetRequiredService<Alerts.IAlertDispatcher>();
         var handler = services.GetRequiredService<IScanVerdictHandler>();
         var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
+        RemoteFileProbe.Instance.Logger ??= logger; // review C1 L4: unexpected answers, once per volume
         // C5: created on the first scanned file (never just by resolving the service: no folder, key or database before that).
         Cache.ScanCache? CreateCache() => Cache.ScanCache.TryCreate(services.GetRequiredService<IOptions<Cache.ScanCacheOptions>>().Value, sandbox.ResolvedBlocklistPath, broker,
             services.GetRequiredService<Quarantine.IQuarantineKeyProvider>(), Quarantine.QuarantineAccessPolicy.Default, time,

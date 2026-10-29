@@ -213,6 +213,13 @@ public sealed record ScanJobProgress(
 {
     /// <summary>C4: the running phase of a multi-phase job (Quick Scan); null for a plain file / folder job.</summary>
     public ScanPhaseProgress? Phase { get; init; }
+
+    /// <summary>
+    /// C6: estimated percent done (0-100), for a progress bar: bytes for a plain job once its total is known, the phases'
+    /// weights for a multi-phase job (a Full Scan's drive phase measures bytes scanned against the drives' used space, since
+    /// the file total isn't known until the walk ends). Null while unknown.
+    /// </summary>
+    public double? PercentDone { get; init; }
 }
 
 /// <summary>Which phase of a multi-phase job is running.</summary>

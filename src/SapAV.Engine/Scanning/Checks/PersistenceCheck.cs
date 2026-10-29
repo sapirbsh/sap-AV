@@ -82,5 +82,5 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
 
     private static FileScanReport NotScanned(string path, IScanCheckContext context) =>
         ScanFileOpener.NotOpenedReport(new ScanItem(path, context.Trigger),
-            HashResult.NotHashed(HashFailureReason.IoError, "Not scanned: the Quick Scan time budget was nearly used up."), [], context.Time.GetUtcNow());
+            HashResult.NotHashed(HashFailureReason.IoError, "Not scanned: the scan's time budget was nearly used up."), [], context.Time.GetUtcNow());
 }

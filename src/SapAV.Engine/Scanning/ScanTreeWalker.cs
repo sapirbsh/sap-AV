@@ -94,7 +94,8 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
 
         if (!SafeTree.IsDirectory(handle))
         {
-            long length = SafeLength(handle);
+            // Review C1 L2: a restricted job learns the size (it goes into BytesTotal) only for a file the requester can read.
+            long length = access is null || access.CanRead(handle) ? SafeLength(handle) : 0;
             handle.Dispose();
             emit(new(shown, ScanTreeEntryKind.File, length));
             return;
@@ -133,6 +134,11 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             while (stack.TryPeek(out var top))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (filter is { LimitReached: true })
+                {
+                    return; // C6: the entry cap; the frames are released below
+                }
+
                 if (top.Next == top.Subdirectories.Count)
                 {
                     stack.Pop().Dispose();
@@ -212,6 +218,18 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return null;
         }
 
+        if (filter is not null)
+        {
+            if (filter.LimitReached || filter.EntriesSeen + entries.Count > filter.MaxEntries)
+            {
+                filter.LimitReached = true; // C6 / B3 M2: nothing more is listed or emitted by this job's walks
+                handle.Dispose();
+                return null;
+            }
+
+            filter.EntriesSeen += entries.Count;
+        }
+
         var subdirectories = new List<string>();
         var folder = new SharedFolder(handle);
         try
@@ -245,6 +263,12 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         }
         else if (entry.IsDirectory)
         {
+            if (filter is { SkipPlaceholderFolders: true } && entry.IsPlaceholder)
+            {
+                filter.FoldersOffline++; // B3 M2: never make SYSTEM ask a sync provider to populate a folder
+                return;
+            }
+
             if (filter?.SkipFolder is { } skip && skip(path))
             {
                 filter.FoldersSkipped++;
@@ -252,6 +276,10 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             }
 
             subdirectories.Add(entry.Name);
+        }
+        else if (filter?.SkipFile is { } skipFile && skipFile(path))
+        {
+            filter.FilesSkipped++;
         }
         else if (filter?.IncludeFile is { } include && !include(entry))
         {
@@ -301,24 +329,49 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
 }
 
 /// <summary>
-/// C4: what a scan check walks (Quick Scan's folder phases): a depth limit, which listed files are emitted and which
-/// subfolders are not descended into. The walk itself is unchanged (handle-bound, no link followed, exclusions applied
-/// first). The counters are for the phase summary; one filter belongs to one walk on one thread.
+/// C4: what a scan check walks (Quick Scan's folder phases, Full Scan's drives): a depth limit, which listed files are
+/// emitted and which subfolders are not descended into. The walk itself is unchanged (handle-bound, no link followed,
+/// exclusions applied first). The counters are for the phase summary; one filter belongs to one job's walks on one thread.
 /// </summary>
 internal sealed class ScanWalkFilter
 {
     /// <summary>Deepest folder nesting below a root that is listed (the root is depth 0); deeper folders are counted, not walked.</summary>
     public int MaxDepth { get; init; } = ScanTreeWalker.MaxDepth;
 
+    /// <summary>
+    /// C6 / review B3 M2: most directory entries listed by the walks using this filter (all roots together). Once a listing
+    /// would go past it, <see cref="LimitReached"/> is set and the walks stop: an endless or gigantic tree (a hostile
+    /// cloud provider, a crafted volume) can't keep a job going forever.
+    /// </summary>
+    public long MaxEntries { get; init; } = long.MaxValue;
+
+    /// <summary>
+    /// C6 / review B3 M2: don't descend into cloud-files placeholder folders whose content isn't local (RECALL_ON_OPEN /
+    /// RECALL_ON_DATA_ACCESS / Offline): listing one as SYSTEM would ask the user's sync provider to populate it. Counted
+    /// in <see cref="FoldersOffline"/>. Default on.
+    /// </summary>
+    public bool SkipPlaceholderFolders { get; init; } = true;
+
     /// <summary>Emits a listed file only when this says yes (null = every file). Sees the listing only: name, size, times.</summary>
     public Func<SafeTreeEntry, bool>? IncludeFile { get; init; }
+
+    /// <summary>A file (exact <c>\?\</c> path) that is skipped and counted in <see cref="FilesSkipped"/> (e.g. pagefile.sys at a volume root).</summary>
+    public Func<string, bool>? SkipFile { get; init; }
 
     /// <summary>A subfolder (exact <c>\?\</c> path) that is not descended into (null = none).</summary>
     public Func<string, bool>? SkipFolder { get; init; }
 
     public long FilesFiltered { get; set; }
 
+    public long FilesSkipped { get; set; }
+
     public long FoldersSkipped { get; set; }
 
     public long FoldersTooDeep { get; set; }
+
+    public long FoldersOffline { get; set; }
+
+    public long EntriesSeen { get; set; }
+
+    public bool LimitReached { get; set; }
 }
