@@ -55,6 +55,16 @@ public enum PipeRequestKind
 
     /// <summary>Body: <see cref="QuarantineFromResultRequest"/>; reply: <see cref="QuarantineFromResultReply"/>.</summary>
     QuarantineFromResult,
+
+    /// <summary>
+    /// C4: no body; reply: <see cref="ScanCreateReply"/> (no paths). Creates a Quick Scan job (not started; then ScanStart).
+    /// <b>Administrators only</b> (AccessDenied otherwise): it covers every user's folders, every process and machine-wide
+    /// autostart entries, so only administrators may start it and see its results.
+    /// </summary>
+    QuickScanCreate,
+
+    /// <summary>C4: body <see cref="ScanFindingsRequest"/>; reply: <see cref="JobFindingsReply"/> (phases + one page of findings).</summary>
+    ScanGetFindings,
 }
 
 /// <param name="Id">Client-chosen request ID (positive), echoed in <see cref="PipeFrame.ReplyTo"/>.</param>
@@ -270,7 +280,7 @@ public sealed record JobCountersInfo(
 
 public sealed record JobProgressInfo(
     Guid JobId, JobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
-    WirePath? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, JobCountersInfo Counters);
+    WirePath? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, JobCountersInfo Counters, ScanPhaseProgressInfo? Phase = null);
 
 /// <summary>Why a file wasn't scanned (C1), engine-classified. <see cref="NoAccess"/> deliberately tells nothing else.</summary>
 [JsonConverter(typeof(StrictEnumConverter<NotScannedReason>))]
@@ -344,3 +354,72 @@ public sealed record JobStateEvent(Guid JobId, JobState From, JobState To, DateT
 public sealed record JobFileResultEvent(Guid JobId, JobFileResultInfo Result);
 
 public sealed record EventsDroppedEvent(long Count);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// C4: multi-phase jobs (Quick Scan) and findings that aren't single-file results
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// <summary>The running phase of a multi-phase job (engine text).</summary>
+/// <param name="Index">0-based.</param>
+public sealed record ScanPhaseProgressInfo(string Name, int Index, int Count);
+
+[JsonConverter(typeof(StrictEnumConverter<PhaseState>))]
+public enum PhaseState
+{
+    Pending,
+    Running,
+    Completed,
+
+    /// <summary>Stopped part-way (its share of the time budget, the budget, cancel, a cap or an error): see the notes.</summary>
+    Incomplete,
+
+    /// <summary>The job ended before the phase started.</summary>
+    NotRun,
+}
+
+/// <summary>One phase of a multi-phase job; name and notes are engine text (sanitised, capped).</summary>
+public sealed record ScanPhaseInfo(string Name, PhaseState State, TimeSpan Duration, long Files, int Findings, IReadOnlyList<string> Notes);
+
+[JsonConverter(typeof(StrictEnumConverter<FindingCategory>))]
+public enum FindingCategory
+{
+    /// <summary>An autostart entry; <see cref="ScanFindingInfo.Persistence"/> is set.</summary>
+    Persistence,
+}
+
+public sealed record ScanFindingsRequest(Guid JobId, int Offset = 0, int Limit = 100)
+{
+    public int Offset { get; init; } = Offset >= 0
+        ? Offset
+        : throw new ArgumentOutOfRangeException(nameof(Offset), Offset, "The offset can't be negative.");
+
+    public int Limit { get; init; } = Limit is >= 0 and <= PipeProtocol.MaxResultsPage
+        ? Limit
+        : throw new ArgumentOutOfRangeException(nameof(Limit), Limit, $"The page size is 0-{PipeProtocol.MaxResultsPage}.");
+}
+
+/// <summary>
+/// The autostart entry of a finding. Registry / task / shortcut text is untrusted: paths and names go out exact as
+/// <see cref="WirePath"/> (the UI isolates them).
+/// </summary>
+/// <param name="UserSid">The user the entry belongs to (administrators only; null = machine-wide or not shown).</param>
+/// <param name="CommandLine">The stored command (administrators only).</param>
+/// <param name="RuleIds">The engine rules that scored (format-checked identifiers like <c>ifeo-debugger</c>).</param>
+/// <param name="TargetVerdict">The target file's scan verdict, if it was scanned.</param>
+public sealed record PersistenceFindingInfo(
+    Persistence.PersistenceKind Kind, bool MachineWide, string? UserSid, WirePath Location, WirePath? ValueName, WirePath? CommandLine,
+    WirePath? TargetPath, bool Enabled, IReadOnlyList<string> RuleIds, Verdict? TargetVerdict);
+
+/// <param name="FindingId">Stable index of the finding in its job (findings are only appended).</param>
+/// <param name="Reasons">At most 8. Administrators: the judgement's own text (sanitised, capped); everyone else: engine templates.</param>
+/// <param name="TechniqueIds">MITRE ATT&amp;CK technique IDs, primary first, distinct, format-checked (at most 8).</param>
+public sealed record ScanFindingInfo(
+    int FindingId, FindingCategory Category, Verdict Verdict, IReadOnlyList<string> TechniqueIds, IReadOnlyList<string> Reasons, Guid? AlertId,
+    PersistenceFindingInfo? Persistence);
+
+/// <param name="Complete">The job Completed and every phase covered everything it should.</param>
+/// <param name="Duplicates">Files not scanned again because the job already had them.</param>
+/// <param name="NextOffset">The offset of the next page, or null at the end.</param>
+public sealed record JobFindingsReply(
+    Guid JobId, bool Complete, IReadOnlyList<ScanPhaseInfo> Phases, long Duplicates, IReadOnlyList<ScanFindingInfo> Findings, int? NextOffset,
+    long FindingsOmitted);

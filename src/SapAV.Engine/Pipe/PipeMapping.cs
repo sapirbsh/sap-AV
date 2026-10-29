@@ -38,7 +38,8 @@ internal static class PipeMapping
         new(p.JobId, Map(p.State), p.FilesFound, p.FilesTotal, p.FilesDone, p.BytesDone, p.BytesTotal,
             p.CurrentFile is null ? null : WirePath.From(p.CurrentFile), p.Eta, p.Elapsed,
             new JobCountersInfo(p.Counters.Clean, p.Counters.Suspicious, p.Counters.Malicious, p.Counters.NotScanned, p.Counters.Excluded,
-                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed));
+                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed),
+            p.Phase is { } phase ? new ScanPhaseProgressInfo(Text(phase.Name, MaxPhaseNameLength), phase.Index, phase.Count) : null);
 
     public const int MaxSignerLength = 128;
     public const int MaxUrlLength = 512;
@@ -151,4 +152,53 @@ internal static class PipeMapping
     public static RestoreReply Restore(RestoreResult r) =>
         new(Map(r.Status), Text(r.Reason), r.RestoredPath is null ? null : WirePath.From(r.RestoredPath),
             r.Notes.Take(MaxReasons).Select(n => Text(n)).ToArray());
+
+    // ---- C4: phases and findings ----
+
+    public const int MaxPhaseNameLength = 64;
+    public const int MaxPhaseNotes = 12;
+    public const int MaxRuleIdLength = 64;
+
+    public static ScanPhaseInfo Phase(Scanning.Checks.ScanPhaseSummary p) =>
+        new(Text(p.Name, MaxPhaseNameLength), Enum.Parse<PhaseState>(p.State.ToString()), p.Duration, p.Files, p.Findings,
+            p.Notes.Take(MaxPhaseNotes).Select(n => Text(n)).ToArray());
+
+    /// <summary>
+    /// One finding for a client (C4). Entry text (registry values, task files, shortcut targets) is attacker-controlled, so
+    /// <paramref name="forAdmin"/> decides what goes out, as for file results: administrators get the judgement's reasons
+    /// (sanitised, capped), the command line and the user SID; everyone else gets engine templates (verdict, source,
+    /// MITRE, rule identifiers) and no command line. Paths always go out exact as <see cref="WirePath"/> for the UI to
+    /// isolate. Quick Scan results are administrator-only today (the pipe refuses Quick Scan to standard users), so the
+    /// non-admin form is defense in depth for later finding sources.
+    /// </summary>
+    public static ScanFindingInfo Finding(int findingId, Scanning.Checks.ScanFinding f, bool forAdmin)
+    {
+        var techniques = f.SecondaryTechniqueIds.Prepend(f.TechniqueId).Where(Core.Mitre.MitreTechniqueIdFormat.IsValid)
+            .Distinct(StringComparer.Ordinal).Take(MaxReasons).ToArray();
+        PersistenceFindingInfo? persistence = null;
+        IReadOnlyList<string> reasons = [];
+        if (f.Persistence is { } p)
+        {
+            var judgement = p.Judgement;
+            var rules = judgement.Signals.Where(s => s.Score > 0).Select(s => s.Rule).Where(IsRuleId).Distinct(StringComparer.Ordinal)
+                .Take(MaxReasons).ToArray();
+            reasons = forAdmin
+                ? judgement.Reasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray()
+                : judgement.Detections.Where(d => d.Source != Core.Models.DetectionSource.Persistence).Select(ReasonTemplate)
+                    .Concat(rules.Select(r => $"{f.Verdict}: the autostart check '{r}' scored."))
+                    .Take(MaxReasons).ToArray();
+            var entry = p.Entry;
+            persistence = new PersistenceFindingInfo(entry.Kind, entry.IsMachineScope, forAdmin ? entry.UserSid : null, WirePath.From(entry.Location),
+                entry.ValueName is null ? null : WirePath.From(entry.ValueName),
+                forAdmin ? WirePath.From(entry.CommandLine) : null,
+                entry.Resolution.TargetPath is { } target ? WirePath.From(target) : null,
+                entry.Enabled, rules, p.Target?.Verdict);
+        }
+
+        return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence);
+    }
+
+    /// <summary>An engine rule identifier: 1-64 of a-z, 0-9 and '-'. Anything else is never sent.</summary>
+    internal static bool IsRuleId(string? rule) =>
+        rule is { Length: > 0 and <= MaxRuleIdLength } && rule.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-');
 }

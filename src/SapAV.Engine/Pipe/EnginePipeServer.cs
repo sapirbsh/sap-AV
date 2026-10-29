@@ -60,17 +60,19 @@ public sealed class EnginePipeServer : BackgroundService
     private CancellationToken _stoppingToken;
 
     public EnginePipeServer(IOptions<PipeServerOptions> options, IScanJobService jobs, IQuarantineService quarantine, TimeProvider time,
-        ILogger<EnginePipeServer> logger, IAlertDispatcher alerts)
+        ILogger<EnginePipeServer> logger, IAlertDispatcher alerts, Scanning.Checks.QuickScanFactory quickScan)
         : this(ForThisProcess(options.Value, RunningAsSystemOrElevated()), jobs, quarantine, time, logger, new PipeClientIdentityResolver(),
-            EnginePipeSecurity.CurrentAccount(), alerts: alerts)
+            EnginePipeSecurity.CurrentAccount(), alerts: alerts, quickScan: quickScan)
     {
     }
 
     /// <param name="resolver">Test seam: the identity of each connection. Production always uses <see cref="PipeClientIdentityResolver"/>.</param>
     /// <param name="serverAccount">The account that gets full control besides SYSTEM (the engine's own account).</param>
     /// <param name="alerts">Where the pipe-unavailable health alert goes (review B M4); null in most tests.</param>
+    /// <param name="quickScan">Builds Quick Scan jobs (C4); null = QuickScanCreate answers Unavailable.</param>
     internal EnginePipeServer(PipeServerOptions options, IScanJobService jobs, IQuarantineService? quarantine, TimeProvider time, ILogger logger,
-        IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null, IAlertDispatcher? alerts = null)
+        IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null, IAlertDispatcher? alerts = null,
+        Scanning.Checks.QuickScanFactory? quickScan = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -79,7 +81,7 @@ public sealed class EnginePipeServer : BackgroundService
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType);
+        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType, quickScan);
         _owner = EnginePipeSecurity.CurrentAccount();
         _descriptor = EnginePipeSecurity.Create(_owner, serverAccount);
         _securityDescriptor = EnginePipeSecurity.ToBytes(_descriptor);

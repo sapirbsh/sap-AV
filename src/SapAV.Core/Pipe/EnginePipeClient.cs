@@ -182,6 +182,14 @@ public sealed class EnginePipeClient : IAsyncDisposable
     public Task<JobDetails> GetScanAsync(Guid jobId, int offset = 0, int limit = 100, CancellationToken cancellationToken = default) =>
         SendAsync<JobDetails>(PipeRequestKind.ScanGet, new ScanGetRequest(jobId, offset, limit), cancellationToken);
 
+    /// <summary>C4: creates a Quick Scan job (administrators only; then <see cref="StartScanAsync"/>).</summary>
+    public Task<ScanCreateReply> CreateQuickScanAsync(CancellationToken cancellationToken = default) =>
+        SendAsync<ScanCreateReply>(PipeRequestKind.QuickScanCreate, null, cancellationToken);
+
+    /// <summary>C4: a job's phases and one page of its findings.</summary>
+    public Task<JobFindingsReply> GetFindingsAsync(Guid jobId, int offset = 0, int limit = 100, CancellationToken cancellationToken = default) =>
+        SendAsync<JobFindingsReply>(PipeRequestKind.ScanGetFindings, new ScanFindingsRequest(jobId, offset, limit), cancellationToken);
+
     public Task<ScanListReply> ListScansAsync(CancellationToken cancellationToken = default) =>
         SendAsync<ScanListReply>(PipeRequestKind.ScanList, null, cancellationToken);
 

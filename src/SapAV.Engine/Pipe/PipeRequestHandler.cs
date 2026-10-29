@@ -43,10 +43,11 @@ internal sealed class PipeRequestHandler : IDisposable
     private readonly ILogger _logger;
     private readonly Func<string, int> _driveType;
     private readonly ITimer _prune;
+    private readonly Scanning.Checks.QuickScanFactory? _quickScan;
 
     public PipeRequestHandler(
         IScanJobService jobs, IQuarantineService? quarantine, PipeServerOptions options, TimeProvider time, ILogger logger,
-        Func<string, int>? driveType = null)
+        Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null)
     {
         _jobs = jobs ?? throw new ArgumentNullException(nameof(jobs));
         _quarantine = quarantine;
@@ -56,6 +57,7 @@ internal sealed class PipeRequestHandler : IDisposable
         _rate = new UserRateLimiter(time, options.RequestsPerSecond, options.RequestBurst);
         _quarantineRate = new UserRateLimiter(time, options.QuarantineRequestsPerMinute / 60, options.QuarantineRequestBurst);
         _driveType = driveType ?? PipeNative.DriveType;
+        _quickScan = quickScan;
 
         // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
         _prune = time.CreateTimer(_ => PruneSafely(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
@@ -105,6 +107,8 @@ internal sealed class PipeRequestHandler : IDisposable
                 PipeRequestKind.QuarantineFromResult =>
                     await QuarantineFromResultAsync(session, PipeJson.Body<QuarantineFromResultRequest>(request.Body), cancellationToken)
                         .ConfigureAwait(false),
+                PipeRequestKind.QuickScanCreate => NoBody(request) ?? QuickScanCreate(session),
+                PipeRequestKind.ScanGetFindings => GetFindings(session, PipeJson.Body<ScanFindingsRequest>(request.Body)),
                 _ => PipeReply.Fail(PipeStatus.BadRequest, "Unknown request."),
             };
         }
@@ -314,6 +318,63 @@ internal sealed class PipeRequestHandler : IDisposable
             if (limit <= 1 || JsonSerializer.SerializeToUtf8Bytes(details, PipeJson.Options).Length <= PipeProtocol.MaxServerFrameBytes - 4096)
             {
                 return PipeReply.Ok(details);
+            }
+
+            limit /= 2;
+        }
+    }
+
+    /// <summary>
+    /// C4 authorization: Quick Scan only for administrators. It walks every user's profile, scans every process image and
+    /// judges machine-wide autostart entries, so a standard user's scoped access (B4) can't apply to it, and its results
+    /// (other users' files, other users' processes, HKLM entries) are for administrators only. The job is owned by the
+    /// administrator like any admin job (visible to administrator clients only, review B4 M3) and runs at administrator
+    /// priority; the engine's own Quick Scans (scheduled, Phase 2) are engine jobs, visible to administrators only.
+    /// </summary>
+    private PipeReply QuickScanCreate(PipeSession session)
+    {
+        var client = session.Identity;
+        if (!client.IsAdmin)
+        {
+            return PipeReply.Fail(PipeStatus.AccessDenied,
+                "Quick Scan needs an administrator: it covers every user's folders, every running program and machine-wide autostart entries. Use a Custom Scan for your own files.");
+        }
+
+        if (_quickScan is null)
+        {
+            return PipeReply.Fail(PipeStatus.Unavailable, "Quick Scan is not available in this engine.");
+        }
+
+        var (job, status, error) = _registry.TryCreate(client, session, _quickScan.CreateRequest(ScanJobOrigin.Administrator, client.User), access: null);
+        if (job is null)
+        {
+            return PipeReply.Fail(status, error);
+        }
+
+        _logger.LogInformation("Pipe: administrator {User} created Quick Scan job {JobId}.", client.User.Value, job.Id);
+        return PipeReply.Ok(new ScanCreateReply(job.Id, []));
+    }
+
+    /// <summary>C4: phases and one page of findings of a visible job (same visibility rules as ScanGet), sized to fit a frame.</summary>
+    private PipeReply GetFindings(PipeSession session, ScanFindingsRequest request)
+    {
+        if (_registry.Find(session.Identity, request.JobId) is not { } job)
+        {
+            return JobNotFound();
+        }
+
+        bool admin = session.Identity.IsAdmin;
+        var findings = job.Findings;
+        var phases = job.Phases.Select(PipeMapping.Phase).ToArray();
+        int limit = request.Limit;
+        while (true)
+        {
+            var page = findings.Skip(request.Offset).Take(limit).Select((f, i) => PipeMapping.Finding(request.Offset + i, f, admin)).ToArray();
+            int end = request.Offset + page.Length;
+            var reply = new JobFindingsReply(job.Id, job.IsComplete, phases, job.Duplicates, page, end < findings.Count ? end : null, job.FindingsOmitted);
+            if (limit <= 1 || JsonSerializer.SerializeToUtf8Bytes(reply, PipeJson.Options).Length <= PipeProtocol.MaxServerFrameBytes - 4096)
+            {
+                return PipeReply.Ok(reply);
             }
 
             limit /= 2;
