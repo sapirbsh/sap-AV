@@ -49,6 +49,12 @@ public enum Requires
     /// elevated administrator and the Server service. Used to exercise the remote-file refusal (A2 W-A) on a real SMB handle.
     /// </summary>
     AdminShare,
+
+    /// <summary>
+    /// Opt-in (<c>SAPAV_TEST_SLOW=1</c>): long real-machine runs, e.g. a full Quick Scan of this PC with its per-phase timing
+    /// (C4). Off by default so a normal run and CI stay fast.
+    /// </summary>
+    SlowTests,
 }
 
 internal static class TestRequirements
@@ -57,6 +63,9 @@ internal static class TestRequirements
 
     /// <summary>Set to 1 to allow tests that write HKLM (see <see cref="Requires.HklmWritesAllowed"/>).</summary>
     public const string AllowHklmVariable = "SAPAV_TEST_ALLOW_HKLM";
+
+    /// <summary>Set to 1 to run the long real-machine tests (see <see cref="Requires.SlowTests"/>).</summary>
+    public const string SlowTestsVariable = "SAPAV_TEST_SLOW";
 
     private static readonly Dictionary<Requires, Lazy<string?>> Probes = new()
     {
@@ -69,6 +78,9 @@ internal static class TestRequirements
         [Requires.AppContainer] = new(ProbeAppContainer),
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
         [Requires.AdminShare] = new(ProbeAdminShare),
+        [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
+            ? null
+            : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),
     };
 
     /// <summary>The <c>\\localhost\X$\…</c> form of a local fully qualified path (valid when <see cref="Requires.AdminShare"/> is met).</summary>

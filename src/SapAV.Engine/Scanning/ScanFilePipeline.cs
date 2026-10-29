@@ -12,6 +12,15 @@ internal sealed record ScanVerdictOutcome(ScanFileAction Action, string? Detail 
     public static ScanVerdictOutcome Nothing { get; } = new(ScanFileAction.None);
 }
 
+/// <summary>One file through <see cref="ScanFilePipeline.ProcessDetailedAsync"/>.</summary>
+/// <param name="Result">The job result; null when the file was excluded or a duplicate.</param>
+/// <param name="Report">The scan report (also for Clean files); for a duplicate, the earlier report if it was kept.</param>
+/// <param name="Duplicate">C4: this job already scanned the same file identity; nothing was scanned now.</param>
+internal sealed record ScanPipelineOutcome(ScanJobFileResult? Result, FileScanReport? Report, bool Duplicate = false)
+{
+    public static ScanPipelineOutcome Excluded { get; } = new(null, null);
+}
+
 /// <summary>
 /// Section B M1 / M2: whose budgets a job's alerts, auto-quarantines and quarantine quota count against. Engine jobs
 /// (no requester) use the engine's budget for their trigger; a job requested over the pipe uses the requesting user's,
@@ -68,7 +77,18 @@ internal sealed class ScanFilePipeline(
     /// <param name="priority">Who the scan is for, for the next free worker (review B H3).</param>
     public async Task<ScanJobFileResult?> ProcessAsync(
         string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
-        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false, ScanBudget? budget = null)
+        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false, ScanBudget? budget = null) =>
+        (await ProcessDetailedAsync(path, trigger, bytesScanned, jobToken, access, folder, name, priority, allowRemote, budget).ConfigureAwait(false)).Result;
+
+    /// <summary>
+    /// <see cref="ProcessAsync"/> with C4's cross-phase dedupe: after the open, a file whose identity this job already
+    /// scanned is not scanned again (<see cref="ScanPipelineOutcome.Duplicate"/>, with the earlier report when it was kept).
+    /// The outcome also carries the full report (the persistence judgement needs it, Clean or not).
+    /// </summary>
+    public async Task<ScanPipelineOutcome> ProcessDetailedAsync(
+        string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
+        SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false, ScanBudget? budget = null,
+        ScanDedupe? dedupe = null)
     {
         string step = "open";
         try
@@ -84,33 +104,44 @@ internal sealed class ScanFilePipeline(
                 folder, name);
             if (skip == ScanSkipReason.NoAccess)
             {
-                return NoAccessResult(path);
+                return new(NoAccessResult(path), null);
             }
 
             if (opened is not null && excluded.Contains(opened.Identity?.FinalPath))
             {
-                return null; // e.g. reached through an 8.3 name: the final path is an engine folder
+                return ScanPipelineOutcome.Excluded; // e.g. reached through an 8.3 name: the final path is an engine folder
             }
 
             if (DifferentFile(item, opened) is { } different)
             {
                 logger.LogWarning("Scan of {Path}: {Why}", path, different);
-                return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null)
+                return new(new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None, different, null, null, null)
                 {
                     SkipReason = ScanSkipReason.DifferentFile,
-                };
+                }, null);
             }
 
             item = Canonical(item, opened);
 
+            // C4: one scan per file identity in a job (an 8.3 spelling, a hard link, a process image that is also an autostart target).
+            var identity = opened?.Identity;
+            if (dedupe is not null && identity is not null && !dedupe.TryClaim(identity, out var prior))
+            {
+                return new(null, prior, Duplicate: true);
+            }
+
             step = "scan";
             var report = opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, priority, jobToken).ConfigureAwait(false);
             bytesScanned(report.Hash.Length ?? 0);
+            if (dedupe is not null && identity is not null)
+            {
+                dedupe.Complete(identity, report);
+            }
 
             step = "post-scan";
             var outcome = handler is null ? ScanVerdictOutcome.Nothing : await handler.HandleAsync(report, opened, budget, jobToken).ConfigureAwait(false);
             var result = ToResult(report, outcome);
-            return skip is { } why ? result with { SkipReason = why } : result;
+            return new(skip is { } why ? result with { SkipReason = why } : result, report);
         }
         catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
         {
@@ -121,14 +152,14 @@ internal sealed class ScanFilePipeline(
             logger.LogWarning(ex, "Scan job step '{Step}' failed for {Path}; the file is NotScanned (Error).", step, path);
             if (access is not null && step == "open")
             {
-                return NoAccessResult(path); // B4 L3: nothing was checked yet, so nothing is told
+                return new(NoAccessResult(path), null); // B4 L3: nothing was checked yet, so nothing is told
             }
 
-            return new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None,
+            return new(new ScanJobFileResult(path, ScanStatus.Error, null, ScanFileAction.None,
                 $"Not scanned (Error): the {step} step failed ({ex.GetType().Name}).", null, null, null)
             {
                 SkipReason = ScanSkipReason.Error,
-            };
+            }, null);
         }
     }
 

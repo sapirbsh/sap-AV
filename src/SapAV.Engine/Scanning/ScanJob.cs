@@ -31,7 +31,7 @@ internal interface IScanJobPreflight
 /// <see cref="FileCompleted"/> is raised for every recorded result (everything except Clean files). <see cref="Completion"/>
 /// completes after the final state change was delivered.</para>
 /// </remarks>
-public sealed class ScanJob : IDisposable
+public sealed partial class ScanJob : IDisposable
 {
     private readonly ScanJobOptions _options;
     private readonly ScanFilePipeline _pipeline;
@@ -85,13 +85,14 @@ public sealed class ScanJob : IDisposable
         _budget = request.TimeBudget ?? options.TimeBudget;
         _budgets = ScanBudget.Of(request);
         _estimator = new ThroughputEstimator(time);
-        _current = new string?[options.ThreadsPerJob];
+        _current = new string?[options.ThreadsPerJob + 1]; // the last slot: a check scanning a file inline (C4)
         _queue = Channel.CreateBounded<ScanTreeEntry>(new BoundedChannelOptions(options.QueueCapacity)
         {
             SingleWriter = true,
             FullMode = BoundedChannelFullMode.Wait,
         });
         CreatedAt = time.GetUtcNow();
+        InitChecks(request);
         _ = Task.Run(DispatchEventsAsync);
     }
 
@@ -341,7 +342,14 @@ public sealed class ScanJob : IDisposable
         try
         {
             RunPreflight(token);
-            _walker.Walk(Request.Paths, entry => Emit(entry, token), token, Request.Access, Request.AllowRemoteFiles);
+            if (Request.Checks is { Count: > 0 } checks)
+            {
+                RunChecks(checks, token); // C4: multi-phase jobs (Quick Scan)
+            }
+            else
+            {
+                _walker.Walk(Request.Paths, entry => Emit(entry, token), token, Request.Access, Request.AllowRemoteFiles);
+            }
             lock (_lock)
             {
                 _enumerationDone = true;
@@ -505,11 +513,11 @@ public sealed class ScanJob : IDisposable
         }
 
         long scannedBytes = 0;
-        ScanJobFileResult? result;
+        ScanPipelineOutcome outcome;
         try
         {
-            result = _pipeline.ProcessAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name,
-                    PriorityOf(Request.Origin), Request.AllowRemoteFiles, _budgets)
+            outcome = _pipeline.ProcessDetailedAsync(entry.Path, Request.Trigger, b => scannedBytes = b, token, Request.Access, entry.Folder, entry.Name,
+                    PriorityOf(Request.Origin), Request.AllowRemoteFiles, _budgets, _dedupe)
                 .GetAwaiter().GetResult();
         }
         finally
@@ -520,12 +528,27 @@ public sealed class ScanJob : IDisposable
         lock (_lock)
         {
             _current[index] = null;
-            _filesDone++;
-            _bytesDone += scannedBytes > 0 ? scannedBytes : entry.Length;
-            _estimator.Record(scannedBytes > 0 ? scannedBytes : entry.Length, 1);
-            CountLocked(result);
-            ProgressChangedLocked();
+            FileDoneLocked(outcome, scannedBytes > 0 ? scannedBytes : entry.Length);
         }
+    }
+
+    /// <summary>Counts one handled file (a scan thread's or a check's inline scan).</summary>
+    private void FileDoneLocked(ScanPipelineOutcome outcome, long bytes)
+    {
+        _filesDone++;
+        _bytesDone += bytes;
+        _estimator.Record(bytes, 1);
+        if (!outcome.Duplicate)
+        {
+            CountLocked(outcome.Result);
+        }
+
+        if (_filesDone >= _filesFound)
+        {
+            _drained.Set(); // C4: a phase waiting for its queued files may go on
+        }
+
+        ProgressChangedLocked();
     }
 
     /// <summary>Review B H3: the engine's own jobs first, then administrators', then standard users'.</summary>
@@ -706,6 +729,8 @@ public sealed class ScanJob : IDisposable
             _runningSince = null;
         }
 
+        FinishPhases(final);
+
         try
         {
             _handler?.JobFinished(this);
@@ -752,13 +777,17 @@ public sealed class ScanJob : IDisposable
     {
         long? filesTotal = _enumerationDone ? _filesFound : null;
         long? bytesTotal = _enumerationDone ? _bytesFound : null;
-        TimeSpan? eta = _enumerationDone && !ScanJobStateMachine.IsTerminal(_state)
-            ? _estimator.Estimate(Math.Max(0, _bytesFound - _bytesDone), Math.Max(0, _filesFound - _filesDone))
+        TimeSpan? eta = ScanJobStateMachine.IsTerminal(_state) ? null
+            : _phases is not null ? PhasedEtaLocked()
+            : _enumerationDone ? _estimator.Estimate(Math.Max(0, _bytesFound - _bytesDone), Math.Max(0, _filesFound - _filesDone))
             : null;
         return new ScanJobProgress(Id, _state, _filesFound, filesTotal, _filesDone, _bytesDone, bytesTotal,
             _current.FirstOrDefault(c => c is not null), eta, ElapsedLocked(),
             new ScanJobCounters(_clean, _suspicious, _malicious, _notScanned, _excluded, _quarantined,
-                _needsConfirmation, _quarantineFailed));
+                _needsConfirmation, _quarantineFailed))
+        {
+            Phase = CurrentPhaseLocked(),
+        };
     }
 
     private void ProgressChangedLocked()

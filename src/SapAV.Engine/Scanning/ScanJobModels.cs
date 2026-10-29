@@ -35,10 +35,23 @@ public sealed record ScanJobRequest(IReadOnlyList<string> Paths, ScanTrigger Tri
     internal System.Security.Principal.SecurityIdentifier? Requester { get; init; }
 
     /// <exception cref="ArgumentException">No paths, or a path that isn't fully qualified.</exception>
+    /// <summary>
+    /// C4: run these checks in order instead of walking <see cref="Paths"/> (Quick Scan: processes → persistence → folders →
+    /// recent files; Full Scan in C6). <see cref="Paths"/> may then be empty.
+    /// </summary>
+    internal IReadOnlyList<Checks.IScanCheck>? Checks { get; init; }
+
     internal void Validate()
     {
         ArgumentNullException.ThrowIfNull(Paths);
-        if (Paths.Count == 0)
+        if (Checks is { Count: > 0 } checks)
+        {
+            if (checks.Any(c => c is null))
+            {
+                throw new ArgumentException("A scan check is null.", nameof(Checks));
+            }
+        }
+        else if (Paths.Count == 0)
         {
             throw new ArgumentException("A scan job needs at least one path.", nameof(Paths));
         }
@@ -189,7 +202,15 @@ public sealed record ScanJobCounters(
 /// <param name="Eta">Estimated time left from the smoothed throughput, or null while unknown.</param>
 public sealed record ScanJobProgress(
     Guid JobId, ScanJobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
-    string? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, ScanJobCounters Counters);
+    string? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, ScanJobCounters Counters)
+{
+    /// <summary>C4: the running phase of a multi-phase job (Quick Scan); null for a plain file / folder job.</summary>
+    public ScanPhaseProgress? Phase { get; init; }
+}
+
+/// <summary>Which phase of a multi-phase job is running.</summary>
+/// <param name="Index">0-based.</param>
+public sealed record ScanPhaseProgress(string Name, int Index, int Count);
 
 /// <summary>A job-level warning (rules missing, store full, budget, ...), engine text only.</summary>
 public sealed record ScanJobWarning(DateTimeOffset Timestamp, string Message);

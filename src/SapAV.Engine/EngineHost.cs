@@ -82,12 +82,24 @@ public static class EngineHost
                 sp.GetRequiredService<ILogger<AlertDispatcher>>(), options.AlertWindow, options.MaxAlertsPerWindow, options.AlertQueueCapacity);
         });
         builder.Services.AddSingleton(ScanJobService.CreateExclusions); // review B H1: engine folders excluded only while verified
+        builder.Services.AddSingleton<IScanVerdictHandler>(ScanJobService.CreateVerdictHandler);
         builder.Services.AddSingleton(ScanJobService.Create);
         builder.Services.AddSingleton<IScanJobService>(sp => sp.GetRequiredService<ScanJobService>());
 
         // Persistence collectors (C2): read-only; Quick Scan (C4) and real-time monitoring (D4) use them.
         builder.Services.AddSingleton<Persistence.IPersistenceCollector>(sp =>
             Persistence.PersistenceCollector.CreateDefault(sp.GetService<ILogger<Persistence.PersistenceCollector>>()));
+
+        // Persistence judgement (C3), registered for C4 / D4: target files go through the sandboxed broker, the shared
+        // verdict handler (file alert + auto-quarantine policy) runs on each target, and alerts 2001 / 2002 use the dispatcher.
+        builder.Services.AddSingleton<Persistence.IPersistenceScanner>(sp => new Persistence.PersistenceScanner(
+            sp.GetRequiredService<IScanBroker>(), sp.GetRequiredService<IAlertDispatcher>(), sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Persistence"), targetHandler: sp.GetRequiredService<IScanVerdictHandler>()));
+
+        // Quick Scan (C4): a scan job of pluggable checks (processes, persistence, high-risk folders, recent files).
+        // The threat pack (E7) adds checks by registering more IScanCheck singletons.
+        builder.Services.Configure<Scanning.Checks.QuickScanOptions>(builder.Configuration.GetSection(Scanning.Checks.QuickScanOptions.SectionName));
+        builder.Services.AddSingleton(Scanning.Checks.QuickScanFactory.Create);
 
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));

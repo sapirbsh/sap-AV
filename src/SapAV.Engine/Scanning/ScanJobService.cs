@@ -82,14 +82,26 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning");
         var broker = services.GetRequiredService<IScanBroker>();
         var alerts = services.GetRequiredService<Alerts.IAlertDispatcher>();
-        var handler = new ScanVerdictHandler(
-            alerts,
+        var handler = services.GetRequiredService<IScanVerdictHandler>();
+        var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
+        return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger);
+    }
+
+    /// <summary>
+    /// The engine's one verdict handler (alerts + auto-quarantine policy and rate limit), shared by scan jobs and the
+    /// persistence scanner's target scans (C4), so both follow the same rules and budgets.
+    /// </summary>
+    internal static ScanVerdictHandler CreateVerdictHandler(IServiceProvider services)
+    {
+        var options = services.GetRequiredService<IOptions<ScanJobOptions>>().Value;
+        options.Validate();
+        var time = services.GetRequiredService<TimeProvider>();
+        return new ScanVerdictHandler(
+            services.GetRequiredService<Alerts.IAlertDispatcher>(),
             services.GetRequiredService<Quarantine.IQuarantineService>(),
             new AutoQuarantinePolicy(options.ProtectedFolders),
             new AutoQuarantineLimiter(time, options.AutoQuarantineMaxPerWindow, options.AutoQuarantineWindow),
-            time, logger);
-        var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
-        return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger);
+            time, services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.Scanning"));
     }
 
     /// <summary>What this service doesn't scan (engine folders only while verified, plus the configured exclusions).</summary>

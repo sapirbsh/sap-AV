@@ -38,6 +38,13 @@ internal sealed record PersistenceScanOptions
 
     /// <summary>The scan budget handed to the optional target handler (C4: alerts + auto-quarantine of the target file).</summary>
     public ScanBudget? TargetBudget { get; init; }
+
+    /// <summary>
+    /// C4: scans one target / host instead of the scanner's own open + broker + target handler, e.g. a scan job's inline
+    /// scan (same pipeline, its verdict handler, its cross-phase dedupe and pause / budget checks). It must return a report,
+    /// a not-scanned one for any file problem. Called one file at a time when <see cref="Parallelism"/> is 1.
+    /// </summary>
+    public Func<string, CancellationToken, Task<FileScanReport>>? ScanTarget { get; init; }
 }
 
 /// <summary>The outcome of judging a collection: one finding per entry, plus what couldn't be collected, scanned or judged.</summary>
@@ -222,6 +229,16 @@ internal sealed class PersistenceScanner(
 
     /// <summary>One file through the hardened open and the sandboxed broker; a problem becomes a not-scanned report.</summary>
     private async Task<FileScanReport> ScanFileAsync(string path, PersistenceScanOptions options, CancellationToken cancellationToken)
+    {
+        if (options.ScanTarget is { } scan)
+        {
+            return await scan(path, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await ScanOwnAsync(path, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<FileScanReport> ScanOwnAsync(string path, PersistenceScanOptions options, CancellationToken cancellationToken)
     {
         var item = new ScanItem(path, options.Trigger);
         var notes = new List<ScanNote>();
