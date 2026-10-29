@@ -97,7 +97,7 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
 {
     public string Name => "High-risk folders";
 
-    public double Weight => 3;
+    public double Weight => 4;
 
     public void Run(IScanCheckContext context)
     {
@@ -166,7 +166,7 @@ internal sealed class RecentFilesCheck(IProfileFolderSource folders, QuickScanFi
 {
     public string Name => "Recently changed files";
 
-    public double Weight => 4;
+    public double Weight => 3;
 
     public void Run(IScanCheckContext context)
     {

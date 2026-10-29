@@ -250,29 +250,60 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task TimeBudget_Hit_EndsTimedOut_WithAnIncompleteSummary()
+    public async Task TimeBudget_EachFolderPhaseGetsItsShare_AndTheLastOneHitsTheBudget_WithAnIncompleteSummary()
     {
         using var q = new QuickScanHarness();
         for (int i = 0; i < 20; i++)
         {
             q.Write($@"Users\alice\Downloads\file{i}.exe");
+            q.Write($@"Users\alice\Downloads\more{i}.exe");
+            q.Write($@"Users\alice\Documents\recent{i}.docx");
         }
 
-        q.Jobs.Broker.OnScan = async (_, _, token) =>
+        q.Jobs.Broker.OnScan = async (item, _, token) =>
         {
             await Task.Delay(50, token);
+            lock (q.Scanned)
+            {
+                q.Scanned.Add(item.Path);
+            }
+
             return null;
         };
 
-        var job = await q.RunAsync(TimeSpan.FromMilliseconds(400));
+        var job = await q.RunAsync(TimeSpan.FromMilliseconds(800));
 
         Assert.Equal(ScanJobState.TimedOut, job.State);
         Assert.False(job.IsComplete);
-        Assert.Equal([ScanPhaseState.Completed, ScanPhaseState.Completed, ScanPhaseState.Incomplete, ScanPhaseState.NotRun], job.Phases.Select(p => p.State));
-        Assert.Contains(job.Warnings, w => w.Message.Contains("incomplete", StringComparison.OrdinalIgnoreCase)
+        Assert.Equal([ScanPhaseState.Completed, ScanPhaseState.Completed, ScanPhaseState.Incomplete, ScanPhaseState.Incomplete], job.Phases.Select(p => p.State));
+        Assert.Contains(job.Phases[2].Notes, n => n.Contains("share of the time budget", StringComparison.Ordinal)); // stopped to leave time for phase 4
+        Assert.Contains(q.Scanned, p => p.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)); // phase 4 did run
+        Assert.Contains(job.Warnings, w => w.Message.Contains("time budget", StringComparison.Ordinal)
             && w.Message.Contains("High-risk folders (Incomplete)", StringComparison.Ordinal)
-            && w.Message.Contains("Recently changed files (NotRun)", StringComparison.Ordinal));
-        Assert.True(job.GetProgress().FilesDone < 20);
+            && w.Message.Contains("Recently changed files (Incomplete)", StringComparison.Ordinal));
+        Assert.True(job.GetProgress().FilesDone < 60);
+    }
+
+    [Fact]
+    public void BudgetShares_FollowTheWeightsOfTheRemainingPhases_AndTheLastGetsEverythingLeft()
+    {
+        IScanCheck[] checks = [new WeightedCheck(1), new WeightedCheck(3), new WeightedCheck(4)];
+
+        Assert.Equal(TimeSpan.FromSeconds(10), ScanJob.ShareOfRemaining(checks, 0, TimeSpan.FromSeconds(80)));
+        Assert.Equal(TimeSpan.FromSeconds(30), ScanJob.ShareOfRemaining(checks, 1, TimeSpan.FromSeconds(70)));
+        Assert.Equal(TimeSpan.FromSeconds(55), ScanJob.ShareOfRemaining(checks, 2, TimeSpan.FromSeconds(55)));
+        Assert.Equal(TimeSpan.Zero, ScanJob.ShareOfRemaining(checks, 1, TimeSpan.FromSeconds(-1)));
+    }
+
+    private sealed class WeightedCheck(double weight) : IScanCheck
+    {
+        public string Name => "w";
+
+        public double Weight => weight;
+
+        public void Run(IScanCheckContext context)
+        {
+        }
     }
 
     [Fact]

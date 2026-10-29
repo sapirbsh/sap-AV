@@ -39,6 +39,9 @@ public sealed partial class ScanJob
 
         public TimeSpan Started { get; set; }
 
+        /// <summary>Running time at which a walk in this phase stops queuing (its weighted share of the budget left).</summary>
+        public TimeSpan Deadline { get; set; } = TimeSpan.MaxValue;
+
         public TimeSpan Duration { get; set; }
 
         public long Files { get; set; }
@@ -50,6 +53,8 @@ public sealed partial class ScanJob
         public bool Incomplete { get; set; }
 
         public bool WalkDone { get; set; }
+
+        public bool ShareNoted { get; set; }
 
         public long FoundAtStart { get; set; }
 
@@ -136,6 +141,7 @@ public sealed partial class ScanJob
                 _phaseIndex = i;
                 phase.State = ScanPhaseState.Running;
                 phase.Started = ElapsedLocked();
+                phase.Deadline = phase.Started + ShareOfRemaining(checks, i, _budget - phase.Started);
                 phase.FoundAtStart = _filesFound;
                 phase.DoneAtStart = _filesDone;
                 phase.QuarantinedAtStart = _quarantined;
@@ -176,6 +182,27 @@ public sealed partial class ScanJob
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A phase's share of the budget left: its weight over the weights of it and every later phase. Walks (folder phases)
+    /// stop queuing when their share is used up, so one huge folder tree can't starve the later phases; whatever an
+    /// earlier phase didn't use goes to the later ones. The last phase gets everything left.
+    /// </summary>
+    internal static TimeSpan ShareOfRemaining(IReadOnlyList<IScanCheck> checks, int index, TimeSpan remaining)
+    {
+        double rest = checks.Skip(index).Sum(c => Math.Max(c.Weight, 0));
+        if (remaining <= TimeSpan.Zero || rest <= 0 || index == checks.Count - 1)
+        {
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
+
+        return TimeSpan.FromTicks((long)(remaining.Ticks * Math.Max(checks[index].Weight, 0) / rest));
+    }
+
+    /// <summary>Thrown by a walk's emit once its phase's share is used up; caught in <see cref="CheckContext.QueueTree"/>.</summary>
+    private sealed class PhaseShareUsedUpException : Exception
+    {
     }
 
     /// <summary>The barrier at the end of a phase: every file queued so far is handled. A parked wait for pause purposes.</summary>
@@ -381,7 +408,7 @@ public sealed partial class ScanJob
 
                     if (entry.Kind != ScanTreeEntryKind.File || buffer is null)
                     {
-                        Emit(entry);
+                        Emit(entry, inWalk: true);
                         return;
                     }
 
@@ -396,6 +423,16 @@ public sealed partial class ScanJob
                 if (buffer is not null)
                 {
                     Flush(buffer);
+                }
+            }
+            catch (PhaseShareUsedUpException)
+            {
+                // Best-ranked files are already queued; the rest of this walk is left to Full Scan.
+                if (!Phase.ShareNoted)
+                {
+                    Phase.ShareNoted = true;
+                    MarkIncomplete($"Stopped queuing after its share of the time budget ({(Phase.Deadline - Phase.Started).TotalSeconds:0} s); "
+                        + "the rest is left to Full Scan.");
                 }
             }
             finally
@@ -491,8 +528,19 @@ public sealed partial class ScanJob
             Note(why);
         }
 
-        private void Emit(ScanTreeEntry entry)
+        private void Emit(ScanTreeEntry entry, bool inWalk = false)
         {
+            if (inWalk && entry.Kind == ScanTreeEntryKind.File)
+            {
+                lock (job._lock)
+                {
+                    if (job.ElapsedLocked() > Phase.Deadline)
+                    {
+                        throw new PhaseShareUsedUpException();
+                    }
+                }
+            }
+
             job.Emit(entry, token);
             if (entry.Kind == ScanTreeEntryKind.File)
             {
@@ -513,7 +561,7 @@ public sealed partial class ScanJob
             {
                 for (; i < sorted.Count; i++)
                 {
-                    Emit(sorted[i].Entry);
+                    Emit(sorted[i].Entry, inWalk: true);
                 }
             }
             finally
