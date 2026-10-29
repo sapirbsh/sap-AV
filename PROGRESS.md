@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C3 done; C4 (Quick Scan) being built |
+| C — Scan modes | **In progress:** C1–C4 built (C4 review running); C5+C6 (scan cache, Full Scan) being built |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -127,7 +127,14 @@ ACL), targets in Temp/Downloads, IFEO debugger hijacks (strongest on accessibili
 changes, unquoted paths users can exploit, remote payloads, COM hijacks. 60 points = Suspicious. Microsoft-signed system
 entries stay silent. New alerts 2001/2002 and 7 new MITRE IDs. Tests: Core 1272 + 1 skipped, Engine 460 + 8 skipped.
 
-**Now:** C4 (Quick Scan).
+**C4 is built** (`0e57d9c`, `7c2ff7c`, `309a8fc`, `c8ecff3`): Quick Scan runs four pluggable phases in one job: running
+programs, autostart entries (C2 + C3), high-risk folders of every profile, and files changed in the last 7 days. Each
+file is scanned once, the budget is 3 minutes, and phases that run out of time are reported as incomplete. Quick Scan
+through the pipe is admin-only. On this dev PC: programs 1.6 s, autostarts 19 s, then the two folder phases were cut
+short by the 3-minute budget (about 100 files/s on a large AppData), so the folder phases need tuning.
+Tests: Core 1272 + 1 skipped, Engine 486 + 9 skipped.
+
+**Now:** C4's immediate review (it adds pipe messages), and in parallel C5 + C6 (scan cache, Full Scan).
 
 **Open for the user**
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service

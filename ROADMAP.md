@@ -445,6 +445,17 @@ already-impersonating thread) are fixed in C1.
   - Known false positives: legitimate IFEO uses (Process Explorer replacing Task Manager, `vsjitdebugger`).
   - The ACL writability check ignores deny ACEs and integrity labels (it only over-reports), and doesn't tell another
     user's writable folder apart from the user's own.
+- **From C4 (Quick Scan, built `0e57d9c`…`c8ecff3`):**
+  - **Tuning needed:** on the dev PC the two folder phases were cut short by the 3-minute budget (about 100 files/s;
+    AppData full of `.dll`/`.js`/`.py`). Tune the extension list, depth and cache skips. The scan cache (C5) should
+    make repeat Quick Scans much faster. Timings were measured in-process and non-elevated, not with the AppContainer
+    worker as SYSTEM.
+  - Quick Scan through the pipe is admin-only (it reads every profile, process and machine autostart); its results are
+    visible to admins only.
+  - Phase 4 skips phase-3 folders, so recent files deeper than 10 levels inside AppData are missed. No USN journal
+    (it would need a volume handle and by-ID opens outside the handle-bound walk).
+  - Process images are judged by file only (command lines come with E7). Collection (≤ 30 s) can't be paused partway.
+  - Section E adds checks by registering an `IScanCheck`; the factory inserts them after persistence.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.
