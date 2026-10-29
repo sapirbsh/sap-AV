@@ -52,13 +52,14 @@ public sealed class QuickScanFactory
     internal IReadOnlyList<IScanCheck> Checks()
     {
         var rules = new QuickScanFileRules(_options);
+        var ledger = new FolderWalkLedger(); // review C4 M2: phase 4 skips only the roots phase 3 finished
         return
         [
             new ProcessImageCheck(_processes, _logger),
             new PersistenceCheck(_collector, _persistence),
             .. _extra,
-            new RiskyFolderCheck(_folders, rules),
-            new RecentFilesCheck(_folders, rules),
+            new RiskyFolderCheck(_folders, rules, ledger),
+            new RecentFilesCheck(_folders, rules, ledger),
         ];
     }
 

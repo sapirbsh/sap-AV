@@ -393,9 +393,13 @@ public sealed record ScanFindingsRequest(Guid JobId, int Offset = 0, int Limit =
         ? Offset
         : throw new ArgumentOutOfRangeException(nameof(Offset), Offset, "The offset can't be negative.");
 
-    public int Limit { get; init; } = Limit is >= 0 and <= PipeProtocol.MaxResultsPage
+    /// <summary>
+    /// Review C4 L5: 1-<see cref="PipeProtocol.MaxResultsPage"/>. A zero page would come back empty with no next offset,
+    /// which reads as "no more findings".
+    /// </summary>
+    public int Limit { get; init; } = Limit is >= 1 and <= PipeProtocol.MaxResultsPage
         ? Limit
-        : throw new ArgumentOutOfRangeException(nameof(Limit), Limit, $"The page size is 0-{PipeProtocol.MaxResultsPage}.");
+        : throw new ArgumentOutOfRangeException(nameof(Limit), Limit, $"The page size is 1-{PipeProtocol.MaxResultsPage}.");
 }
 
 /// <summary>

@@ -171,6 +171,10 @@ public sealed class QuickScanPipeTests : IDisposable
         Assert.Equal(first.Phases.Select(p => p.State), back.Phases.Select(p => p.State));
         Assert.Equal(PipeStatus.BadRequest, (await SendAsync(admin, PipeRequestKind.ScanGetFindings,
             JsonDocument.Parse($"{{\"JobId\":\"{job.Id}\",\"Offset\":0,\"Limit\":500}}").RootElement)).Status);
+
+        // Review C4 L5: a zero page is refused (it would look like the end of the list).
+        Assert.Equal(PipeStatus.BadRequest, (await SendAsync(admin, PipeRequestKind.ScanGetFindings,
+            JsonDocument.Parse($"{{\"JobId\":\"{job.Id}\",\"Offset\":0,\"Limit\":0}}").RootElement)).Status);
     }
 
     [Fact]

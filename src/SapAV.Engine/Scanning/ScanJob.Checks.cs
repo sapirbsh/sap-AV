@@ -200,6 +200,9 @@ public sealed partial class ScanJob
         return TimeSpan.FromTicks((long)(remaining.Ticks * Math.Max(checks[index].Weight, 0) / rest));
     }
 
+    /// <summary>Review C4 M1: one root's deadline in a walk phase (now + the phase's time left over the roots left).</summary>
+    internal static TimeSpan RootDeadlineOf(TimeSpan now, TimeSpan phaseDeadline, int rootsLeft) => CheckContext.RootDeadline(now, phaseDeadline, rootsLeft);
+
     /// <summary>Thrown by a walk's emit once its phase's share is used up; caught in <see cref="CheckContext.QueueTree"/>.</summary>
     private sealed class PhaseShareUsedUpException : Exception
     {
@@ -390,17 +393,75 @@ public sealed partial class ScanJob
             return true;
         }
 
-        public void QueueTree(IReadOnlyList<string> roots, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank = null)
+        /// <summary>The running root's deadline (review C4 M1): its share of the phase's time left.</summary>
+        private TimeSpan _rootDeadline = TimeSpan.MaxValue;
+
+        public IReadOnlyList<string> QueueTree(IReadOnlyList<string> roots, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank = null, int laterRoots = 0)
         {
             ArgumentNullException.ThrowIfNull(roots);
             ArgumentNullException.ThrowIfNull(filter);
+            var completed = new List<string>();
+            var stoppedRoots = QueueRound(roots, filter, rank, Math.Max(0, laterRoots), completed);
+
+            // Nothing comes after this call: what the finished roots didn't use goes to the ones that stopped (a second round;
+            // the path dedupe skips what they already queued).
+            if (laterRoots <= 0 && stoppedRoots.Count > 0 && stoppedRoots.Count < roots.Count)
+            {
+                stoppedRoots = QueueRound(stoppedRoots, filter, rank, 0, completed);
+            }
+
+            int stopped = stoppedRoots.Count;
+            _rootDeadline = TimeSpan.MaxValue;
+            if (stopped > 0 && !Phase.ShareNoted)
+            {
+                Phase.ShareNoted = true;
+                MarkIncomplete($"{stopped} folder(s) stopped queuing after their share of the time budget; the rest is left to Full Scan.");
+            }
+
+            return completed;
+        }
+
+        /// <summary>One pass over <paramref name="roots"/>, each with its share; returns the roots that stopped early.</summary>
+        private List<string> QueueRound(
+            IReadOnlyList<string> roots, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank, int laterRoots, List<string> completed)
+        {
+            var stopped = new List<string>();
+            for (int r = 0; r < roots.Count; r++)
+            {
+                Checkpoint();
+                lock (job._lock)
+                {
+                    _rootDeadline = RootDeadline(job.ElapsedLocked(), Phase.Deadline, roots.Count - r + laterRoots);
+                }
+
+                (QueueRoot(roots[r], filter, rank) ? completed : stopped).Add(roots[r]);
+            }
+
+            return stopped;
+        }
+
+        /// <summary>A root's deadline: now plus the phase's time left over the roots left (no deadline without a phase deadline).</summary>
+        internal static TimeSpan RootDeadline(TimeSpan now, TimeSpan phaseDeadline, int rootsLeft)
+        {
+            if (phaseDeadline == TimeSpan.MaxValue)
+            {
+                return TimeSpan.MaxValue;
+            }
+
+            var left = phaseDeadline - now;
+            return left <= TimeSpan.Zero ? now : now + left / Math.Max(1, rootsLeft);
+        }
+
+        /// <summary>Walks one root; false if its share ran out before the walk ended.</summary>
+        private bool QueueRoot(string root, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank)
+        {
             var buffer = rank is null ? null : new List<(ScanTreeEntry Entry, int Rank, int Order)>();
             int order = 0;
             try
             {
-                job._walker.Walk(roots, entry =>
+                job._walker.Walk([root], entry =>
                 {
-                    if (entry.Kind == ScanTreeEntryKind.File && !job._dedupe!.TryAddPath(entry.Path))
+                    if (entry.Kind == ScanTreeEntryKind.File && job._dedupe!.SeenPath(entry.Path))
                     {
                         entry.Folder?.Release(); // already queued or scanned in this job
                         return;
@@ -424,16 +485,13 @@ public sealed partial class ScanJob
                 {
                     Flush(buffer);
                 }
+
+                return true;
             }
             catch (PhaseShareUsedUpException)
             {
-                // Best-ranked files are already queued; the rest of this walk is left to Full Scan.
-                if (!Phase.ShareNoted)
-                {
-                    Phase.ShareNoted = true;
-                    MarkIncomplete($"Stopped queuing after its share of the time budget ({(Phase.Deadline - Phase.Started).TotalSeconds:0} s); "
-                        + "the rest is left to Full Scan.");
-                }
+                // Best-ranked files are already queued; the rest of this root is left to Full Scan.
+                return false;
             }
             finally
             {
@@ -534,11 +592,15 @@ public sealed partial class ScanJob
             {
                 lock (job._lock)
                 {
-                    if (job.ElapsedLocked() > Phase.Deadline)
+                    if (job.ElapsedLocked() > Phase.Deadline || job.ElapsedLocked() > _rootDeadline)
                     {
                         throw new PhaseShareUsedUpException();
                     }
                 }
+
+                // Recorded only now that it is queued: a file a ranked walk buffered but never queued (its share ran out)
+                // stays open for a later phase (review C4 M2).
+                job._dedupe!.Remember(entry.Path);
             }
 
             job.Emit(entry, token);

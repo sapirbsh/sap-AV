@@ -55,8 +55,12 @@ internal interface IScanCheckContext
     /// <summary>
     /// Walks <paramref name="roots"/> handle-bound (<see cref="ScanTreeWalker"/> with <paramref name="filter"/>) and queues
     /// the files, deduped. With <paramref name="rank"/>, files are buffered (bounded) and queued lowest rank first.
+    /// Review C4 M1: each root gets its own share of the phase's time left (over this call's roots left plus
+    /// <paramref name="laterRoots"/> the check will pass in later calls), so one huge root can't starve the others; a root
+    /// whose share runs out stops queuing and the phase is marked incomplete.
     /// </summary>
-    void QueueTree(IReadOnlyList<string> roots, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank = null);
+    /// <returns>The roots walked to the end (not cut short by their share).</returns>
+    IReadOnlyList<string> QueueTree(IReadOnlyList<string> roots, ScanWalkFilter filter, Func<ScanTreeEntry, int>? rank = null, int laterRoots = 0);
 
     /// <summary>
     /// Scans one file now, on this thread, through the job's pipeline: SafeScanOpen, the sandboxed broker, then the job's

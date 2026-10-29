@@ -127,6 +127,11 @@ internal sealed class QuickScanHarness : IDisposable
 
     public List<IScanCheck> ExtraChecks { get; } = [];
 
+    /// <summary>More profiles besides alice (their folders must exist under <see cref="ScanJobHarness.Root"/>).</summary>
+    public List<UserFolders> ExtraUsers { get; } = [];
+
+    public string Folder(string relative) => Dir(relative);
+
     public FakeCollector? Collector { get; private set; }
 
     public string Write(string relative, string content = "synthetic test content")
@@ -146,7 +151,7 @@ internal sealed class QuickScanHarness : IDisposable
         Collector = new FakeCollector(new PersistenceCollection(Entries, [], TimeSpan.Zero));
         var scanner = new PersistenceScanner(Jobs.Broker, Alerts, Jobs.Time, NullLogger.Instance,
             new PersistenceJudge(new PersistenceJudgeOptions { SystemRoot = @"C:\Windows" }), () => new AdminOnlyWritability());
-        var users = new[] { new UserFolders("S-1-5-21-1-2-3-1001", Profile, Desktop, Downloads, Temp, Roaming, Local) };
+        UserFolders[] users = [new UserFolders("S-1-5-21-1-2-3-1001", Profile, Desktop, Downloads, Temp, Roaming, Local), .. ExtraUsers];
         var folders = new FakeFolders(new ProfileFolderSet(users, MachineTemp, null, null, ProgramData, []));
         return new QuickScanFactory(Options, new FakeProcessSource([.. Processes]), Collector, scanner, folders, ExtraChecks);
     }
@@ -236,6 +241,60 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task HugeFirstRoot_GetsOnlyItsShare_SoTheNextProfilesDownloadsIsStillScanned()
+    {
+        // Review C4 M1: alice's Downloads is huge (as if redirected to a big folder); bob's has one file. Without per-root
+        // shares, alice's root used up the whole phase and bob's file was never queued.
+        using var q = new QuickScanHarness();
+        for (int i = 0; i < 80; i++)
+        {
+            q.Write($@"Users\alice\Downloads\big{i}.exe");
+        }
+
+        string bob = q.Folder(@"Users\bob");
+        q.ExtraUsers.Add(new UserFolders("S-1-5-21-1-2-3-1002", bob, q.Folder(@"Users\bob\Desktop"), q.Folder(@"Users\bob\Downloads"),
+            q.Folder(@"Users\bob\AppData\Local\Temp"), q.Folder(@"Users\bob\AppData\Roaming"), q.Folder(@"Users\bob\AppData\Local")));
+        var bobsFile = q.Write(@"Users\bob\Downloads\tool.exe");
+        q.Jobs.Broker.OnScan = async (item, _, token) =>
+        {
+            await Task.Delay(40, token);
+            lock (q.Scanned)
+            {
+                q.Scanned.Add(item.Path);
+            }
+
+            return null;
+        };
+
+        var job = await q.RunAsync(TimeSpan.FromSeconds(1.5));
+
+        Assert.Contains(bobsFile, q.Scanned, StringComparer.OrdinalIgnoreCase);
+        Assert.True(q.Scanned.Count(p => p.Contains(@"alice\Downloads", StringComparison.OrdinalIgnoreCase)) < 80);
+        Assert.Equal(ScanPhaseState.Incomplete, job.Phases[2].State);
+    }
+
+    [Fact]
+    public async Task CloudPlaceholders_InTheHighRiskFolders_AreCounted_NotScanned()
+    {
+        using var q = new QuickScanHarness();
+        var local = q.Write(@"Users\alice\Downloads\local.exe");
+        var cloud = q.Write(@"Users\alice\Downloads\cloud.exe");
+        File.SetAttributes(cloud, FileAttributes.Offline); // what a dehydrated cloud file reports in the listing
+        try
+        {
+            var job = await q.RunAsync();
+
+            Assert.Contains(local, q.Scanned, StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain(cloud, q.Scanned, StringComparer.OrdinalIgnoreCase);
+            Assert.Contains(job.Phases[2].Notes, n => n.Contains("1 cloud placeholders", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.SetAttributes(cloud, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
     public async Task WithAClockAWeekAhead_OnlyRiskyFilesAreQueued_AndOldDocumentsAreLeftToFullScan()
     {
         using var q = new QuickScanHarness(new ManualTime { Now = DateTimeOffset.UtcNow.AddDays(30) });
@@ -277,7 +336,11 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
         Assert.False(job.IsComplete);
         Assert.Equal([ScanPhaseState.Completed, ScanPhaseState.Completed, ScanPhaseState.Incomplete, ScanPhaseState.Incomplete], job.Phases.Select(p => p.State));
         Assert.Contains(job.Phases[2].Notes, n => n.Contains("share of the time budget", StringComparison.Ordinal)); // stopped to leave time for phase 4
-        Assert.Contains(q.Scanned, p => p.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)); // phase 4 did run
+        // Phase 4 did run, and (review C4 M2) it walked the Downloads root phase 3 had to stop early instead of skipping it,
+        // without scanning any of phase 3's files again.
+        Assert.True(job.Phases[3].Files > 0);
+        Assert.True(q.Scanned.Count(p => p.Contains(@"\Downloads\", StringComparison.OrdinalIgnoreCase)) > job.Phases[2].Files);
+        Assert.Equal(q.Scanned.Count, q.Scanned.Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Contains(job.Warnings, w => w.Message.Contains("time budget", StringComparison.Ordinal)
             && w.Message.Contains("High-risk folders (Incomplete)", StringComparison.Ordinal)
             && w.Message.Contains("Recently changed files (Incomplete)", StringComparison.Ordinal));

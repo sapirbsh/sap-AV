@@ -37,6 +37,24 @@ internal sealed class QuickScanFileRules
 
     public DateTimeOffset Cutoff(TimeProvider time) => time.GetUtcNow() - TimeSpan.FromDays(Options.RecentDays);
 
+    /// <summary>Cloud placeholders the folder phases left alone (counted by <see cref="CountPlaceholder"/>).</summary>
+    public long Placeholders { get; private set; }
+
+    /// <summary>
+    /// Review C4 L7: true (and counted) for a cloud placeholder whose data isn't local (<see cref="SafeTreeEntry.IsPlaceholder"/>).
+    /// The opener would refuse it anyway (no recall), but queuing it would still cost an open and a slot in the phase's time.
+    /// </summary>
+    public bool CountPlaceholder(SafeTreeEntry entry)
+    {
+        if (!entry.IsPlaceholder)
+        {
+            return false;
+        }
+
+        Placeholders++;
+        return true;
+    }
+
     /// <summary>
     /// Queue rank: a file with a Mark-of-the-Web (a <c>Zone.Identifier</c> stream; <paramref name="probeMotw"/>) first,
     /// then by class. Only the stream's existence is checked (an attributes-only open relative to the listed folder's
@@ -87,13 +105,37 @@ internal sealed class QuickScanFileRules
 }
 
 /// <summary>
+/// Review C4 M2: the roots phase 3 walked <b>to the end</b>, shared with phase 4 of the same job, so phase 4 skips only
+/// those (a root phase 3 had to stop early is walked again by phase 4; the job's path dedupe keeps files from being scanned
+/// twice). One ledger per job (<see cref="QuickScanFactory.Checks"/>); used from the job's enumerator thread only.
+/// </summary>
+internal sealed class FolderWalkLedger
+{
+    private readonly HashSet<string> _completed = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyCollection<string> Completed => _completed;
+
+    public void AddCompleted(IEnumerable<string> roots)
+    {
+        foreach (var root in roots)
+        {
+            _completed.Add(ExactPath.StripPrefix(root).TrimEnd('\\'));
+        }
+    }
+}
+
+/// <summary>
 /// Quick Scan phase 3 (C4): the high-risk folders of <b>every</b> profile (<see cref="IProfileFolderSource"/>): Downloads
 /// and Desktop (plus the public ones) first, then TEMP (each user's and the machine's), then AppData (Roaming, Local).
-/// Walked handle-bound (SafeTree), at most <see cref="QuickScanOptions.MaxDepth"/> deep, skipping the known huge caches;
-/// queued are executables / scripts / archives / Office macro files and any recent file under the size limit, downloaded
-/// (Mark-of-the-Web) files first. A folder already walked in an earlier group isn't walked again.
+/// Each user's default folders are always walked, plus the redirections <see cref="UserFolderPolicy"/> accepted (review
+/// C4 M1). Walked handle-bound (SafeTree), at most <see cref="QuickScanOptions.MaxDepth"/> deep, skipping the known huge
+/// caches; queued are executables / scripts / archives / Office macro files and any recent file under the size limit,
+/// downloaded (Mark-of-the-Web) files first; cloud placeholders are counted, not queued (review C4 L7). <b>Every root gets
+/// its own share</b> of the phase's time (the share left over the roots left, across all groups), so one huge root (a
+/// Desktop redirected to a big folder) can't use up the phase and blind every other profile. A folder another group
+/// already walked to the end isn't walked again.
 /// </summary>
-internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFileRules rules) : IScanCheck
+internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFileRules rules, FolderWalkLedger? ledger = null) : IScanCheck
 {
     public string Name => "High-risk folders";
 
@@ -108,19 +150,17 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
         }
 
         var cutoff = rules.Cutoff(context.Time);
-        var walked = new List<string>();
+        var completed = new List<string>();
         var patterns = rules.ProfilePatterns(set.Users.Select(u => u.Profile)).ToArray();
-        string?[][] groups =
-        [
-            [.. set.Users.SelectMany(u => new[] { u.Downloads, u.Desktop }), set.PublicDownloads, set.PublicDesktop],
-            [.. set.Users.Select(u => u.Temp), set.MachineTemp],
-            [.. set.Users.SelectMany(u => new[] { u.RoamingAppData, u.LocalAppData })],
-        ];
+        var groups = Groups(set).Select(g => Distinct(g)).ToArray();
+        int rootsLeft = groups.Sum(g => g.Count);
 
-        long filtered = 0, tooDeep = 0, skipped = 0;
+        long filtered = 0, tooDeep = 0, skipped = 0, placeholders = 0;
+        int walked = 0;
         for (int g = 0; g < groups.Length; g++)
         {
-            var roots = Distinct(groups[g]).Where(r => !walked.Contains(r, StringComparer.OrdinalIgnoreCase)).ToArray();
+            var roots = groups[g].Where(r => !completed.Contains(r, StringComparer.OrdinalIgnoreCase)).ToArray();
+            rootsLeft -= groups[g].Count;
             if (roots.Length == 0)
             {
                 continue;
@@ -129,25 +169,33 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
             var filter = new ScanWalkFilter
             {
                 MaxDepth = rules.Options.MaxDepth,
-                IncludeFile = e => e.Length <= rules.Options.MaxFileSizeBytes && (rules.IsRisky(e.Name) || QuickScanFileRules.IsRecent(e, cutoff)),
-                SkipFolder = QuickScanFileRules.SkipPredicate(walked, patterns),
+                IncludeFile = e => !rules.CountPlaceholder(e) && e.Length <= rules.Options.MaxFileSizeBytes
+                    && (rules.IsRisky(e.Name) || QuickScanFileRules.IsRecent(e, cutoff)),
+                SkipFolder = QuickScanFileRules.SkipPredicate(completed, patterns),
             };
             bool probeMotw = g == 0; // downloads land in Downloads / Desktop
-            context.QueueTree(roots, filter, e => rules.Rank(e, probeMotw));
-            walked.AddRange(roots);
+            var done = context.QueueTree(roots, filter, e => rules.Rank(e, probeMotw), laterRoots: rootsLeft);
+            completed.AddRange(done);
+            walked += roots.Length;
             filtered += filter.FilesFiltered;
             tooDeep += filter.FoldersTooDeep;
             skipped += filter.FoldersSkipped;
         }
 
-        context.Note($"{walked.Count} folders in {set.Users.Count} profiles; {filtered} other files left to Full Scan, {skipped} cache folders skipped, "
-            + $"{tooDeep} folders deeper than {rules.Options.MaxDepth} levels not walked.");
+        placeholders = rules.Placeholders;
+        ledger?.AddCompleted(completed);
+        context.Note($"{walked} folders in {set.Users.Count} profiles ({completed.Count} walked to the end); {filtered} other files left to Full Scan "
+            + $"({placeholders} cloud placeholders not downloaded), {skipped} cache folders skipped, {tooDeep} folders deeper than "
+            + $"{rules.Options.MaxDepth} levels not walked.");
     }
 
-    /// <summary>The folders this phase walks (the recent-files phase skips them).</summary>
-    internal static IReadOnlyList<string> Roots(ProfileFolderSet set) =>
-        Distinct([.. set.Users.SelectMany(u => new[] { u.Downloads, u.Desktop, u.Temp, u.RoamingAppData, u.LocalAppData }),
-            set.PublicDownloads, set.PublicDesktop, set.MachineTemp]);
+    /// <summary>The three groups in queue order: downloads / desktops, temp folders, AppData.</summary>
+    internal static IEnumerable<string?>[] Groups(ProfileFolderSet set) =>
+    [
+        [.. set.Users.SelectMany(u => u.Folders(UserFolderKind.Downloads).Concat(u.Folders(UserFolderKind.Desktop))), set.PublicDownloads, set.PublicDesktop],
+        [.. set.Users.SelectMany(u => u.Folders(UserFolderKind.Temp)), set.MachineTemp],
+        [.. set.Users.SelectMany(u => u.Folders(UserFolderKind.RoamingAppData).Concat(u.Folders(UserFolderKind.LocalAppData)))],
+    ];
 
     internal static IReadOnlyList<string> Distinct(IEnumerable<string?> paths) =>
         paths.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -156,13 +204,14 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
 /// <summary>
 /// Quick Scan phase 4 (C4): files created, written or changed in the last <see cref="QuickScanOptions.RecentDays"/> days,
 /// <b>scoped to the user profiles and ProgramData</b> (not whole drives). Walked handle-bound with a time filter on the
-/// listing's own timestamps (no extra open per file), under the size limit, skipping the folders phase 3 already walked
-/// and the known caches. Executables and scripts are queued first. The engine's exclusion set (verified engine folders)
-/// applies as in every walk. The USN journal isn't used: reading it needs a volume handle and parsing raw records for the
-/// whole volume as SYSTEM, and mapping file IDs back to paths needs by-ID opens that bypass the handle-bound walk; the
-/// listing filter keeps the walk safe and is fast enough for profiles + ProgramData.
+/// listing's own timestamps (no extra open per file), under the size limit, skipping cloud placeholders, the folders
+/// phase 3 walked <b>to the end</b> (review C4 M2: an unfinished phase-3 root is walked again here; path dedupe prevents
+/// rescans) and the known caches. Executables and scripts are queued first. The engine's exclusion set (verified engine
+/// folders) applies as in every walk. The USN journal isn't used: reading it needs a volume handle and parsing raw
+/// records for the whole volume as SYSTEM, and mapping file IDs back to paths needs by-ID opens that bypass the
+/// handle-bound walk; the listing filter keeps the walk safe and is fast enough for profiles + ProgramData.
 /// </summary>
-internal sealed class RecentFilesCheck(IProfileFolderSource folders, QuickScanFileRules rules) : IScanCheck
+internal sealed class RecentFilesCheck(IProfileFolderSource folders, QuickScanFileRules rules, FolderWalkLedger? ledger = null) : IScanCheck
 {
     public string Name => "Recently changed files";
 
@@ -178,12 +227,12 @@ internal sealed class RecentFilesCheck(IProfileFolderSource folders, QuickScanFi
         var filter = new ScanWalkFilter
         {
             MaxDepth = rules.Options.MaxDepth,
-            IncludeFile = e => e.Length <= rules.Options.MaxFileSizeBytes && QuickScanFileRules.IsRecent(e, cutoff),
-            SkipFolder = QuickScanFileRules.SkipPredicate(RiskyFolderCheck.Roots(set), patterns.ToArray()),
+            IncludeFile = e => !rules.CountPlaceholder(e) && e.Length <= rules.Options.MaxFileSizeBytes && QuickScanFileRules.IsRecent(e, cutoff),
+            SkipFolder = QuickScanFileRules.SkipPredicate(ledger?.Completed ?? [], patterns.ToArray()),
         };
 
         context.QueueTree(roots, filter, e => rules.Rank(e, probeMotw: false));
         context.Note($"{roots.Count} roots (profiles and ProgramData), files since {cutoff:yyyy-MM-dd HH:mm} UTC; {filter.FilesFiltered} older or larger files skipped, "
-            + $"{filter.FoldersSkipped} folders skipped (already walked or caches), {filter.FoldersTooDeep} folders deeper than {rules.Options.MaxDepth} levels not walked.");
+            + $"{filter.FoldersSkipped} folders skipped (walked by the high-risk phase, or caches), {filter.FoldersTooDeep} folders deeper than {rules.Options.MaxDepth} levels not walked.");
     }
 }

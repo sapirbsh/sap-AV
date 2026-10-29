@@ -84,10 +84,12 @@ public sealed class QuickScanSourceTests : IDisposable
 
         var set = new RegistryProfileFolders(registry.View).Resolve();
 
+        // Review C4 M1: the defaults under the profile always, plus the user's redirections inside their own profile.
         var alice = Assert.Single(set.Users, u => u.Sid == loaded);
-        Assert.Equal(@"C:\Users\alice\My Downloads", alice.Downloads);
-        Assert.Equal(@"C:\Users\alice\OneDrive\Desktop", alice.Desktop);
-        Assert.Equal(@"C:\Users\alice\AppData\Local\Temp2", alice.Temp);
+        Assert.Equal(@"C:\Users\alice\Downloads", alice.Downloads);
+        Assert.Equal([@"C:\Users\alice\Downloads", @"C:\Users\alice\My Downloads"], alice.Folders(UserFolderKind.Downloads));
+        Assert.Equal([@"C:\Users\alice\Desktop", @"C:\Users\alice\OneDrive\Desktop"], alice.Folders(UserFolderKind.Desktop));
+        Assert.Equal([@"C:\Users\alice\AppData\Local\Temp", @"C:\Users\alice\AppData\Local\Temp2"], alice.Folders(UserFolderKind.Temp));
         Assert.Equal(@"C:\Users\alice\AppData\Roaming", alice.RoamingAppData);
 
         var bob = Assert.Single(set.Users, u => u.Sid == unloaded); // hive not loaded: the defaults under the profile
@@ -95,7 +97,7 @@ public sealed class QuickScanSourceTests : IDisposable
         Assert.Equal(@"C:\Users\bob\AppData\Local\Temp", bob.Temp);
 
         var carol = Assert.Single(set.Users, u => u.Sid == redirected);
-        Assert.Null(carol.Downloads); // a network share is never walked
+        Assert.Equal([@"C:\Users\carol\Downloads"], carol.Folders(UserFolderKind.Downloads)); // the share is never walked; the default is
         Assert.Contains(set.Notes, n => n.Contains("network share", StringComparison.Ordinal));
 
         Assert.Equal(@"C:\Windows\TEMP", set.MachineTemp);
@@ -104,6 +106,93 @@ public sealed class QuickScanSourceTests : IDisposable
         Assert.DoesNotContain(set.Users.SelectMany(u => new[] { u.Desktop, u.Downloads, u.Temp }),
             p => p is not null && Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) is { Length: > 0 } mine
                 && p.StartsWith(mine, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void UserRedirections_OutsideTheProfile_ToCDriveWindowsOrAnotherProfile_AreRefused_AndTheDefaultsStay()
+    {
+        using var registry = new RegistryTestRoot();
+        const string sid = RegistryTestRoot.UserSid;
+        using (var list = registry.Machine(RegistryEnvironment.ProfileListPath))
+        {
+            list.SetValue("ProgramData", @"C:\ProgramData");
+        }
+
+        registry.AddUser(sid, @"C:\Users\alice", loaded: true);
+        using (var shell = registry.Users($@"{sid}\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"))
+        {
+            shell.SetValue("Desktop", @"C:\");
+            shell.SetValue(RegistryProfileFolders.DownloadsValue, @"C:\Users\bob\Downloads");
+            shell.SetValue("AppData", @"C:\Users\alice\..\bob\AppData\Roaming"); // normalized first: another profile
+            shell.SetValue("Local AppData", @"D:\Data\alice"); // the fake owner check says alice owns it
+        }
+
+        using (var env = registry.Users($@"{sid}\Environment"))
+        {
+            env.SetValue("TEMP", @"C:\Windows");
+        }
+
+        // The real owner check refuses C:\ and Windows; a fake answers for D:\Data\alice only.
+        var policy = new UserFolderPolicy((folder, owner) =>
+            owner == sid && folder.Equals(@"D:\Data\alice", StringComparison.OrdinalIgnoreCase) || UserFolderPolicy.IsOwnedOnFixedDrive(folder, owner));
+        var set = new RegistryProfileFolders(registry.View, policy: policy).Resolve();
+
+        var alice = Assert.Single(set.Users);
+        Assert.Equal([@"C:\Users\alice\Desktop"], alice.Folders(UserFolderKind.Desktop));
+        Assert.Equal([@"C:\Users\alice\Downloads"], alice.Folders(UserFolderKind.Downloads));
+        Assert.Equal([@"C:\Users\alice\AppData\Roaming"], alice.Folders(UserFolderKind.RoamingAppData));
+        Assert.Equal([@"C:\Users\alice\AppData\Local\Temp"], alice.Folders(UserFolderKind.Temp));
+        Assert.Equal([@"C:\Users\alice\AppData\Local", @"D:\Data\alice"], alice.Folders(UserFolderKind.LocalAppData));
+        Assert.Equal(4, set.Notes.Count(n => n.Contains("outside that user's profile", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void OwnerCheck_AcceptsAFolderOwnedByTheUser_OnAFixedDrive_FromItsHandle()
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(_temp.Path, "owned")).FullName;
+        var owner = new DirectoryInfo(folder).GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier))!.Value;
+
+        Assert.True(UserFolderPolicy.IsOwnedOnFixedDrive(folder, owner)); // as elevated admin the owner is Administrators: still that SID
+        Assert.False(UserFolderPolicy.IsOwnedOnFixedDrive(folder, "S-1-5-21-1-2-3-4242"));
+        Assert.False(UserFolderPolicy.IsOwnedOnFixedDrive(Path.Combine(_temp.Path, "missing"), owner));
+        Assert.True(UserFolderPolicy.IsInside(@"C:\Users\alice\Sub", @"C:\Users\alice"));
+        Assert.False(UserFolderPolicy.IsInside(@"C:\Users\alice2\Sub", @"C:\Users\alice")); // a name prefix isn't inside
+    }
+
+    [Fact]
+    public void RootDeadlines_SplitThePhasesTimeLeftOverTheRootsLeft()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(12), ScanJobCheckDeadline(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(18), 4));
+        Assert.Equal(TimeSpan.FromSeconds(18), ScanJobCheckDeadline(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(18), 1));
+        Assert.Equal(TimeSpan.FromSeconds(20), ScanJobCheckDeadline(TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(18), 3)); // nothing left
+        Assert.Equal(TimeSpan.MaxValue, ScanJobCheckDeadline(TimeSpan.FromSeconds(1), TimeSpan.MaxValue, 3));
+    }
+
+    private static TimeSpan ScanJobCheckDeadline(TimeSpan now, TimeSpan phaseDeadline, int rootsLeft) =>
+        ScanJob.RootDeadlineOf(now, phaseDeadline, rootsLeft);
+
+    [Fact]
+    public void Placeholders_AreCountedFromTheListing_NotQueued()
+    {
+        var rules = new QuickScanFileRules(new QuickScanOptions());
+
+        Assert.True(rules.CountPlaceholder(new SafeTreeEntry("cloud.exe", FileAttributes.Offline, 0, 10)));
+        Assert.True(rules.CountPlaceholder(new SafeTreeEntry("od.exe", SafeTreeEntry.RecallOnDataAccess | FileAttributes.Archive, 0, 10)));
+        Assert.False(rules.CountPlaceholder(new SafeTreeEntry("local.exe", FileAttributes.Archive, 0, 10)));
+        Assert.Equal(2, rules.Placeholders);
+    }
+
+    [Fact]
+    public void IdentityKeys_AreCompactValues_EqualForTheSameObject()
+    {
+        var a = new SapAV.Core.Scanning.FileIdentity(7, "000102030405060708090a0b0c0d0e0f", @"C:\a");
+        var b = new SapAV.Core.Scanning.FileIdentity(7, "000102030405060708090A0B0C0D0E0F", @"C:\other-name");
+
+        Assert.Equal(IdentityKey.Of(a), IdentityKey.Of(b));
+        Assert.NotEqual(IdentityKey.Of(a), IdentityKey.Of(a with { VolumeSerialNumber = 8 }));
+        var dedupe = new ScanDedupe();
+        Assert.True(dedupe.TryClaim(a, out _));
+        Assert.False(dedupe.TryClaim(b, out _)); // a hard link / 8.3 spelling of the same object
     }
 
     [Fact]
