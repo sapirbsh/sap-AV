@@ -151,10 +151,10 @@ Tests: Core 1272 + 1 skipped, Engine 521 + 10 skipped.
 **Now:** the section C tester pass, then the section C reviewer pass.
 
 **Open for the user**
-- **Please remove `C:ProgramDatasap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
+- **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
   data folder, owned by your user account. The code is fixed, so tests no longer touch it. Left in place, the real engine
   would refuse it as "untrusted owner" and turn off quarantine and the sandbox. In an **elevated** PowerShell:
-  `Get-ChildItem -Force C:ProgramDatasap-AV` (should be empty), then `Remove-Item C:ProgramDatasap-AV`.
+  `Get-ChildItem -Force C:\ProgramData\sap-AV` (should be empty), then `Remove-Item C:\ProgramData\sap-AV`.
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
   honours the `sap-AV` CustomSD, a filtered admin token is refused, and the positive control works.
 - ~~CI for `92ce762`~~: **green**, so the elevated ProtectedPrefix pipe tests pass on windows-latest.
