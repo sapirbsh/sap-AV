@@ -176,6 +176,7 @@ public sealed class ScanJobRobustnessTests : IDisposable
 
         var service = Assert.IsType<ScanJobService>(host.Services.GetRequiredService<IScanJobService>());
         Assert.Same(host.Services.GetRequiredService<ExclusionSet>(), service.Excluded);
+        Assert.False(service.CacheCreated); // C5: nothing is created in %ProgramData% just by resolving the service
         Assert.False(service.Excluded.Contains(EngineDataFolders.ProgramDataRoot));
         Assert.True(service.Excluded.Contains(@"D:\Extra\x")); // configured by an administrator: honored as is
         Assert.False(service.Excluded.Contains(@"D:\Extra2\x")); // prefix of a name is not "inside"

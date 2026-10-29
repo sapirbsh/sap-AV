@@ -38,7 +38,7 @@ internal static class PipeMapping
         new(p.JobId, Map(p.State), p.FilesFound, p.FilesTotal, p.FilesDone, p.BytesDone, p.BytesTotal,
             p.CurrentFile is null ? null : WirePath.From(p.CurrentFile), p.Eta, p.Elapsed,
             new JobCountersInfo(p.Counters.Clean, p.Counters.Suspicious, p.Counters.Malicious, p.Counters.NotScanned, p.Counters.Excluded,
-                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed),
+                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed, p.Counters.Cached),
             p.Phase is { } phase ? new ScanPhaseProgressInfo(Text(phase.Name, MaxPhaseNameLength), phase.Index, phase.Count) : null);
 
     public const int MaxSignerLength = 128;
@@ -60,7 +60,8 @@ internal static class PipeMapping
             SignatureStatus: r.SignatureStatus,
             Signer: forAdmin ? (r.Signer is null ? null : Text(r.Signer, MaxSignerLength)) : SignerForUser(r),
             SourceUrl: forAdmin ? (r.SourceUrl is null ? null : Text(r.SourceUrl, MaxUrlLength)) : SourceHostForUser(r.SourceUrl),
-            NotScannedReason: r.SkipReason is { } skip ? Map(skip) : null);
+            NotScannedReason: r.SkipReason is { } skip ? Map(skip) : null,
+            FromCache: r.FromCache);
     }
 
     /// <summary>

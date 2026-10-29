@@ -276,7 +276,8 @@ public sealed record ScanGetRequest(Guid JobId, int ResultsOffset = 0, int Resul
 public sealed record JobSummary(Guid JobId, JobState State, ScanTrigger Trigger, DateTimeOffset CreatedAt, IReadOnlyList<WirePath> Paths, bool OwnedByCaller);
 
 public sealed record JobCountersInfo(
-    long Clean, long Suspicious, long Malicious, long NotScanned, long Excluded, long Quarantined, long NeedsUserConfirmation, long QuarantineFailed);
+    long Clean, long Suspicious, long Malicious, long NotScanned, long Excluded, long Quarantined, long NeedsUserConfirmation, long QuarantineFailed,
+    long Cached = 0);
 
 public sealed record JobProgressInfo(
     Guid JobId, JobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
@@ -316,11 +317,12 @@ public enum NotScannedReason
 /// <param name="SourceUrl">Administrators: the Mark-of-the-Web download URL in log form (no user info, query or fragment), capped.
 /// Everyone else: only the download host (punycode, lowercase, a-z 0-9 . -), or absent.</param>
 /// <param name="NotScannedReason">Why the file wasn't scanned; null when it was.</param>
+/// <param name="FromCache">C5: the verdict came from the scan cache (the file was unchanged since an earlier scan).</param>
 public sealed record JobFileResultInfo(
     int ResultId, WirePath Path, ScanStatus Status, Verdict? Verdict, FileAction Action, string? Detail, string? Sha256,
     string? QuarantineItemId, Guid? AlertId, bool CanQuarantine, IReadOnlyList<string>? Reasons = null,
     IReadOnlyList<string>? TechniqueIds = null, Signatures.SignatureStatus? SignatureStatus = null, string? Signer = null,
-    string? SourceUrl = null, NotScannedReason? NotScannedReason = null)
+    string? SourceUrl = null, NotScannedReason? NotScannedReason = null, bool FromCache = false)
 {
     public IReadOnlyList<string> Reasons { get; init; } = Reasons ?? [];
 

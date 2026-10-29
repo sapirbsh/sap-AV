@@ -16,7 +16,7 @@ internal sealed record ScanVerdictOutcome(ScanFileAction Action, string? Detail 
 /// <param name="Result">The job result; null when the file was excluded or a duplicate.</param>
 /// <param name="Report">The scan report (also for Clean files); for a duplicate, the earlier report if it was kept.</param>
 /// <param name="Duplicate">C4: this job already scanned the same file identity; nothing was scanned now.</param>
-internal sealed record ScanPipelineOutcome(ScanJobFileResult? Result, FileScanReport? Report, bool Duplicate = false)
+internal sealed record ScanPipelineOutcome(ScanJobFileResult? Result, FileScanReport? Report, bool Duplicate = false, bool FromCache = false)
 {
     public static ScanPipelineOutcome Excluded { get; } = new(null, null);
 }
@@ -62,10 +62,17 @@ internal interface IScanVerdictHandler
 /// timed-out HTTP call inside a step, is just an error).
 /// </remarks>
 internal sealed class ScanFilePipeline(
-    IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger, IRemoteFileProbe? remote = null)
+    IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, TimeProvider time, ILogger logger, IRemoteFileProbe? remote = null,
+    Lazy<Cache.ScanCache?>? cache = null)
 {
     /// <summary>Longest <see cref="ScanJobFileResult.Detail"/> kept.</summary>
     public const int MaxDetailLength = 512;
+
+    /// <summary>
+    /// C5: the scan cache, created on first use (the first scanned file), so resolving the job service creates no folder
+    /// or database. Null when off or unavailable.
+    /// </summary>
+    private Cache.ScanCache? ResultCache => cache?.Value;
 
     /// <summary>
     /// Scans one file; null if it turned out to be in an excluded folder (nothing scanned). Throws only
@@ -130,8 +137,18 @@ internal sealed class ScanFilePipeline(
                 return new(null, prior, Duplicate: true);
             }
 
+            // C5: the cache, looked up from the open handle's metadata (never a path stat).
+            step = "cache";
+            var stamp = CacheStamp(opened, access, allowRemote);
+            var cached = stamp is { } key ? ResultCache!.TryHit(item, opened!, key, notes) : null;
+
             step = "scan";
-            var report = opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, priority, jobToken).ConfigureAwait(false);
+            var report = cached ?? (opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, priority, jobToken).ConfigureAwait(false));
+            if (cached is null && stamp is { } fresh)
+            {
+                ResultCache!.TryStore(item, fresh, report);
+            }
+
             bytesScanned(report.Hash.Length ?? 0);
             if (dedupe is not null && identity is not null)
             {
@@ -140,8 +157,8 @@ internal sealed class ScanFilePipeline(
 
             step = "post-scan";
             var outcome = handler is null ? ScanVerdictOutcome.Nothing : await handler.HandleAsync(report, opened, budget, jobToken).ConfigureAwait(false);
-            var result = ToResult(report, outcome);
-            return new(skip is { } why ? result with { SkipReason = why } : result, report);
+            var result = ToResult(report, outcome) with { FromCache = cached is not null };
+            return new(skip is { } why ? result with { SkipReason = why } : result, report, FromCache: cached is not null);
         }
         catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
         {
@@ -161,6 +178,25 @@ internal sealed class ScanFilePipeline(
                 SkipReason = ScanSkipReason.Error,
             }, null);
         }
+    }
+
+    /// <summary>
+    /// C5: the cache stamp of the open file, or null when this scan must not use the cache. <b>Perspective decision</b>: only
+    /// engine and administrator jobs (no requester access check, <paramref name="access"/> null) read or write the cache; a
+    /// standard user's job bypasses it entirely, so no result from a restricted perspective is ever stored and a user can't
+    /// learn from a fast hit that someone else scanned a file. Also bypassed: jobs that allow remote files, files on anything
+    /// but a local fixed volume (removable media, shares: file IDs and times there aren't trustworthy keys), and files opened
+    /// in the shared fallback (a writer has the file open, so it can change while we look).
+    /// </summary>
+    private Cache.FileStamp? CacheStamp(OpenedScanFile? opened, IScanAccessCheck? access, bool allowRemote)
+    {
+        if (ResultCache is null || opened?.Identity is not { } identity || access is not null || allowRemote || opened.UsnBefore is not null
+            || !NativeFile.IsOnLocalFixedVolume(opened.Handle))
+        {
+            return null;
+        }
+
+        return Cache.FileStamp.Capture(opened.Handle, identity);
     }
 
     /// <summary>B4 L3: the requester can't read the file: AccessDenied, with nothing about the file (no hash, no reason).</summary>

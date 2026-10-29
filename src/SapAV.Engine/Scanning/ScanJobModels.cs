@@ -153,6 +153,9 @@ public sealed record ScanJobFileResult(
     /// be checked). Such a result carries nothing about the file: no hash, verdict or details.
     /// </summary>
     public bool RequesterCouldRead { get; init; } = true;
+
+    /// <summary>C5: the verdict came from the scan cache (the file was unchanged since an earlier scan), not a fresh scan.</summary>
+    public bool FromCache { get; init; }
 }
 
 /// <summary>Why a file wasn't scanned (C1), as the engine classified it. Never derived from scan-worker text.</summary>
@@ -191,7 +194,11 @@ public enum ScanSkipReason
 /// <summary>Exact counters of a job (results lists may be capped; these never are).</summary>
 public sealed record ScanJobCounters(
     long Clean, long Suspicious, long Malicious, long NotScanned, long Excluded, long Quarantined, long NeedsUserConfirmation,
-    long QuarantineFailed);
+    long QuarantineFailed)
+{
+    /// <summary>C5: files whose verdict came from the scan cache (also counted under their verdict).</summary>
+    public long Cached { get; init; }
+}
 
 /// <summary>A progress snapshot (B4 streams these).</summary>
 /// <param name="FilesFound">Files enumerated so far.</param>

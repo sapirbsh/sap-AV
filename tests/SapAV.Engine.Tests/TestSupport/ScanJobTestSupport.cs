@@ -129,11 +129,14 @@ internal sealed class ScanJobHarness : IDisposable
     /// <summary>Classifies opened handles as local / remote (null = the real probe).</summary>
     public IRemoteFileProbe? RemoteProbe { get; set; }
 
+    /// <summary>The scan cache the service uses (C5; null = none).</summary>
+    public SapAV.Engine.Scanning.Cache.ScanCache? Cache { get; set; }
+
     private ScanJobService? _service;
 
     public ScanJobService Service => _service ??= new ScanJobService(
         Options, Broker, Exclusions ?? ExclusionSet.Always(new FolderSet(Excluded)), Handler, Preflight, Time, NullLogger.Instance, ReparseTag,
-        RemoteProbe);
+        RemoteProbe, Cache);
 
     public string Write(string relative, string content = "plain test content")
     {

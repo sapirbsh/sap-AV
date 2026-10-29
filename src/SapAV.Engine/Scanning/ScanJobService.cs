@@ -42,6 +42,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
     private readonly Lock _lock = new();
     private readonly List<ScanJob> _jobs = [];
     private readonly ITimer _limits;
+    private readonly Lazy<Cache.ScanCache?> _cache;
 
     /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
     internal ScanJobService(
@@ -53,7 +54,8 @@ public sealed class ScanJobService : IScanJobService, IDisposable
 
     internal ScanJobService(
         ScanJobOptions options, IScanBroker broker, ExclusionSet excluded, IScanVerdictHandler? handler, IScanJobPreflight? preflight,
-        TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remoteProbe = null)
+        TimeProvider time, ILogger logger, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remoteProbe = null, Cache.ScanCache? cache = null,
+        Func<Cache.ScanCache?>? cacheFactory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -64,7 +66,8 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         _preflight = preflight;
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger, remoteProbe);
+        _cache = new Lazy<Cache.ScanCache?>(cacheFactory ?? (() => cache), LazyThreadSafetyMode.ExecutionAndPublication);
+        _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger, remoteProbe, _cache);
         _walker = new ScanTreeWalker(excluded, reparseTag, remoteProbe);
         Excluded = excluded;
         // Review B H3: the pause limit is checked every minute (or more often for a shorter limit).
@@ -84,8 +87,18 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var alerts = services.GetRequiredService<Alerts.IAlertDispatcher>();
         var handler = services.GetRequiredService<IScanVerdictHandler>();
         var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
-        return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger);
+        // C5: created on the first scanned file (never just by resolving the service: no folder, key or database before that).
+        Cache.ScanCache? CreateCache() => Cache.ScanCache.TryCreate(services.GetRequiredService<IOptions<Cache.ScanCacheOptions>>().Value, sandbox.ResolvedBlocklistPath, broker,
+            services.GetRequiredService<Quarantine.IQuarantineKeyProvider>(), Quarantine.QuarantineAccessPolicy.Default, time,
+            services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.ScanCache"));
+        return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger, cacheFactory: CreateCache);
     }
+
+    /// <summary>C5: the scan cache every job uses (engine / administrator perspective only), or null when it is off or unavailable.</summary>
+    internal Cache.ScanCache? ResultCache => _cache.Value;
+
+    /// <summary>Whether the cache was created yet (it is on the first scanned file).</summary>
+    internal bool CacheCreated => _cache.IsValueCreated;
 
     /// <summary>
     /// The engine's one verdict handler (alerts + auto-quarantine policy and rate limit), shared by scan jobs and the
@@ -228,6 +241,12 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         foreach (var job in List())
         {
             job.Cancel();
+        }
+
+        // Jobs end on their own threads; the cache fails soft if one still looks up after this (pooled connections reopen).
+        if (_cache.IsValueCreated)
+        {
+            _cache.Value?.Store.Dispose();
         }
     }
 

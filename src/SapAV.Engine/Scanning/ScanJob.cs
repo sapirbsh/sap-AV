@@ -61,7 +61,7 @@ public sealed partial class ScanJob : IDisposable
     private Exception? _failure;
     private long _filesFound, _filesDone, _bytesFound, _bytesDone;
     private long _clean, _suspicious, _malicious, _notScanned, _excluded, _quarantined, _needsConfirmation, _quarantineFailed;
-    private long _skippedLinks, _unreadableFolders, _resultsOmitted;
+    private long _skippedLinks, _unreadableFolders, _resultsOmitted, _cached;
     private bool _progressPending;
     private TimeSpan _runningBefore;
     private DateTimeOffset? _runningSince;
@@ -541,6 +541,10 @@ public sealed partial class ScanJob : IDisposable
         if (!outcome.Duplicate)
         {
             CountLocked(outcome.Result);
+            if (outcome.FromCache)
+            {
+                _cached++;
+            }
         }
 
         if (_filesDone >= _filesFound)
@@ -784,7 +788,7 @@ public sealed partial class ScanJob : IDisposable
         return new ScanJobProgress(Id, _state, _filesFound, filesTotal, _filesDone, _bytesDone, bytesTotal,
             _current.FirstOrDefault(c => c is not null), eta, ElapsedLocked(),
             new ScanJobCounters(_clean, _suspicious, _malicious, _notScanned, _excluded, _quarantined,
-                _needsConfirmation, _quarantineFailed))
+                _needsConfirmation, _quarantineFailed) { Cached = _cached })
         {
             Phase = CurrentPhaseLocked(),
         };
