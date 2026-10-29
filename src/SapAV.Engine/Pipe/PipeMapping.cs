@@ -39,7 +39,8 @@ internal static class PipeMapping
             p.CurrentFile is null ? null : WirePath.From(p.CurrentFile), p.Eta, p.Elapsed,
             new JobCountersInfo(p.Counters.Clean, p.Counters.Suspicious, p.Counters.Malicious, p.Counters.NotScanned, p.Counters.Excluded,
                 p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed, p.Counters.Cached),
-            p.Phase is { } phase ? new ScanPhaseProgressInfo(Text(phase.Name, MaxPhaseNameLength), phase.Index, phase.Count) : null);
+            p.Phase is { } phase ? new ScanPhaseProgressInfo(Text(phase.Name, MaxPhaseNameLength), phase.Index, phase.Count) : null,
+            p.PercentDone is { } percent ? Math.Round(percent, 1) : null);
 
     public const int MaxSignerLength = 128;
     public const int MaxUrlLength = 512;

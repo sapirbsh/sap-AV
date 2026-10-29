@@ -44,10 +44,11 @@ internal sealed class PipeRequestHandler : IDisposable
     private readonly Func<string, int> _driveType;
     private readonly ITimer _prune;
     private readonly Scanning.Checks.QuickScanFactory? _quickScan;
+    private readonly Scanning.Checks.FullScanFactory? _fullScan;
 
     public PipeRequestHandler(
         IScanJobService jobs, IQuarantineService? quarantine, PipeServerOptions options, TimeProvider time, ILogger logger,
-        Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null)
+        Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null)
     {
         _jobs = jobs ?? throw new ArgumentNullException(nameof(jobs));
         _quarantine = quarantine;
@@ -58,6 +59,7 @@ internal sealed class PipeRequestHandler : IDisposable
         _quarantineRate = new UserRateLimiter(time, options.QuarantineRequestsPerMinute / 60, options.QuarantineRequestBurst);
         _driveType = driveType ?? PipeNative.DriveType;
         _quickScan = quickScan;
+        _fullScan = fullScan;
 
         // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
         _prune = time.CreateTimer(_ => PruneSafely(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
@@ -109,6 +111,7 @@ internal sealed class PipeRequestHandler : IDisposable
                         .ConfigureAwait(false),
                 PipeRequestKind.QuickScanCreate => NoBody(request) ?? QuickScanCreate(session),
                 PipeRequestKind.ScanGetFindings => GetFindings(session, PipeJson.Body<ScanFindingsRequest>(request.Body)),
+                PipeRequestKind.FullScanCreate => NoBody(request) ?? FullScanCreate(session),
                 _ => PipeReply.Fail(PipeStatus.BadRequest, "Unknown request."),
             };
         }
@@ -352,6 +355,36 @@ internal sealed class PipeRequestHandler : IDisposable
         }
 
         _logger.LogInformation("Pipe: administrator {User} created Quick Scan job {JobId}.", client.User.Value, job.Id);
+        return PipeReply.Ok(new ScanCreateReply(job.Id, []));
+    }
+
+    /// <summary>
+    /// C6 authorization, consistent with Quick Scan: Full Scan only for administrators. It reads every file on every fixed
+    /// drive (other users' files included), every process and machine-wide autostarts, so no standard user's scoped access
+    /// can apply to it, and its results are for administrators only (an administrator job, visible to administrator
+    /// clients, administrator worker priority).
+    /// </summary>
+    private PipeReply FullScanCreate(PipeSession session)
+    {
+        var client = session.Identity;
+        if (!client.IsAdmin)
+        {
+            return PipeReply.Fail(PipeStatus.AccessDenied,
+                "Full Scan needs an administrator: it covers every file on every drive, every running program and machine-wide autostart entries. Use a Custom Scan for your own files.");
+        }
+
+        if (_fullScan is null)
+        {
+            return PipeReply.Fail(PipeStatus.Unavailable, "Full Scan is not available in this engine.");
+        }
+
+        var (job, status, error) = _registry.TryCreate(client, session, _fullScan.CreateRequest(ScanJobOrigin.Administrator, client.User), access: null);
+        if (job is null)
+        {
+            return PipeReply.Fail(status, error);
+        }
+
+        _logger.LogInformation("Pipe: administrator {User} created Full Scan job {JobId}.", client.User.Value, job.Id);
         return PipeReply.Ok(new ScanCreateReply(job.Id, []));
     }
 

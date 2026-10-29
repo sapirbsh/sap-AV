@@ -60,9 +60,9 @@ public sealed class EnginePipeServer : BackgroundService
     private CancellationToken _stoppingToken;
 
     public EnginePipeServer(IOptions<PipeServerOptions> options, IScanJobService jobs, IQuarantineService quarantine, TimeProvider time,
-        ILogger<EnginePipeServer> logger, IAlertDispatcher alerts, Scanning.Checks.QuickScanFactory quickScan)
+        ILogger<EnginePipeServer> logger, IAlertDispatcher alerts, Scanning.Checks.QuickScanFactory quickScan, Scanning.Checks.FullScanFactory fullScan)
         : this(ForThisProcess(options.Value, RunningAsSystemOrElevated()), jobs, quarantine, time, logger, new PipeClientIdentityResolver(),
-            EnginePipeSecurity.CurrentAccount(), alerts: alerts, quickScan: quickScan)
+            EnginePipeSecurity.CurrentAccount(), alerts: alerts, quickScan: quickScan, fullScan: fullScan)
     {
     }
 
@@ -72,7 +72,7 @@ public sealed class EnginePipeServer : BackgroundService
     /// <param name="quickScan">Builds Quick Scan jobs (C4); null = QuickScanCreate answers Unavailable.</param>
     internal EnginePipeServer(PipeServerOptions options, IScanJobService jobs, IQuarantineService? quarantine, TimeProvider time, ILogger logger,
         IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null, IAlertDispatcher? alerts = null,
-        Scanning.Checks.QuickScanFactory? quickScan = null)
+        Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -81,7 +81,7 @@ public sealed class EnginePipeServer : BackgroundService
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType, quickScan);
+        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType, quickScan, fullScan);
         _owner = EnginePipeSecurity.CurrentAccount();
         _descriptor = EnginePipeSecurity.Create(_owner, serverAccount);
         _securityDescriptor = EnginePipeSecurity.ToBytes(_descriptor);

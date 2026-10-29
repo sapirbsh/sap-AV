@@ -65,6 +65,13 @@ public enum PipeRequestKind
 
     /// <summary>C4: body <see cref="ScanFindingsRequest"/>; reply: <see cref="JobFindingsReply"/> (phases + one page of findings).</summary>
     ScanGetFindings,
+
+    /// <summary>
+    /// C6: no body; reply: <see cref="ScanCreateReply"/> (no paths). Creates a Full Scan job (not started; then ScanStart):
+    /// running programs, every autostart entry and every file on every fixed drive, no time budget. <b>Administrators
+    /// only</b> (AccessDenied otherwise), like Quick Scan. Results through ScanGet / ScanGetFindings.
+    /// </summary>
+    FullScanCreate,
 }
 
 /// <param name="Id">Client-chosen request ID (positive), echoed in <see cref="PipeFrame.ReplyTo"/>.</param>
@@ -281,7 +288,7 @@ public sealed record JobCountersInfo(
 
 public sealed record JobProgressInfo(
     Guid JobId, JobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
-    WirePath? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, JobCountersInfo Counters, ScanPhaseProgressInfo? Phase = null);
+    WirePath? CurrentFile, TimeSpan? Eta, TimeSpan Elapsed, JobCountersInfo Counters, ScanPhaseProgressInfo? Phase = null, double? PercentDone = null);
 
 /// <summary>Why a file wasn't scanned (C1), engine-classified. <see cref="NoAccess"/> deliberately tells nothing else.</summary>
 [JsonConverter(typeof(StrictEnumConverter<NotScannedReason>))]
