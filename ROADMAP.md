@@ -456,6 +456,15 @@ already-impersonating thread) are fixed in C1.
     (it would need a volume handle and by-ID opens outside the handle-bound walk).
   - Process images are judged by file only (command lines come with E7). Collection (≤ 30 s) can't be paused partway.
   - Section E adds checks by registering an `IScanCheck`; the factory inserts them after persistence.
+  - **C4 review: CLEAN.** M1 (user-controlled folder roots), M2 (phase 4 skipping unfinished phase-3 roots), L4, L5, L6
+    and L7 are fixed in the C5/C6 batch. Remaining:
+    - **E7 / G2a (L1):** a running image can be renamed away and the old path refilled with a benign file. Compare the
+      file's creation/change time with the process start time; if newer, report "image replaced after start" (T1036).
+    - **E7 (L2):** processes running from a share or device path are only logged. Add a phase note and a low finding.
+    - **C4 tuning (L3):** skip-folder patterns (`*` caches, `Explorer`) are user-writable, so a payload dropped there is
+      never seen. In skipped folders, still list one level and queue executables.
+    - **Section C tester (L8):** the 800 ms budget test with 50 ms broker delays is load-sensitive on CI. Drive it with
+      a FakeTimeProvider or widen the margins.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.

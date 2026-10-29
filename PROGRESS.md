@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C4 built (C4 review running); C5+C6 (scan cache, Full Scan) being built |
+| C — Scan modes | **In progress:** C1–C4 done (C4 review clean); C5+C6 (scan cache, Full Scan) being built |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -134,7 +134,10 @@ through the pipe is admin-only. On this dev PC: programs 1.6 s, autostarts 19 s,
 short by the 3-minute budget (about 100 files/s on a large AppData), so the folder phases need tuning.
 Tests: Core 1272 + 1 skipped, Engine 486 + 9 skipped.
 
-**Now:** C4's immediate review (it adds pipe messages), and in parallel C5 + C6 (scan cache, Full Scan).
+C4's review came back **CLEAN**. Its two Mediums (user-controlled folder settings could steer or starve the folder
+phase; phase 4 skipped folders phase 3 never finished) are being fixed in the C5/C6 batch.
+
+**Now:** C5 + C6 (scan cache, Full Scan).
 
 **Open for the user**
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
