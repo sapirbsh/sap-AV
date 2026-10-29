@@ -73,6 +73,9 @@ public static class EngineDataFolders
     /// <summary><c>%ProgramData%\sap-AV\Sandbox</c> (the scan worker's AppContainer id).</summary>
     public static string Sandbox => Path.Combine(ProgramDataRoot, "Sandbox");
 
+    /// <summary><c>%ProgramData%\sap-AV\Cache</c> (the scan cache database, C5).</summary>
+    public static string Cache => Path.Combine(ProgramDataRoot, "Cache");
+
     /// <summary>The default engine folders besides the configured store, worker, rules and blocklist folders.</summary>
-    public static IEnumerable<string> Defaults() => [Sandbox, AppContext.BaseDirectory];
+    public static IEnumerable<string> Defaults() => [Sandbox, Cache, AppContext.BaseDirectory];
 }

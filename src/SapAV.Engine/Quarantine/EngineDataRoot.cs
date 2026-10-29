@@ -30,7 +30,7 @@ namespace SapAV.Engine.Quarantine;
 public static class EngineDataRoot
 {
     /// <summary>Subfolders the engine itself creates in the root (each with its own protected DACL).</summary>
-    public static IReadOnlyList<string> EngineSubfolders { get; } = ["Quarantine", "Sandbox"];
+    public static IReadOnlyList<string> EngineSubfolders { get; } = ["Quarantine", "Sandbox", "Cache"];
 
     private const uint CheckAccess = N.ReadControl | N.WriteDac | N.FileReadAttributes | N.FileListDirectory | N.FileTraverse;
 
