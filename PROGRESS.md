@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C4 done (C4 review clean); C5+C6 (scan cache, Full Scan) being built |
+| C — Scan modes | **In progress:** C1–C6 built; section C tester + reviewer pass next |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -137,9 +137,24 @@ Tests: Core 1272 + 1 skipped, Engine 486 + 9 skipped.
 C4's review came back **CLEAN**. Its two Mediums (user-controlled folder settings could steer or starve the folder
 phase; phase 4 skipped folders phase 3 never finished) are being fixed in the C5/C6 batch.
 
-**Now:** C5 + C6 (scan cache, Full Scan).
+**C5 + C6 are built** (`8545d4f`, `f5a0e88`, `8b8024e`, `1eed55a`, `28c2263`):
+- **Scan cache (C5):** SQLite in the protected engine folder, keyed by the file's unique ID plus exact path, size, times
+  and USN, and valid only under the same rules and engine version. Every hit is checked against the current blocklist
+  (no re-read). Rows are HMAC-signed. Only engine/admin scans use it. A repeat scan of a test tree was 15.6x faster.
+- **Full Scan (C6):** all fixed drives (by volume, VHDs included), every file, plus running programs and autostarts.
+  No time limit, bounded memory, depth and entry safeguards, cloud placeholders skipped. Admin-only through the pipe.
+  A capped real run: 245 s cold, 3.8 s repeat (cache).
+- C4's two Mediums are fixed (user folder settings validated, defaults always scanned, fair time per folder; phase 4
+  covers folders phase 3 didn't finish). This also fixed a dedupe bug that dropped files between phases.
+Tests: Core 1272 + 1 skipped, Engine 521 + 10 skipped.
+
+**Now:** the section C tester pass, then the section C reviewer pass.
 
 **Open for the user**
+- **Please remove `C:ProgramDatasap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
+  data folder, owned by your user account. The code is fixed, so tests no longer touch it. Left in place, the real engine
+  would refuse it as "untrusted owner" and turn off quarantine and the sandbox. In an **elevated** PowerShell:
+  `Get-ChildItem -Force C:ProgramDatasap-AV` (should be empty), then `Remove-Item C:ProgramDatasap-AV`.
 - ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
   honours the `sap-AV` CustomSD, a filtered admin token is refused, and the positive control works.
 - ~~CI for `92ce762`~~: **green**, so the elevated ProtectedPrefix pipe tests pass on windows-latest.
