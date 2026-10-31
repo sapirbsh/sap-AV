@@ -111,19 +111,24 @@ public sealed class RemoteFileTests
         Assert.Equal(Verdict.Malicious, Assert.Single(job.Results).Verdict);
     }
 
+    private static readonly TimeSpan SmbPatience = TimeSpan.FromMinutes(2);
+
     [RequiresFact(Requires.AdminShare)]
     public async Task AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed()
     {
         using var h = new ScanJobHarness();
         var local = h.Write("mal-share.bin");
         string share = TestRequirements.ToAdminShare(local);
+        // Section C tester: the first SMB loopback connection can take a long time under load (a 34 s failure was seen). Open it once
+        // up front with a generous bound, and give both jobs the same, so the assertions below are about behaviour, not SMB latency.
+        await Task.Run(() => File.ReadAllBytes(share)).WaitAsync(SmbPatience);
 
         var refusedJob = h.Service.Create(new ScanJobRequest([share], ScanTrigger.CustomScan));
         h.Service.Start(refusedJob.Id);
-        await JobWait.Done(refusedJob);
+        await refusedJob.Completion.WaitAsync(SmbPatience);
         var allowedJob = h.Service.Create(new ScanJobRequest([share], ScanTrigger.CustomScan) { AllowRemoteFiles = true });
         h.Service.Start(allowedJob.Id);
-        await JobWait.Done(allowedJob);
+        await allowedJob.Completion.WaitAsync(SmbPatience);
 
         var refused = Assert.Single(refusedJob.Results);
         Assert.Equal(ScanSkipReason.RemoteFile, refused.SkipReason);

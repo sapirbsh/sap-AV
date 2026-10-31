@@ -14,6 +14,16 @@ using Xunit.Abstractions;
 
 namespace SapAV.Engine.Tests.Scanning;
 
+/// <summary>A clock that starts at the real now and moves only when a test advances it (thread-safe).</summary>
+internal sealed class SteppingTime : TimeProvider
+{
+    private long _ticks = DateTimeOffset.UtcNow.UtcTicks;
+
+    public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
+
+    public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
+}
+
 /// <summary>A fixed process list.</summary>
 internal sealed class FakeProcessSource(params ProcessImage[] processes) : IProcessSource
 {
@@ -245,7 +255,8 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
     {
         // Review C4 M1: alice's Downloads is huge (as if redirected to a big folder); bob's has one file. Without per-root
         // shares, alice's root used up the whole phase and bob's file was never queued.
-        using var q = new QuickScanHarness();
+        var clock = new SteppingTime(); // section C tester (L8): the budget runs on virtual time that each scan advances, so load can't change the outcome
+        using var q = new QuickScanHarness(clock);
         for (int i = 0; i < 80; i++)
         {
             q.Write($@"Users\alice\Downloads\big{i}.exe");
@@ -255,15 +266,15 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
         q.ExtraUsers.Add(new UserFolders("S-1-5-21-1-2-3-1002", bob, q.Folder(@"Users\bob\Desktop"), q.Folder(@"Users\bob\Downloads"),
             q.Folder(@"Users\bob\AppData\Local\Temp"), q.Folder(@"Users\bob\AppData\Roaming"), q.Folder(@"Users\bob\AppData\Local")));
         var bobsFile = q.Write(@"Users\bob\Downloads\tool.exe");
-        q.Jobs.Broker.OnScan = async (item, _, token) =>
+        q.Jobs.Broker.OnScan = (item, _, _) =>
         {
-            await Task.Delay(40, token);
+            clock.Advance(TimeSpan.FromMilliseconds(40));
             lock (q.Scanned)
             {
                 q.Scanned.Add(item.Path);
             }
 
-            return null;
+            return Task.FromResult<FileScanReport?>(null);
         };
 
         var job = await q.RunAsync(TimeSpan.FromSeconds(1.5));
@@ -311,7 +322,8 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
     [Fact]
     public async Task TimeBudget_EachFolderPhaseGetsItsShare_AndTheLastOneHitsTheBudget_WithAnIncompleteSummary()
     {
-        using var q = new QuickScanHarness();
+        var clock = new SteppingTime(); // virtual time, advanced by each scan (section C tester, L8)
+        using var q = new QuickScanHarness(clock);
         for (int i = 0; i < 20; i++)
         {
             q.Write($@"Users\alice\Downloads\file{i}.exe");
@@ -319,15 +331,15 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
             q.Write($@"Users\alice\Documents\recent{i}.docx");
         }
 
-        q.Jobs.Broker.OnScan = async (item, _, token) =>
+        q.Jobs.Broker.OnScan = (item, _, _) =>
         {
-            await Task.Delay(50, token);
+            clock.Advance(TimeSpan.FromMilliseconds(50));
             lock (q.Scanned)
             {
                 q.Scanned.Add(item.Path);
             }
 
-            return null;
+            return Task.FromResult<FileScanReport?>(null);
         };
 
         var job = await q.RunAsync(TimeSpan.FromMilliseconds(800));
