@@ -34,6 +34,7 @@ public class MitreCatalogTests
     {
         { "T1027.001", "Obfuscated Files or Information: Binary Padding" },
         { "T1564", "Hide Artifacts" },
+        { "T1547.009", "Boot or Logon Autostart Execution: Shortcut Modification" },
         { "T1036.002", "Masquerading: Right-to-Left Override" },
         { "T1211", "Exploitation for Defense Evasion" }, // B5: a file that crashes or hangs the scan worker
         { "T1562.001", "Impair Defenses: Disable or Modify Tools" }, // B3: engine-health alerts (no rules, store full)

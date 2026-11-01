@@ -103,7 +103,8 @@ public enum ScanFindingCategory
 /// its category. Text inside a payload is untrusted (registry values, task files): the pipe maps it with
 /// <see cref="Core.Text.SafeText"/> and engine templates (<see cref="Pipe.PipeMapping"/>).
 /// </summary>
-public sealed record ScanFinding(ScanFindingCategory Category, Verdict Verdict, string TechniqueId, IReadOnlyList<string> SecondaryTechniqueIds, Guid? AlertId)
+/// <param name="Verdict">Null for an Unverified entry: it has no verdict, and must never read as Clean (section C review H4).</param>
+public sealed record ScanFinding(ScanFindingCategory Category, Verdict? Verdict, string TechniqueId, IReadOnlyList<string> SecondaryTechniqueIds, Guid? AlertId)
 {
     /// <summary>The judged autostart entry (<see cref="ScanFindingCategory.Persistence"/>).</summary>
     public PersistenceFinding? Persistence { get; init; }
@@ -111,7 +112,7 @@ public sealed record ScanFinding(ScanFindingCategory Category, Verdict Verdict, 
     public static ScanFinding From(PersistenceFinding finding)
     {
         ArgumentNullException.ThrowIfNull(finding);
-        return new ScanFinding(ScanFindingCategory.Persistence, finding.Verdict, finding.Judgement.TechniqueId, finding.Judgement.SecondaryTechniqueIds,
+        return new ScanFinding(ScanFindingCategory.Persistence, finding.Outcome == PersistenceOutcome.Unverified ? null : finding.Verdict, finding.Judgement.TechniqueId, finding.Judgement.SecondaryTechniqueIds,
             finding.AlertId)
         {
             Persistence = finding,

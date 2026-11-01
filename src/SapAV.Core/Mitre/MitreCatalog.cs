@@ -20,6 +20,7 @@ public static class MitreCatalog
         new(MitreTechniqueIds.SoftwarePacking, "Obfuscated Files or Information: Software Packing"),
         new(MitreTechniqueIds.BinaryPadding, "Obfuscated Files or Information: Binary Padding"),
         new(MitreTechniqueIds.HideArtifacts, "Hide Artifacts"),
+        new(MitreTechniqueIds.ShortcutModification, "Boot or Logon Autostart Execution: Shortcut Modification"),
         new(MitreTechniqueIds.RightToLeftOverride, "Masquerading: Right-to-Left Override"),
         new(MitreTechniqueIds.MaliciousFile, "User Execution: Malicious File"),
         new(MitreTechniqueIds.SpearphishingAttachment, "Phishing: Spearphishing Attachment"),

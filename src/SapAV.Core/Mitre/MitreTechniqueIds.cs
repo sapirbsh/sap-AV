@@ -12,6 +12,7 @@ public static class MitreTechniqueIds
     public const string SoftwarePacking = "T1027.002";
     public const string BinaryPadding = "T1027.001";
     public const string HideArtifacts = "T1564";
+    public const string ShortcutModification = "T1547.009";
     public const string RightToLeftOverride = "T1036.002";
     public const string MaliciousFile = "T1204.002";
     public const string SpearphishingAttachment = "T1566.001";

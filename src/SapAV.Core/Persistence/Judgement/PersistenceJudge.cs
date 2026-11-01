@@ -15,6 +15,14 @@ public interface IPersistenceRule
     void Evaluate(PersistenceRuleContext context);
 }
 
+/// <summary>
+/// A rule about one thing the entry runs (not about the entry as a whole): it also runs for each of
+/// <see cref="ResolvedCommand.Additional"/> (section C review H4).
+/// </summary>
+public interface IPersistenceTargetRule : IPersistenceRule
+{
+}
+
 /// <summary>Settings of the judgement.</summary>
 public sealed record PersistenceJudgeOptions
 {
@@ -36,13 +44,16 @@ public sealed record PersistenceJudgeOptions
 /// <para><b>Verdict.</b> Malicious only when the target or host scan is Malicious (its detections are carried over, with
 /// the entry kind's technique added as a secondary). Otherwise the rules' scores are summed: at
 /// <see cref="PersistenceJudgeOptions.SuspiciousThreshold"/> (60) or more the entry is Suspicious; a Suspicious target
-/// scan is carried over as Suspicious too. Below the threshold it is Clean, but its signals are kept for the UI.</para>
+/// scan is carried over as Suspicious too. Below the threshold it has no detection, but its signals are kept for the UI.</para>
+/// <para><b>Unverified</b> (section C review H4). An entry whose target or additional commands weren't scanned, and aren't known
+/// to be missing, has <see cref="PersistenceOutcome.Unverified"/> as its outcome, whatever its score: only a scanned entry can be
+/// Clean. Other commands of the entry (<see cref="ResolvedCommand.Additional"/>) go through the target rules and count the same.</para>
 /// <para><b>Rules and points</b> (<see cref="PersistenceRules"/>): see each rule. Signals marked
 /// <see cref="PersistenceSignalStrength.Weak"/> are dropped when the target is a Microsoft-signed file in an admin-only
 /// Windows folder (and the host, if any, is Microsoft-signed too), so standard Windows entries are Clean with no noise.
 /// IFEO, Winlogon and the hijack rules are never weak.</para>
 /// <para><b>Priority.</b> High for Malicious, or Suspicious with a <see cref="PersistenceSignalStrength.Strong"/> signal;
-/// Normal for other Suspicious; Low for Clean. A disabled entry is one step lower (still judged: it can be switched on).</para>
+/// Normal for other Suspicious and for Unverified; Low for Clean. A disabled entry is one step lower (still judged: it can be switched on).</para>
 /// </remarks>
 public sealed class PersistenceJudge
 {
@@ -71,11 +82,36 @@ public sealed class PersistenceJudge
     /// <param name="target">The scan of <see cref="ResolvedCommand.TargetPath"/>, or null if it wasn't scanned.</param>
     /// <param name="host">The scan of <see cref="ResolvedCommand.HostPath"/>, or null.</param>
     /// <param name="writability">Who can write the target and its folders (the engine's ACL check); null = unknown.</param>
-    public PersistenceJudgement Judge(PersistenceEntry entry, FileScanReport? target, FileScanReport? host, IPathWritability? writability = null)
+    /// <param name="additional">The scans of <see cref="ResolvedCommand.Additional"/> targets, by path; null = none was scanned.</param>
+    public PersistenceJudgement Judge(
+        PersistenceEntry entry, FileScanReport? target, FileScanReport? host, IPathWritability? writability = null, IReadOnlyDictionary<string, FileScanReport>? additional = null)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        var context = new PersistenceRuleContext(entry, target, host, writability ?? UnknownWritability.Instance, Options);
-        foreach (var rule in _rules)
+        var paths = writability ?? UnknownWritability.Instance;
+        var context = new PersistenceRuleContext(entry, target, host, paths, Options);
+        Evaluate(context, _rules);
+
+        // Everything else this entry runs (the rest of a cmd chain, a shortcut's other targets) counts the same as the target.
+        bool allMicrosoft = true;
+        foreach (var other in entry.Resolution.Additional)
+        {
+            var otherTarget = other.TargetPath is { } path ? additional?.GetValueOrDefault(path) : null;
+            var otherHost = other.HostPath is { } hostPath ? additional?.GetValueOrDefault(hostPath) ?? host : null;
+            var sub = new PersistenceRuleContext(ForCommand(entry, other), otherTarget, otherHost, paths, Options);
+            Evaluate(sub, _rules.OfType<IPersistenceTargetRule>());
+            allMicrosoft &= sub.IsMicrosoftSystemTarget;
+            context.Merge(sub);
+        }
+
+        return Decide(context, allMicrosoft);
+    }
+
+    private static PersistenceEntry ForCommand(PersistenceEntry entry, ResolvedCommand command) =>
+        new(entry.Kind, entry.UserSid, entry.Location, entry.ValueName, entry.CommandLine, command, entry.Enabled, entry.ServiceStart, entry.ComClassId);
+
+    private static void Evaluate(PersistenceRuleContext context, IEnumerable<IPersistenceRule> rules)
+    {
+        foreach (var rule in rules)
         {
             try
             {
@@ -87,15 +123,14 @@ public sealed class PersistenceJudge
                 context.Add(PersistenceRuleIds.RuleFailed, 0, $"A persistence rule ({rule.GetType().Name}) failed ({ex.GetType().Name}).");
             }
         }
-
-        return Decide(context);
     }
 
-    private PersistenceJudgement Decide(PersistenceRuleContext context)
+    private PersistenceJudgement Decide(PersistenceRuleContext context, bool additionalAllMicrosoft)
     {
         string kindTechnique = context.KindTechnique;
+        bool dropWeak = context.IsMicrosoftSystemTarget && additionalAllMicrosoft;
         var signals = context.Signals
-            .Where(s => !(context.IsMicrosoftSystemTarget && s.Strength == PersistenceSignalStrength.Weak))
+            .Where(s => !(dropWeak && s.Strength == PersistenceSignalStrength.Weak))
             .Select((s, i) => (s, i))
             .OrderByDescending(x => x.s.Score).ThenBy(x => x.i).Select(x => x.s)
             .ToArray();
@@ -128,6 +163,7 @@ public sealed class PersistenceJudge
             Verdict.Malicious => PersistencePriority.High,
             Verdict.Suspicious when signals.Any(s => s.Strength == PersistenceSignalStrength.Strong && s.Score > 0) => PersistencePriority.High,
             Verdict.Suspicious => PersistencePriority.Normal,
+            _ when context.UnverifiedReasons.Count > 0 => PersistencePriority.Normal,
             _ => PersistencePriority.Low,
         };
 
@@ -136,7 +172,7 @@ public sealed class PersistenceJudge
             priority--;
         }
 
-        return new PersistenceJudgement(verdict, score, threshold, priority, primary, allTechniques, signals, detections);
+        return new PersistenceJudgement(verdict, score, threshold, priority, primary, allTechniques, signals, detections, context.UnverifiedReasons);
     }
 }
 
@@ -148,6 +184,7 @@ public sealed class PersistenceRuleContext
 {
     private readonly List<PersistenceSignal> _signals = [];
     private readonly List<Detection> _carried = [];
+    private readonly List<string> _unverified = [];
     private readonly Dictionary<string, Writability> _modifiable = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Writability> _creatable = new(StringComparer.OrdinalIgnoreCase);
     private readonly IPathWritability _writability;
@@ -218,6 +255,31 @@ public sealed class PersistenceRuleContext
 
     /// <summary><see cref="IPathWritability.FileCreatable"/>, cached for this entry.</summary>
     public Writability FileCreatable(string path) => Cached(_creatable, path, _writability.FileCreatable);
+
+    /// <summary>Why something this entry runs has no scan result (section C review H4).</summary>
+    public IReadOnlyList<string> UnverifiedReasons => _unverified;
+
+    /// <summary>Marks the entry Unverified: without a detection it must never read as Clean.</summary>
+    public void AddUnverified(string reason)
+    {
+        ArgumentNullException.ThrowIfNull(reason);
+        _unverified.Add(reason);
+    }
+
+    /// <summary>Takes over what the rules found about another command of this entry (the same signal counts once).</summary>
+    internal void Merge(PersistenceRuleContext other)
+    {
+        foreach (var signal in other.Signals.Where(s => !(other.IsMicrosoftSystemTarget && s.Strength == PersistenceSignalStrength.Weak)))
+        {
+            if (!_signals.Any(s => s.Rule == signal.Rule && s.Reason == signal.Reason))
+            {
+                _signals.Add(signal);
+            }
+        }
+
+        _carried.AddRange(other.Carried);
+        _unverified.AddRange(other.UnverifiedReasons);
+    }
 
     public void Add(PersistenceSignal signal)
     {

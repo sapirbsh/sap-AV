@@ -229,4 +229,20 @@ public interface IPathProbe
 {
     /// <param name="path">A normalized, fully qualified local path.</param>
     bool FileExists(string path);
+
+    /// <summary>
+    /// <see cref="FileExists"/> with a third answer: Unknown (denied, behind a link, locked, an error), which must never count
+    /// as missing: only <see cref="PathProbeResult.Missing"/> confirms a target doesn't exist (section C review H4).
+    /// </summary>
+    PathProbeResult Probe(string path) => FileExists(path) ? PathProbeResult.Exists : PathProbeResult.Missing;
+}
+
+/// <summary>What an existence probe could establish.</summary>
+public enum PathProbeResult
+{
+    Missing,
+    Exists,
+
+    /// <summary>The probe couldn't tell (access denied, a link on the way, locked, an error). Treated as "may exist".</summary>
+    Unknown,
 }

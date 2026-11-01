@@ -177,14 +177,17 @@ internal sealed class PersistenceScanner(
         foreach (var entry in entries)
         {
             var resolution = entry.Resolution;
-            if (resolution.TargetPath is { } target && !resolution.HasFlag(ResolutionFlag.TargetNotFound) && seen.Add(target))
+            foreach (var command in resolution.AllCommands)
             {
-                result.Add(target);
-            }
+                if (command.TargetPath is { } target && !command.HasFlag(ResolutionFlag.TargetNotFound) && seen.Add(target))
+                {
+                    result.Add(target);
+                }
 
-            if (resolution.HostPath is { } host && seen.Add(host))
-            {
-                result.Add(host);
+                if (command.HostPath is { } host && seen.Add(host))
+                {
+                    result.Add(host);
+                }
             }
         }
 
@@ -196,7 +199,8 @@ internal sealed class PersistenceScanner(
     {
         var target = entry.Resolution.TargetPath is { } t ? reports.GetValueOrDefault(t) : null;
         var host = entry.Resolution.HostPath is { } h ? reports.GetValueOrDefault(h) : null;
-        var judgement = _judge.Judge(entry, target, host, acl);
+        var additional = entry.Resolution.Additional.Count == 0 ? null : (IReadOnlyDictionary<string, FileScanReport>)reports;
+        var judgement = _judge.Judge(entry, target, host, acl, additional);
         var finding = new PersistenceFinding(entry, judgement, target?.Result, host?.Result);
         if (!options.RaiseAlerts || alerts is null || judgement.Verdict == Verdict.Clean)
         {

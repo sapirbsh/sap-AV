@@ -22,7 +22,7 @@ namespace SapAV.Core.Persistence;
 /// <item>System hosts in System32 / SysWOW64 (or PowerShell 7 under Program Files) are unwrapped to their payload:
 /// <c>rundll32 &lt;dll&gt;,&lt;entry&gt;</c>, <c>regsvr32 [/s /u /n /i:x] &lt;dll&gt;</c> (a URL in <c>/i:</c> is
 /// <see cref="ResolutionFlag.RemotePayload"/>), <c>cmd /c|/k &lt;command&gt;</c> (resolved again; <c>start</c> and
-/// <c>call</c> skipped; other built-ins and <c>&amp;</c> / <c>|</c> chains are <see cref="ResolutionFlag.InlineCommand"/>),
+/// <c>call</c> skipped; other built-ins are <see cref="ResolutionFlag.InlineCommand"/>; every command of a <c>&amp;</c> / <c>|</c> chain is resolved),
 /// <c>powershell|pwsh -File &lt;script&gt;</c> (<c>-Command</c>, <c>-EncodedCommand</c> and their prefixes are inline),
 /// <c>wscript|cscript &lt;script&gt;</c>, <c>mshta &lt;hta|url|javascript:&gt;</c>. A host elsewhere (a copied
 /// "rundll32.exe" in Temp) is not a host: it is the target itself. Nesting is followed <see cref="MaxDepth"/> levels.</item>
@@ -41,6 +41,9 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
     /// <summary>Most <c>call</c> prefixes followed in one <c>cmd</c> command; more is <see cref="TargetUnresolvedReason.NestingTooDeep"/>.</summary>
     public const int MaxCallPrefixes = 8;
+
+    /// <summary>Most commands of one <c>cmd</c> chain resolved; the rest count as unknown.</summary>
+    public const int MaxChainCommands = 8;
 
     private static readonly HashSet<string> CmdBuiltins = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -80,7 +83,11 @@ public sealed class CommandLineResolver(IPathProbe probe)
     /// Resolves a program given apart from its arguments (a task's Exec Command + Arguments, a shortcut's target +
     /// arguments). The program may be quoted or not; spaces in it are part of the path.
     /// </summary>
-    public ResolvedCommand ResolveProgram(string? program, string? arguments, EnvironmentBlock environment)
+    /// <param name="workingDirectory">
+    /// The entry's working directory (a task's or shortcut's), as stored: a relative program or script is relative to it, and a
+    /// bare program name is looked for there first, as CreateProcess does. Null or unusable: not searched.
+    /// </param>
+    public ResolvedCommand ResolveProgram(string? program, string? arguments, EnvironmentBlock environment, string? workingDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(environment);
         var state = new State(environment);
@@ -89,6 +96,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return failed;
         }
 
+        state.SetWorkingDirectory(workingDirectory);
         var args = state.ExpandOrNull(arguments ?? string.Empty) ?? string.Empty;
         return Guard(() =>
         {
@@ -197,8 +205,14 @@ public sealed class CommandLineResolver(IPathProbe probe)
         int intended = candidates.FindIndex(c => HasExtension(c.Text));
         var found = new List<(string Path, int Index)>();
         TargetUnresolvedReason? firstFailure = null;
-        for (int i = 0; i < candidates.Count && found.Count < 2 && state.ProbesLeft > 0; i++)
+        for (int i = 0; i < candidates.Count && found.Count < 2; i++)
         {
+            if (state.ProbesLeft <= 0)
+            {
+                firstFailure ??= TargetUnresolvedReason.SearchLimitReached;
+                break;
+            }
+
             var file = ResolveFile(candidates[i].Text, FileRole.Program, state, probeQualified: true, quiet: true);
             if (file.Path is { } path)
             {
@@ -226,6 +240,18 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return Unwrap(found[0].Path, text[candidates[chosen].End..].Trim(), state, depth);
         }
 
+        // A path longer than the candidate cap isn't known to be missing: the real program may lie past the last candidate.
+        if (candidates.Count >= MaxCandidates)
+        {
+            firstFailure ??= TargetUnresolvedReason.SearchLimitReached;
+        }
+
+        // Some candidate couldn't even be probed (drive-relative, a limit): that is unknown, not "confirmed missing".
+        if (firstFailure is { } unknown)
+        {
+            return state.Unresolved(unknown, null, text);
+        }
+
         // Nothing exists: report what was most likely meant (the first candidate with an extension), as not found.
         state.Flags.Add(ResolutionFlag.TargetNotFound);
         if (chosen >= 0 && PersistenceText.NormalizeLocalPath(WithDefaultExtension(candidates[chosen].Text, FileRole.Program)) is { } guess)
@@ -233,7 +259,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return state.Resolved(guess, text[candidates[chosen].End..].Trim());
         }
 
-        return state.Unresolved(firstFailure ?? TargetUnresolvedReason.NotFoundOnSearchPath, null, text);
+        return state.Unresolved(TargetUnresolvedReason.NotFoundOnSearchPath, null, text);
     }
 
     /// <summary>The prefixes CreateProcess tries for an unquoted command line: up to each run of whitespace, then the whole.</summary>
@@ -276,14 +302,14 @@ public sealed class CommandLineResolver(IPathProbe probe)
                 : TargetUnresolvedReason.NotFullyQualified);
         }
 
+        if (IsDevicePath(token))
+        {
+            return (null, TargetUnresolvedReason.DevicePath); // before the character check: \??\ has '?' in it
+        }
+
         if (token.IndexOfAny(['"', '<', '>', '|', '*', '?']) >= 0 && !token.StartsWith(@"\\?\", StringComparison.Ordinal))
         {
             return (null, TargetUnresolvedReason.Malformed);
-        }
-
-        if (IsDevicePath(token))
-        {
-            return (null, TargetUnresolvedReason.DevicePath);
         }
 
         if (IsDriveQualified(token) || IsExtendedDrive(token))
@@ -307,6 +333,11 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return (null, TargetUnresolvedReason.NetworkPath);
         }
 
+        if (FromWorkingDirectory(token, role, state, out var relativeResult))
+        {
+            return relativeResult;
+        }
+
         if (!IsBareName(token) || role == FileRole.Script)
         {
             return (null, TargetUnresolvedReason.NotFullyQualified);
@@ -317,7 +348,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
         {
             if (state.ProbesLeft <= 0)
             {
-                break;
+                return (null, TargetUnresolvedReason.SearchLimitReached);
             }
 
             if (PersistenceText.NormalizeLocalPath(Path.Join(folder, name)) is { } candidate && state.Probe(_probe, candidate))
@@ -333,6 +364,52 @@ public sealed class CommandLineResolver(IPathProbe probe)
         }
 
         return (null, TargetUnresolvedReason.NotFoundOnSearchPath);
+    }
+
+    /// <summary>
+    /// A name relative to the entry's working directory (rooted-without-a-drive and drive-relative names don't qualify). True
+    /// with the result when that settles it: a relative path or script is there, or nowhere; a bare program found there wins
+    /// over the search path. False: not applicable, or a bare name to look for on the search path.
+    /// </summary>
+    private bool FromWorkingDirectory(string token, FileRole role, State state, out (string? Path, TargetUnresolvedReason? Reason) result)
+    {
+        result = default;
+        if (state.WorkingDirectory is not { } folder || token.Contains(':') || token[0] is '\\' or '/')
+        {
+            return false;
+        }
+
+        bool bareProgram = IsBareName(token) && role != FileRole.Script;
+        if (folder.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            if (bareProgram)
+            {
+                return false; // the engine doesn't look at the share; the search path is what it can check
+            }
+
+            result = (null, TargetUnresolvedReason.NetworkPath);
+            return true;
+        }
+
+        if (PersistenceText.NormalizeLocalPath(Path.Join(folder, WithDefaultExtension(token, role))) is not { } candidate)
+        {
+            return false;
+        }
+
+        if (!bareProgram)
+        {
+            result = (candidate, null); // the scan's open says whether it exists
+            return true;
+        }
+
+        if (!state.Probe(_probe, candidate))
+        {
+            return false;
+        }
+
+        state.Flags.Add(ResolutionFlag.ResolvedFromWorkingDirectory);
+        result = (candidate, null);
+        return true;
     }
 
     /// <summary>Unwraps a system host to its payload; anything else is the target itself.</summary>
@@ -497,13 +574,76 @@ public sealed class CommandLineResolver(IPathProbe probe)
             inner = inner[1..^1].Trim(); // cmd strips the outer quotes in this case (see cmd /?)
         }
 
-        if (FirstUnquoted(inner, '&', '|') is int chain and >= 0)
+        var commands = SplitChain(inner);
+        if (commands.Count == 1)
         {
-            state.Flags.Add(ResolutionFlag.InlineCommand); // a chain: the first command is resolved, the rest is inline
-            inner = inner[..chain].Trim();
+            return CmdInner(host, inner, state, depth);
         }
 
-        return CmdInner(host, inner, state, depth);
+        return ResolveChain(host, commands, state, depth);
+    }
+
+    /// <summary>
+    /// A <c>&amp;</c> / <c>&amp;&amp;</c> / <c>||</c> / <c>|</c> chain (section C review H4): every command runs, so every one is resolved,
+    /// each with its own flags (one missing command says nothing about the next). The first with a file is the target, the others
+    /// are <see cref="ResolvedCommand.Additional"/>; a chain is also flagged InlineCommand. Past
+    /// <see cref="MaxChainCommands"/>, the rest counts as unknown.
+    /// </summary>
+    private ResolvedCommand ResolveChain(string host, List<string> commands, State state, int depth)
+    {
+        var results = new List<ResolvedCommand>(commands.Count);
+        foreach (var command in commands.Take(MaxChainCommands))
+        {
+            results.Add(CmdInner(host, command.Trim(), state.ForChainCommand(), depth));
+        }
+
+        if (commands.Count > MaxChainCommands)
+        {
+            results.Add(state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host));
+        }
+
+        int primary = results.FindIndex(r => r.TargetPath is not null && !r.HasFlag(ResolutionFlag.TargetNotFound));
+        primary = primary < 0 ? 0 : primary;
+        var others = results.Where((_, i) => i != primary).ToArray();
+        return results[primary].WithFlags(ResolutionFlag.InlineCommand).WithAdditional(others);
+    }
+
+    /// <summary>The commands of a cmd chain, split at unquoted, unescaped <c>&amp;</c> and <c>|</c> (doubled or not); empty ones dropped.</summary>
+    private static List<string> SplitChain(string text)
+    {
+        var parts = new List<string>();
+        int start = 0;
+        while (start <= text.Length)
+        {
+            int stop = FirstUnquoted(text[start..], '&', '|');
+            if (stop < 0)
+            {
+                Add(text[start..]);
+                break;
+            }
+
+            Add(text.Substring(start, stop));
+            start += stop + 1;
+            if (start < text.Length && text[start] is '&' or '|')
+            {
+                start++;
+            }
+        }
+
+        if (parts.Count == 0)
+        {
+            parts.Add(string.Empty);
+        }
+
+        return parts;
+
+        void Add(string part)
+        {
+            if (!string.IsNullOrWhiteSpace(part))
+            {
+                parts.Add(part);
+            }
+        }
     }
 
     private ResolvedCommand CmdInner(string host, string inner, State state, int depth)
@@ -550,7 +690,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return ResolveNested(host, inner[tokens[i].Start..], state, depth);
         }
 
-        if (CmdBuiltins.Contains(verb) || verb.StartsWith('@') || verb.Contains('>') || verb.Contains('<'))
+        if (CmdBuiltins.Contains(verb) || verb.StartsWith('@') || verb.StartsWith('(') || verb.Contains('>') || verb.Contains('<'))
         {
             state.Flags.Add(ResolutionFlag.InlineCommand);
             return state.Unresolved(TargetUnresolvedReason.InlineCommand, host, inner);
@@ -563,7 +703,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
     {
         var nested = ResolveCommandLine(command, state, depth + 1);
         // The innermost host is the one that runs the target; keep the outer one only when nothing nested was a host.
-        return nested.HostPath is not null ? nested : new ResolvedCommand(nested.TargetPath, nested.UnresolvedReason, host, nested.Arguments, nested.Flags);
+        return nested.HostPath is not null ? nested : new ResolvedCommand(nested.TargetPath, nested.UnresolvedReason, host, nested.Arguments, nested.Flags, nested.Additional);
     }
 
     private ResolvedCommand PowerShell(string host, string args, State state, bool positionalIsFile)
@@ -575,6 +715,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
         }
 
         state.Flags.Add(ResolutionFlag.InterpreterHost);
+        NotePowerShellStealth(tokens, state);
         for (int i = 0; i < tokens.Count; i++)
         {
             string value = tokens[i].Value;
@@ -616,6 +757,33 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
         state.Flags.Add(ResolutionFlag.InlineCommand);
         return state.Unresolved(TargetUnresolvedReason.InlineCommand, host, args);
+    }
+
+    /// <summary>A hidden window and an encoded command, in any order (the full PowerShell rules are E4's).</summary>
+    private static void NotePowerShellStealth(List<(string Value, string Raw, int Start, int End)> tokens, State state)
+    {
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            string value = tokens[i].Value;
+            if (value.Length < 2 || !IsDash(value[0]))
+            {
+                continue;
+            }
+
+            string name = value[1..].ToLowerInvariant();
+            if (name is "e" or "ec" || (name.Length >= 2 && "encodedcommand".StartsWith(name, StringComparison.Ordinal)))
+            {
+                state.Flags.Add(ResolutionFlag.EncodedCommand);
+            }
+            else if ("windowstyle".StartsWith(name, StringComparison.Ordinal) && i + 1 < tokens.Count)
+            {
+                string style = tokens[i + 1].Value.ToLowerInvariant();
+                if (style == "1" || (style.Length > 0 && "hidden".StartsWith(style, StringComparison.Ordinal)))
+                {
+                    state.Flags.Add(ResolutionFlag.HiddenWindow);
+                }
+            }
+        }
     }
 
     private static bool IsInlinePowerShellParameter(string name) =>
@@ -817,27 +985,55 @@ public sealed class CommandLineResolver(IPathProbe probe)
     /// <summary>Per-resolution state: the environment, the flags so far and the probe budget.</summary>
     private sealed class State(EnvironmentBlock environment)
     {
+        // Shared by the commands of a chain: the budget is per command line.
+        private int[] _probesLeft = [MaxProbes];
+
         public EnvironmentBlock Environment { get; } = environment;
 
-        public HashSet<ResolutionFlag> Flags { get; } = [];
+        public HashSet<ResolutionFlag> Flags { get; private init; } = [];
 
-        public int ProbesLeft { get; private set; } = MaxProbes;
+        public int ProbesLeft => _probesLeft[0];
 
+        /// <summary>The expanded working directory, when it is usable: a normalized local path or a UNC path.</summary>
+        public string? WorkingDirectory { get; private set; }
+
+        /// <summary>For one command of a chain: the flags so far and the working directory, but its own flags from here on.</summary>
+        public State ForChainCommand() => new(Environment)
+        {
+            Flags = [.. Flags],
+            _probesLeft = _probesLeft,
+            WorkingDirectory = WorkingDirectory,
+        };
+
+        public void SetWorkingDirectory(string? folder)
+        {
+            if (string.IsNullOrWhiteSpace(folder) || ExpandOrNull(folder) is not { } expanded)
+            {
+                return;
+            }
+
+            string trimmed = expanded.Trim().Trim('"');
+            WorkingDirectory = trimmed.StartsWith(@"\\", StringComparison.Ordinal) && !trimmed.StartsWith(@"\\?\", StringComparison.Ordinal)
+                ? trimmed
+                : PersistenceText.NormalizeLocalPath(trimmed);
+        }
+
+        /// <summary>True unless the file is confirmed missing: an Unknown answer may be the program, so it stops the search.</summary>
         public bool Probe(IPathProbe probe, string path)
         {
-            if (ProbesLeft <= 0)
+            if (_probesLeft[0] <= 0)
             {
                 return false;
             }
 
-            ProbesLeft--;
+            _probesLeft[0]--;
             try
             {
-                return probe.FileExists(path);
+                return probe.Probe(path) != PathProbeResult.Missing;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {
-                return false;
+                return true;
             }
         }
 
@@ -860,7 +1056,15 @@ public sealed class CommandLineResolver(IPathProbe probe)
         public ResolvedCommand Resolved(string path, string args, string? host = null) =>
             ResolvedCommand.Resolved(path, args, host, Flags);
 
-        public ResolvedCommand Unresolved(TargetUnresolvedReason reason, string? host = null, string args = "") =>
-            ResolvedCommand.Unresolved(reason, host, args, Flags);
+        public ResolvedCommand Unresolved(TargetUnresolvedReason reason, string? host = null, string args = "")
+        {
+            // Section C review H4: a payload outside the file system is the same finding whichever host (if any) runs it.
+            if (reason is TargetUnresolvedReason.NetworkPath or TargetUnresolvedReason.DevicePath)
+            {
+                Flags.Add(ResolutionFlag.RemotePayload);
+            }
+
+            return ResolvedCommand.Unresolved(reason, host, args, Flags);
+        }
     }
 }

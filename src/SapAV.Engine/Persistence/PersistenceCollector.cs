@@ -82,14 +82,17 @@ internal sealed class PersistenceCollector(
 /// </summary>
 internal sealed class SafePathProbe : IPathProbe
 {
-    private readonly Dictionary<string, bool> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PathProbeResult> _cache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A probe with an empty cache (one per collection, so a file created since is seen).</summary>
     public SafePathProbe Fresh() => new();
 
-    public bool FileExists(string path)
+    public bool FileExists(string path) => Probe(path) == PathProbeResult.Exists;
+
+    /// <summary>Missing only for "not found": a denied, locked or link-redirected path may well exist (section C review H4).</summary>
+    public PathProbeResult Probe(string path)
     {
-        if (_cache.TryGetValue(path, out bool known))
+        if (_cache.TryGetValue(path, out var known))
         {
             return known;
         }
@@ -99,9 +102,9 @@ internal sealed class SafePathProbe : IPathProbe
             _cache.Clear();
         }
 
-        using var handle = SafeTree.Open(path, N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out _, out _);
-        bool exists = handle is not null;
-        _cache[path] = exists;
-        return exists;
+        using var handle = SafeTree.Open(path, N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var failure, out _);
+        var result = handle is not null ? PathProbeResult.Exists : failure == SafeTreeFailure.NotFound ? PathProbeResult.Missing : PathProbeResult.Unknown;
+        _cache[path] = result;
+        return result;
     }
 }

@@ -18,9 +18,13 @@ public sealed record ResolvedCommand
     /// <summary>Longest <see cref="Arguments"/> kept (longer ones are cut and end with an ellipsis).</summary>
     public const int MaxArgumentsLength = 8192;
 
+    /// <summary>Most <see cref="Additional"/> commands kept.</summary>
+    public const int MaxAdditional = 16;
+
     [JsonConstructor]
     public ResolvedCommand(
-        string? targetPath, TargetUnresolvedReason? unresolvedReason, string? hostPath, string? arguments, IReadOnlyList<ResolutionFlag>? flags)
+        string? targetPath, TargetUnresolvedReason? unresolvedReason, string? hostPath, string? arguments, IReadOnlyList<ResolutionFlag>? flags,
+        IReadOnlyList<ResolvedCommand>? additional = null)
     {
         if ((targetPath is null) == (unresolvedReason is null))
         {
@@ -48,11 +52,18 @@ public sealed record ResolvedCommand
             throw new ArgumentOutOfRangeException(nameof(flags), "Undefined resolution flag.");
         }
 
+        var others = (additional ?? []).ToArray();
+        if (others.Length > MaxAdditional || others.Any(a => a is null || a.Additional.Count > 0))
+        {
+            throw new ArgumentException($"At most {MaxAdditional} additional commands, and they must be flat.", nameof(additional));
+        }
+
         TargetPath = targetPath;
         UnresolvedReason = unresolvedReason;
         HostPath = hostPath;
         Arguments = SafeText.SingleLine(arguments ?? string.Empty, MaxArgumentsLength);
         Flags = Array.AsReadOnly(list.Distinct().Order().ToArray());
+        Additional = Array.AsReadOnly(others);
     }
 
     /// <summary>A command that runs <paramref name="targetPath"/>.</summary>
@@ -77,6 +88,12 @@ public sealed record ResolvedCommand
     /// <summary>The arguments after the target (one sanitized line, capped; may be empty).</summary>
     public string Arguments { get; }
 
+    /// <summary>
+    /// What else this entry runs (section C review H4): the other commands of a <c>&amp;</c> / <c>&amp;&amp;</c> / <c>||</c> chain, or the
+    /// other targets a mismatched shortcut names. Each is resolved on its own and flat. C3 scans and judges them all.
+    /// </summary>
+    public IReadOnlyList<ResolvedCommand> Additional { get; }
+
     /// <summary>Distinct flags in enum order (may be empty).</summary>
     public IReadOnlyList<ResolutionFlag> Flags { get; }
 
@@ -87,7 +104,23 @@ public sealed record ResolvedCommand
 
     /// <summary>A copy with <paramref name="added"/> flags.</summary>
     public ResolvedCommand WithFlags(params ResolutionFlag[] added) =>
-        new(TargetPath, UnresolvedReason, HostPath, Arguments, [.. Flags, .. added]);
+        new(TargetPath, UnresolvedReason, HostPath, Arguments, [.. Flags, .. added], Additional);
+
+    /// <summary>A copy that also runs <paramref name="others"/> (flattened); past the cap, one entry that says the rest is unknown.</summary>
+    public ResolvedCommand WithAdditional(IEnumerable<ResolvedCommand> others)
+    {
+        var flat = Additional.Concat(others.SelectMany(o => o.Additional.Prepend(new(o.TargetPath, o.UnresolvedReason, o.HostPath, o.Arguments, o.Flags)))).ToList();
+        if (flat.Count > MaxAdditional)
+        {
+            flat = [.. flat.Take(MaxAdditional - 1), Unresolved(TargetUnresolvedReason.SearchLimitReached)];
+        }
+
+        return new(TargetPath, UnresolvedReason, HostPath, Arguments, Flags, flat);
+    }
+
+    /// <summary>Every target path this entry can run: <see cref="TargetPath"/>, then the additional ones.</summary>
+    [JsonIgnore]
+    public IEnumerable<ResolvedCommand> AllCommands => Additional.Prepend(this);
 
     public bool Equals(ResolvedCommand? other) =>
         other is not null
@@ -96,7 +129,8 @@ public sealed record ResolvedCommand
                 && UnresolvedReason == other.UnresolvedReason
                 && string.Equals(HostPath, other.HostPath, StringComparison.Ordinal)
                 && string.Equals(Arguments, other.Arguments, StringComparison.Ordinal)
-                && Flags.SequenceEqual(other.Flags)));
+                && Flags.SequenceEqual(other.Flags)
+                && Additional.SequenceEqual(other.Additional)));
 
     public override int GetHashCode()
     {

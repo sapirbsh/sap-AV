@@ -178,7 +178,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             {
                 string command = $"{action.Command} {action.Arguments}".Trim();
                 context.Add(new PersistenceEntry(PersistenceKind.ScheduledTask, user, taskPath, $"Exec[{i}]", command,
-                    context.Resolver.ResolveProgram(action.Command, action.Arguments, environment), task.Enabled));
+                    context.Resolver.ResolveProgram(action.Command, action.Arguments, environment, action.WorkingDirectory), task.Enabled));
             }
         }
     }

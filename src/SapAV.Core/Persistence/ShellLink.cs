@@ -48,6 +48,7 @@ public static class ShellLinkParser
     private const uint HasIconLocation = 0x40;
     private const uint IsUnicode = 0x80;
     private const uint ForceNoLinkInfo = 0x100;
+    private const uint HasExpString = 0x200;
     private const uint EnvironmentBlockSignature = 0xA0000001;
 
     private static readonly Guid LinkClsid = new("00021401-0000-0000-C000-000000000046");
@@ -148,7 +149,8 @@ public static class ShellLinkParser
             }
         }
 
-        string? environment = ParseExtraData(data, offset);
+        // MS-SHLLINK: without HasExpString the shell ignores the block, so a block alone must not decide the target.
+        string? environment = (flags & HasExpString) != 0 ? ParseExtraData(data, offset) : null;
         return new ShellLinkInfo(idListPath, idListUnsupported, linkInfoPath, share, environment, relative, workingDir, arguments);
     }
 
@@ -391,36 +393,55 @@ public static class ShellLinkParser
 /// <summary>The target a shell link runs, chosen as the shell does, with the disagreement between its sources noted.</summary>
 /// <param name="Path">The chosen target (unexpanded sources expanded), not yet normalized; null when there is none.</param>
 /// <param name="Network">The target is on a network share (never resolved by the engine).</param>
-/// <param name="Mismatch">The ID list, LinkInfo and environment block name different files.</param>
-public sealed record ShellLinkTarget(string? Path, bool Network, bool Mismatch)
+/// <param name="Mismatch">The environment block, ID list, LinkInfo and network share name different files.</param>
+/// <param name="Others">The other files named (section C review H4): any of them may be what the shell ends up opening, so all are scanned.</param>
+public sealed record ShellLinkTarget(string? Path, bool Network, bool Mismatch, IReadOnlyList<string> Others)
 {
     /// <summary>
-    /// Order: the environment block (the shell rebuilds the target from it when present), the ID list (what the shell
-    /// opens), LinkInfo, then the relative path against <paramref name="linkFolder"/>.
+    /// Order: the environment block (the shell rebuilds the target from it when HasExpString says it counts), the ID list
+    /// (what the shell opens), LinkInfo, the network share, then the relative path against <paramref name="linkFolder"/>
+    /// (only when nothing else names a target: a moved shortcut's relative path is stale, which is no mismatch).
     /// </summary>
     public static ShellLinkTarget Select(ShellLinkInfo info, EnvironmentBlock environment, string linkFolder)
     {
         ArgumentNullException.ThrowIfNull(info);
         ArgumentNullException.ThrowIfNull(environment);
         string? expanded = info.EnvironmentTarget is { Length: > 0 } env ? environment.Expand(env, out _) : null;
-        var candidates = new[] { expanded, info.IdListPath, info.LinkInfoPath }.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
-        bool mismatch = candidates.Select(c => c!.TrimEnd('\\').ToUpperInvariant()).Distinct().Count() > 1;
-        if (candidates.Count > 0)
+        var named = new[] { expanded, info.IdListPath, info.LinkInfoPath, info.LinkInfoNetworkShare }.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!).ToList();
+        var distinct = named.DistinctBy(c => FoldedKey(c, environment), StringComparer.Ordinal).ToArray();
+        if (distinct.Length > 0)
         {
-            string chosen = candidates[0]!;
-            return new ShellLinkTarget(chosen, chosen.StartsWith(@"\\", StringComparison.Ordinal), mismatch);
-        }
-
-        if (info.LinkInfoNetworkShare is { } share)
-        {
-            return new ShellLinkTarget(share, true, mismatch);
+            string chosen = distinct[0];
+            return new ShellLinkTarget(chosen, chosen.StartsWith(@"\\", StringComparison.Ordinal), distinct.Length > 1, distinct[1..]);
         }
 
         if (info.RelativePath is { Length: > 0 } relative && !relative.StartsWith(@"\\", StringComparison.Ordinal))
         {
-            return new ShellLinkTarget(System.IO.Path.Join(linkFolder, relative), false, mismatch);
+            return new ShellLinkTarget(System.IO.Path.Join(linkFolder, relative), false, false, []);
         }
 
-        return new ShellLinkTarget(null, false, mismatch);
+        return new ShellLinkTarget(null, false, false, []);
+    }
+
+    /// <summary>
+    /// The comparison key: case-insensitive, no trailing slash, and the 32-bit and 64-bit Program Files / system folders count as
+    /// one (a 32-bit installer's <c>%ProgramFiles%</c> block expands to the other one here, which is no sign of tampering).
+    /// </summary>
+    private static string FoldedKey(string path, EnvironmentBlock environment)
+    {
+        const string Separator = @"\";
+        string key = path.TrimEnd(Separator[0]);
+        if (environment.Get("ProgramFiles(x86)") is { Length: > 0 } x86 && environment.Get("ProgramFiles") is { Length: > 0 } programFiles)
+        {
+            key = key.Replace(x86.TrimEnd(Separator[0]), programFiles.TrimEnd(Separator[0]), StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (environment.SystemRoot is { } root)
+        {
+            string windows = root.TrimEnd(Separator[0]);
+            key = key.Replace(windows + @"\SysWOW64", windows + @"\System32", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return key.ToUpperInvariant();
     }
 }

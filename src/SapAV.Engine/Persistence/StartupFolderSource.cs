@@ -171,21 +171,31 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             return (itemPath, ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable));
         }
 
+        if (info.Truncated)
+        {
+            context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, PersistenceIssueReason.LimitReached,
+                "The shortcut holds more text than the sandboxed parser returns; the rest wasn't read.");
+        }
+
         var target = ShellLinkTarget.Select(info, environment, display);
         string arguments = info.Arguments ?? string.Empty;
         string command = target.Path is null ? itemPath : $"\"{target.Path}\" {arguments}".TrimEnd();
         var extra = target.Mismatch ? new[] { ResolutionFlag.ShortcutTargetMismatch } : [];
-        if (target.Network)
-        {
-            return (command, ResolvedCommand.Unresolved(TargetUnresolvedReason.NetworkPath, arguments: arguments, flags: [ResolutionFlag.RemotePayload, .. extra]));
-        }
-
         if (target.Path is null)
         {
             return (command, ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable, flags: extra));
         }
 
-        var resolved = context.Resolver.ResolveProgram("\"" + target.Path + "\"", arguments, environment);
+        ResolvedCommand One(string path) => path.StartsWith(@"\\", StringComparison.Ordinal) && !path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            ? ResolvedCommand.Unresolved(TargetUnresolvedReason.NetworkPath, arguments: arguments, flags: [ResolutionFlag.RemotePayload])
+            : context.Resolver.ResolveProgram("\"" + path + "\"", arguments, environment, info.WorkingDirectory);
+
+        var resolved = One(target.Path);
+        if (target.Others.Count > 0)
+        {
+            resolved = resolved.WithAdditional(target.Others.Select(One)); // section C review H4: any of them may be what runs
+        }
+
         return (command, extra.Length > 0 ? resolved.WithFlags(extra) : resolved);
     }
 }

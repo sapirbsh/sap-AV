@@ -57,13 +57,14 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
         };
 
         var result = scanner.ScanAsync(collection, options, context.CancellationToken).GetAwaiter().GetResult();
-        foreach (var finding in result.Findings.Where(f => f.Verdict != Verdict.Clean))
+        foreach (var finding in result.Findings.Where(f => f.Outcome != PersistenceOutcome.Clean))
         {
             context.AddFinding(ScanFinding.From(finding));
         }
 
         int detections = result.Findings.Count(f => f.Verdict != Verdict.Clean);
-        context.Note($"{result.Findings.Count} autostart entries, {detections} flagged, {result.FilesScanned} target files scanned.");
+        int unverified = result.Findings.Count(f => f.Outcome == PersistenceOutcome.Unverified);
+        context.Note($"{result.Findings.Count} autostart entries, {detections} flagged, {unverified} unverified, {result.FilesScanned} target files scanned.");
         foreach (var group in result.Issues.GroupBy(i => i.Reason).OrderBy(g => g.Key))
         {
             context.Note($"{group.Count()} location(s) not fully collected: {group.Key}.");
@@ -72,6 +73,11 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
         if (result.Issues.Any(i => i.Reason is PersistenceIssueReason.TimeBudgetExceeded or PersistenceIssueReason.LimitReached))
         {
             context.MarkIncomplete("The autostart collection hit its time budget or a cap.");
+        }
+
+        if (result.Findings.Any(f => f.Judgement.IsUnverified))
+        {
+            context.MarkIncomplete($"{result.Findings.Count(f => f.Judgement.IsUnverified)} autostart entries run something that could not be scanned.");
         }
 
         if (skippedByBudget > 0)

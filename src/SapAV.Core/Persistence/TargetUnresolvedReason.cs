@@ -51,4 +51,7 @@ public enum TargetUnresolvedReason
 
     /// <summary>Hosts nested deeper than the resolver follows (<c>cmd /c cmd /c …</c>).</summary>
     NestingTooDeep,
+
+    /// <summary>The probe or candidate cap ran out before the search order did, so the target is unknown (not known missing).</summary>
+    SearchLimitReached,
 }

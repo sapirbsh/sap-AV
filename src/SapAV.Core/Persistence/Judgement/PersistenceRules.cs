@@ -30,8 +30,10 @@ namespace SapAV.Core.Persistence;
 /// <item><term><see cref="UnquotedPathRule"/></term><description>a shorter path users can create: machine-wide 60 (strong),
 /// per-user 30 (T1574.009); otherwise 5 (weak)</description></item>
 /// <item><term><see cref="HostRule"/></term><description>host (weak): rundll32 / cmd 10, regsvr32 / powershell / script host 20,
-/// mshta 40; inline code: mshta / rundll32 script 60 (strong), powershell 30, other 20; remote payload 60 (strong)</description></item>
+/// mshta 40; inline code: mshta / rundll32 script 60 (strong), powershell 30 (hidden window + encoded command 60, strong), other 20;
+/// remote payload, or a UNC / device target 60 (strong)</description></item>
 /// <item><term><see cref="ComOverrideRule"/></term><description>a task's COM handler from the user's own classes: 60 (strong, T1546.015)</description></item>
+/// <item><term><see cref="ShortcutMismatchRule"/></term><description>a shortcut whose sources name different files: 60 (strong)</description></item>
 /// </list>
 /// </remarks>
 public static class PersistenceRules
@@ -63,7 +65,7 @@ public static class PersistenceRules
     public static IReadOnlyList<IPersistenceRule> Default { get; } =
     [
         new TargetScanRule(), new LocationRule(), new SignatureRule(), new IfeoRule(), new WinlogonRule(), new MissingTargetRule(),
-        new UnquotedPathRule(), new HostRule(), new ComOverrideRule(),
+        new UnquotedPathRule(), new HostRule(), new ComOverrideRule(), new ShortcutMismatchRule(),
     ];
 
     /// <summary>
@@ -112,7 +114,7 @@ public static class PersistenceRules
     }
 
     /// <summary>Malicious / Suspicious target or host scan results are carried over (detections keep their own technique).</summary>
-    public sealed class TargetScanRule : IPersistenceRule
+    public sealed class TargetScanRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -127,17 +129,56 @@ public static class PersistenceRules
                 }
             }
 
-            if (context.TargetPath is not null && !context.TargetMissing
-                && (context.Target is null || context.Target.Result.Status != Models.ScanStatus.Scanned))
+            if (context.TargetMissing)
             {
-                string why = context.Target is null ? "it wasn't scanned" : $"it couldn't be scanned ({context.Target.Result.Status})";
-                context.Add(PersistenceRuleIds.TargetNotScanned, 0, $"The autostart target {context.TargetName} has no verdict: {why}.");
+                return; // confirmed: nothing to scan
+            }
+
+            if (context.TargetPath is null)
+            {
+                NoTarget(context);
+            }
+            else if (context.Target is null || context.Target.Result.Status != Models.ScanStatus.Scanned)
+            {
+                NotScanned(context);
+            }
+        }
+
+        /// <summary>Section C review H4: nothing resolved, and nothing says nothing runs: that is Unverified, never Clean.</summary>
+        private static void NoTarget(PersistenceRuleContext context)
+        {
+            var reason = context.Entry.Resolution.UnresolvedReason;
+            if (reason is TargetUnresolvedReason.EmptyCommand or TargetUnresolvedReason.ComClassNotRegistered)
+            {
+                return; // nothing runs
+            }
+
+            context.AddUnverified($"What this entry runs isn't known or has no file to scan ({reason}).");
+        }
+
+        private static void NotScanned(PersistenceRuleContext context)
+        {
+            var report = context.Target;
+            string why = report is null ? "it wasn't scanned" : $"it couldn't be scanned ({report.Result.Status})";
+            context.Add(PersistenceRuleIds.TargetNotScanned, 0, $"The autostart target {context.TargetName} has no verdict: {why}.");
+            context.AddUnverified($"{context.TargetName}: {why}.");
+
+            // A program that SYSTEM can't read or reach, but that the entry still starts, is a signal by itself.
+            string? unreadable = report?.Hash.FailureReason switch
+            {
+                HashFailureReason.AccessDenied => "its permissions deny the scanner",
+                HashFailureReason.NotRegularFile => "it is behind a link or isn't a regular local file",
+                _ => null,
+            };
+            if (unreadable is not null)
+            {
+                context.Add(PersistenceRuleIds.TargetUnreadable, 20, $"The autostart target {context.TargetName} can't be scanned: {unreadable}");
             }
         }
     }
 
     /// <summary>Where the target lives: who can write it (ACL) and how risky the folder is (name), weighted by scope.</summary>
-    public sealed class LocationRule : IPersistenceRule
+    public sealed class LocationRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -189,7 +230,7 @@ public static class PersistenceRules
     }
 
     /// <summary>An unsigned or badly signed program that starts automatically: a weak signal that needs company.</summary>
-    public sealed class SignatureRule : IPersistenceRule
+    public sealed class SignatureRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -270,7 +311,8 @@ public static class PersistenceRules
             bool isDefault = first && context.TargetPath is { } target && (expected is null
                 ? string.Equals(Path.GetFileName(target), expectedName, StringComparison.OrdinalIgnoreCase)
                 : string.Equals(ExactPath.StripPrefix(target), expected, StringComparison.OrdinalIgnoreCase));
-            if (isDefault)
+            // Review C M9: the default has no arguments and nothing else to run ("explorer.exe /x" isn't the default shell).
+            if (isDefault && string.IsNullOrWhiteSpace(context.Entry.Resolution.Arguments) && context.Entry.Resolution.Additional.Count == 0)
             {
                 return;
             }
@@ -284,7 +326,7 @@ public static class PersistenceRules
     }
 
     /// <summary>A dangling autostart: harmless until someone creates the missing file, so the ACL decides.</summary>
-    public sealed class MissingTargetRule : IPersistenceRule
+    public sealed class MissingTargetRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -307,7 +349,7 @@ public static class PersistenceRules
     }
 
     /// <summary>An unquoted path with spaces is a hijack only if a standard user can create one of the shorter paths.</summary>
-    public sealed class UnquotedPathRule : IPersistenceRule
+    public sealed class UnquotedPathRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -335,7 +377,7 @@ public static class PersistenceRules
     /// A system host runs the payload (rundll32, regsvr32, cmd, powershell, script hosts, mshta): a basic signal now; E4 adds
     /// the decoding rules (encoded PowerShell, mshta / rundll32 from user folders).
     /// </summary>
-    public sealed class HostRule : IPersistenceRule
+    public sealed class HostRule : IPersistenceTargetRule
     {
         public void Evaluate(PersistenceRuleContext context)
         {
@@ -367,17 +409,34 @@ public static class PersistenceRules
             if (flags.HasFlag(ResolutionFlag.InlineCommand))
             {
                 bool script = host is "mshta.exe" or "rundll32.exe";
-                int points = script ? 60 : host is "powershell.exe" or "pwsh.exe" ? 30 : 20;
-                context.Add(PersistenceRuleIds.InlineCommand, points,
-                    $"{(host ?? "The host")} runs inline {(script ? "script" : "commands")} from the autostart entry itself (no file to scan)",
-                    technique, script ? S.Strong : S.Normal);
+                bool stealth = flags.HasFlag(ResolutionFlag.HiddenWindow) && flags.HasFlag(ResolutionFlag.EncodedCommand);
+                int points = script || stealth ? 60 : host is "powershell.exe" or "pwsh.exe" ? 30 : 20;
+                context.Add(PersistenceRuleIds.InlineCommand, points, stealth
+                    ? $"{host ?? "The host"} runs an encoded command in a hidden window from the autostart entry itself (no file to scan)"
+                    : $"{host ?? "The host"} runs inline {(script ? "script" : "commands")} from the autostart entry itself (no file to scan)",
+                    technique, script || stealth ? S.Strong : S.Normal);
             }
 
             if (flags.HasFlag(ResolutionFlag.RemotePayload))
             {
                 string? remote = host is "regsvr32.exe" ? MitreTechniqueIds.Regsvr32 : host is "mshta.exe" ? MitreTechniqueIds.Mshta : null;
-                context.Add(PersistenceRuleIds.RemotePayload, 60,
-                    $"{(host ?? "The entry")} loads its payload from the network at every start", remote, S.Strong);
+                string reason = context.Entry.Resolution.UnresolvedReason == TargetUnresolvedReason.DevicePath
+                    ? $"{host ?? "The entry"} runs a device path at every start, where no file can be scanned"
+                    : $"{host ?? "The entry"} loads its payload from the network at every start";
+                context.Add(PersistenceRuleIds.RemotePayload, 60, reason, remote, S.Strong);
+            }
+        }
+    }
+
+    /// <summary>A shortcut whose sources name different files: what it shows isn't necessarily what it runs. Every candidate is scanned.</summary>
+    public sealed class ShortcutMismatchRule : IPersistenceRule
+    {
+        public void Evaluate(PersistenceRuleContext context)
+        {
+            if (context.Entry.Resolution.HasFlag(ResolutionFlag.ShortcutTargetMismatch))
+            {
+                context.Add(PersistenceRuleIds.ShortcutTargetMismatch, 60,
+                    "The shortcut's target differs between its sources, so what it shows may not be what it runs", MitreTechniqueIds.ShortcutModification, S.Strong);
             }
         }
     }

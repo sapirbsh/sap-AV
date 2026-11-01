@@ -24,6 +24,9 @@ internal sealed class ShellLinkBuilder
 
     public string? EnvironmentTarget { get; init; }
 
+    /// <summary>Writes the environment block but leaves HasExpString off: the shell ignores such a block.</summary>
+    public bool OmitHasExpString { get; init; }
+
     public byte[] Build()
     {
         uint flags = 0x80; // IsUnicode
@@ -56,7 +59,7 @@ internal sealed class ShellLinkBuilder
 
         if (EnvironmentTarget is not null)
         {
-            flags |= 0x200;
+            flags |= OmitHasExpString ? 0u : 0x200u;
             var block = new byte[0x314];
             BitConverter.GetBytes(0x314u).CopyTo(block, 0);
             BitConverter.GetBytes(0xA0000001u).CopyTo(block, 4);

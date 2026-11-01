@@ -35,7 +35,8 @@ public enum ResolutionFlag
     InlineCommand,
 
     /// <summary>
-    /// The host fetches its payload from the network (<c>mshta http://</c>, <c>regsvr32 /i:http://</c>), or a shortcut
+    /// The payload is outside this machine's file system: the host fetches it from the network (<c>mshta http://</c>,
+    /// <c>regsvr32 /i:http://</c>), or any target is a UNC or device path, or a shortcut
     /// points at a network path.
     /// </summary>
     RemotePayload,
@@ -54,4 +55,13 @@ public enum ResolutionFlag
 
     /// <summary>A COM handler's class was taken from the user's own <c>Software\Classes</c>, which overrides the machine registration (T1546.015).</summary>
     UserComOverride,
+
+    /// <summary>A bare name was found in the entry's working directory (a task's or shortcut's), which CreateProcess searches before the system.</summary>
+    ResolvedFromWorkingDirectory,
+
+    /// <summary>PowerShell is started with a hidden window (<c>-WindowStyle Hidden</c> and its prefixes).</summary>
+    HiddenWindow,
+
+    /// <summary>PowerShell runs a Base64-encoded command (<c>-EncodedCommand</c> and its prefixes).</summary>
+    EncodedCommand,
 }

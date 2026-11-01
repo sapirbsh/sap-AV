@@ -31,12 +31,31 @@ public enum PersistencePriority
     High,
 }
 
+/// <summary>What a judged autostart entry is (section C review H4). Serialized to JSON by name.</summary>
+[JsonConverter(typeof(StrictEnumConverter<PersistenceOutcome>))]
+public enum PersistenceOutcome
+{
+    /// <summary>Everything it runs was scanned (or is known to be missing), and nothing was found.</summary>
+    Clean,
+
+    /// <summary>
+    /// No detection, but something it runs has no scan result: no resolvable target, a network or device path, a command line
+    /// the resolver can't follow, a file that couldn't be opened or wasn't reached. Never reported as Clean.
+    /// </summary>
+    Unverified,
+
+    Suspicious,
+    Malicious,
+}
+
 /// <summary>Stable IDs of the C3 rules' signals (UI, tests and E4's added rules key on them).</summary>
 public static class PersistenceRuleIds
 {
     public const string TargetDetection = "target-detection";
     public const string HostDetection = "host-detection";
     public const string TargetNotScanned = "target-not-scanned";
+    public const string TargetUnreadable = "target-unreadable";
+    public const string ShortcutTargetMismatch = "shortcut-target-mismatch";
     public const string TargetUserModifiable = "target-user-modifiable";
     public const string TargetFolderUserWritable = "target-folder-user-writable";
     public const string TargetInUserFolder = "target-in-user-folder";
@@ -105,14 +124,18 @@ public sealed record PersistenceSignal
 /// a results row is built from.
 /// </summary>
 /// <remarks>
-/// <see cref="Verdict"/> is Malicious only when the target (or host) scan was Malicious (blocklist, YARA, VirusTotal):
-/// the entry rules alone give at most Suspicious (score at or over <see cref="Threshold"/>), so false positives stay low.
+/// <para><see cref="Verdict"/> is Malicious only when the target (or host) scan was Malicious (blocklist, YARA, VirusTotal):
+/// the entry rules alone give at most Suspicious (score at or over <see cref="Threshold"/>), so false positives stay low.</para>
+/// <para><b>Clean means scanned</b> (section C review H4): <see cref="Verdict"/> Clean only says the entry has no detection.
+/// What the entry is, including whether anything it runs went unscanned, is <see cref="Outcome"/>; read that one.</para>
 /// </remarks>
 public sealed record PersistenceJudgement
 {
+    public const int MaxUnverifiedReasons = 8;
+
     public PersistenceJudgement(
         Verdict verdict, int score, int threshold, PersistencePriority priority, string techniqueId, IReadOnlyList<string> secondaryTechniqueIds,
-        IReadOnlyList<PersistenceSignal> signals, IReadOnlyList<Detection> detections)
+        IReadOnlyList<PersistenceSignal> signals, IReadOnlyList<Detection> detections, IReadOnlyList<string>? unverifiedReasons = null)
     {
         if (!Enum.IsDefined(verdict) || !Enum.IsDefined(priority))
         {
@@ -136,9 +159,26 @@ public sealed record PersistenceJudgement
         SecondaryTechniqueIds = Array.AsReadOnly(secondaryTechniqueIds.ToArray());
         Signals = Array.AsReadOnly(signals.ToArray());
         Detections = Array.AsReadOnly(detections.ToArray());
+        UnverifiedReasons = Array.AsReadOnly((unverifiedReasons ?? []).Select(r => SafeText.SingleLine(r, PersistenceSignal.MaxReasonLength))
+            .Distinct(StringComparer.Ordinal).Take(MaxUnverifiedReasons).ToArray());
     }
 
+    /// <summary>The detections' worst verdict; Clean when there are none, which doesn't mean verified: see <see cref="Outcome"/>.</summary>
     public Verdict Verdict { get; }
+
+    /// <summary>Why something this entry runs has no scan result (no target, not scanned, unreadable, ...); empty when all of it was scanned.</summary>
+    public IReadOnlyList<string> UnverifiedReasons { get; }
+
+    /// <summary>Something this entry runs has no scan result and isn't known to be missing.</summary>
+    public bool IsUnverified => UnverifiedReasons.Count > 0;
+
+    /// <summary>What the entry is: a detection wins; without one, Unverified is distinct from Clean.</summary>
+    public PersistenceOutcome Outcome => Verdict switch
+    {
+        Verdict.Malicious => PersistenceOutcome.Malicious,
+        Verdict.Suspicious => PersistenceOutcome.Suspicious,
+        _ => IsUnverified ? PersistenceOutcome.Unverified : PersistenceOutcome.Clean,
+    };
 
     /// <summary>The sum of the signals' scores.</summary>
     public int Score { get; }
@@ -180,6 +220,9 @@ public sealed record PersistenceJudgement
 public sealed record PersistenceFinding(PersistenceEntry Entry, PersistenceJudgement Judgement, ScanResult? Target, ScanResult? Host)
 {
     public Verdict Verdict => Judgement.Verdict;
+
+    /// <summary>What the entry is; Unverified when something it runs has no scan result (never Clean).</summary>
+    public PersistenceOutcome Outcome => Judgement.Outcome;
 
     /// <summary>The alert raised for it, if any.</summary>
     public Guid? AlertId { get; init; }

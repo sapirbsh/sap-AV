@@ -187,14 +187,15 @@ internal static class PipeMapping
             reasons = forAdmin
                 ? judgement.Reasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray()
                 : judgement.Detections.Where(d => d.Source != Core.Models.DetectionSource.Persistence).Select(ReasonTemplate)
-                    .Concat(rules.Select(r => $"{f.Verdict}: the autostart check '{r}' scored."))
+                    .Concat(rules.Select(r => $"{f.Verdict?.ToString() ?? judgement.Outcome.ToString()}: the autostart check '{r}' scored."))
                     .Take(MaxReasons).ToArray();
             var entry = p.Entry;
             persistence = new PersistenceFindingInfo(entry.Kind, entry.IsMachineScope, forAdmin ? entry.UserSid : null, WirePath.From(entry.Location),
                 entry.ValueName is null ? null : WirePath.From(entry.ValueName),
                 forAdmin ? WirePath.From(entry.CommandLine) : null,
                 entry.Resolution.TargetPath is { } target ? WirePath.From(target) : null,
-                entry.Enabled, rules, p.Target?.Verdict);
+                entry.Enabled, rules, p.Target?.Verdict, judgement.Outcome,
+                forAdmin ? judgement.UnverifiedReasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray() : []);
         }
 
         return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence);
