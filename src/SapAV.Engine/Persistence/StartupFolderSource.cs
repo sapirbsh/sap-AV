@@ -1,4 +1,5 @@
 using Microsoft.Win32.SafeHandles;
+using SapAV.Core.Scanning.Isolation;
 using SapAV.Core.Persistence;
 using SapAV.Engine.Scanning;
 using CorePersistenceText = SapAV.Core.Persistence.PersistenceText;
@@ -7,7 +8,7 @@ namespace SapAV.Engine.Persistence;
 
 /// <summary>
 /// Startup folders (ROADMAP C2): the all-users folder and each user profile's, top level only (Explorer runs only those
-/// items). Listed with <see cref="SafeTree"/> (no link followed). A <c>.lnk</c> is resolved by <see cref="ShellLinkParser"/>
+/// items). Listed with <see cref="SafeTree"/> (no link followed). A <c>.lnk</c> is parsed by <see cref="ShellLinkParser"/> in the sandboxed worker
 /// (never through the shell); any other file (exe, bat, vbs, url...) is itself the target. A symlink or junction in the
 /// folder is reported with <see cref="TargetUnresolvedReason.LinkNotFollowed"/>. Items turned off in Task Manager
 /// (<c>StartupApproved\StartupFolder</c>) are reported with Enabled false.
@@ -152,15 +153,21 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
                 : ResolvedCommand.Unresolved(TargetUnresolvedReason.Malformed));
         }
 
-        var bytes = SafeFolderReader.ReadFile(folder, item.Name, ShellLinkParser.MaxSize, out var failure, out var message);
-        var info = bytes is null ? null : ShellLinkParser.Parse(bytes, out var error);
-        if (info is null)
+        using var file = SafeFolderReader.OpenForParsing(folder, item.Name, ShellLinkParser.MaxSize, out var failure, out var message);
+        if (file is null)
         {
-            if (bytes is null)
-            {
-                context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, failure, message);
-            }
+            context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, failure, message);
+            return (itemPath, ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable));
+        }
 
+        var parsed = context.Parse(file, WorkerParseKind.ShellLink, itemPath, PersistenceKind.StartupFolder);
+        if (parsed.Status == PersistenceParseStatus.Malformed)
+        {
+            context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, PersistenceIssueReason.Malformed, parsed.Message ?? "The shortcut can't be parsed.");
+        }
+
+        if (parsed.Link is not { } info)
+        {
             return (itemPath, ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable));
         }
 

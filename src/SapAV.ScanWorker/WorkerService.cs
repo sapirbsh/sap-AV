@@ -32,6 +32,7 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             {
                 WorkerRequestKind.LoadRules when request.LoadRules is { } rules => await LoadRulesAsync(request.Id, rules).ConfigureAwait(false),
                 WorkerRequestKind.Scan when request.Scan is { } scan => await ScanAsync(request.Id, scan).ConfigureAwait(false),
+                WorkerRequestKind.Parse when request.Parse is { } parse => Parse(request.Id, parse),
                 WorkerRequestKind.Probe when request.Probe is { } probe => Probe(request.Id, probe),
                 _ => Failed(request.Id, $"The {request.Kind} request has no matching body."),
             };
@@ -50,6 +51,7 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
         Rules = null,
         Report = null,
         Probe = null,
+        Parsed = null,
         Error = SafeText.SingleLine(error, WorkerLimits.MaxTextLength) is { Length: > 0 } e ? e : "error",
     };
 
@@ -88,6 +90,7 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             },
             Report = null,
             Probe = null,
+            Parsed = null,
             Error = null,
         };
     }
@@ -132,6 +135,54 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             Rules = null,
             Report = WireReportCodec.ToWire(report),
             Probe = null,
+            Parsed = null,
+            Error = null,
+        };
+    }
+
+    /// <summary>Review C H2: parses a brokered shortcut or task definition here, never in the engine.</summary>
+    private WorkerResponse Parse(long id, WorkerParseRequest parse)
+    {
+        if (parse.TestFault != WorkerTestFault.None)
+        {
+            if (!TestHooksEnabled)
+            {
+                return Failed(id, "Test faults are disabled in this worker.");
+            }
+
+            TestHooks.Inject(parse.TestFault);
+        }
+
+        // Not owned here: the broker closes this handle value in this process after the response.
+        using var file = new SafeFileHandle((IntPtr)parse.FileHandle, ownsHandle: false);
+        long length = RandomAccess.GetLength(file);
+        int cap = WireParsedFileCodec.MaxFileBytes(parse.Kind);
+        if (length > cap)
+        {
+            return Failed(id, $"The file is {length} bytes, over the {cap}-byte cap.");
+        }
+
+        var content = new byte[length];
+        int read = 0;
+        while (read < content.Length)
+        {
+            int n = RandomAccess.Read(file, content.AsSpan(read), read);
+            if (n <= 0)
+            {
+                break;
+            }
+
+            read += n;
+        }
+
+        return new WorkerResponse
+        {
+            Id = id,
+            Kind = WorkerResponseKind.Parsed,
+            Rules = null,
+            Report = null,
+            Probe = null,
+            Parsed = WireParsedFileCodec.ParseInWorker(parse.Kind, read == content.Length ? content : content[..read]),
             Error = null,
         };
     }
@@ -150,6 +201,7 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             Rules = null,
             Report = null,
             Probe = SandboxProbes.Run(probe),
+            Parsed = null,
             Error = null,
         };
     }

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security;
+using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Persistence;
+using SapAV.Core.Scanning.Isolation;
 
 namespace SapAV.Engine.Persistence;
 
@@ -40,7 +42,7 @@ internal sealed class PersistenceContext
 
     public PersistenceContext(
         IRegistryView registry, CommandLineResolver resolver, EnvironmentBlock machine, IReadOnlyList<UserProfile> users,
-        PersistenceLimits limits, CancellationToken cancellationToken, Stopwatch? clock = null)
+        PersistenceLimits limits, CancellationToken cancellationToken, Stopwatch? clock = null, IPersistenceFileParser? parser = null)
     {
         Registry = registry;
         Resolver = resolver;
@@ -49,6 +51,7 @@ internal sealed class PersistenceContext
         Limits = limits;
         CancellationToken = cancellationToken;
         _clock = clock ?? Stopwatch.StartNew();
+        Parser = parser ?? UnavailablePersistenceParser.NoSandbox;
     }
 
     public IRegistryView Registry { get; }
@@ -62,6 +65,12 @@ internal sealed class PersistenceContext
     public PersistenceLimits Limits { get; }
 
     public CancellationToken CancellationToken { get; }
+
+    /// <summary>Where shortcuts and task definitions get parsed: the sandboxed worker, never this process.</summary>
+    public IPersistenceFileParser Parser { get; }
+
+    /// <summary>The parser reported Unavailable in this collection: the rest is not sent to it (and reported once).</summary>
+    public bool ParserDown { get; private set; }
 
     public IReadOnlyList<PersistenceEntry> Entries => _entries;
 
@@ -109,6 +118,28 @@ internal sealed class PersistenceContext
         }
 
         _entries.Add(entry);
+    }
+
+    /// <summary>
+    /// One definition file through the sandboxed parser (blocking: collectors run on a scan thread). The first Unavailable
+    /// adds a <see cref="PersistenceIssueReason.ParserUnavailable"/> issue, and later files aren't sent: an unavailable
+    /// worker can't cost a restart wait per file. Files are never parsed in this process instead.
+    /// </summary>
+    public PersistenceParseResult Parse(SafeFileHandle file, WorkerParseKind kind, string displayPath, PersistenceKind entryKind)
+    {
+        if (ParserDown)
+        {
+            return PersistenceParseResult.Unavailable("The sandboxed parser isn't available.");
+        }
+
+        var result = Parser.ParseAsync(file, kind, displayPath, CancellationToken).GetAwaiter().GetResult();
+        if (result.Status == PersistenceParseStatus.Unavailable)
+        {
+            ParserDown = true;
+            AddIssue(entryKind, null, displayPath, PersistenceIssueReason.ParserUnavailable, $"{result.Message} What was left of this source was not collected.");
+        }
+
+        return result;
     }
 
     public void AddIssue(PersistenceKind? kind, string? userSid, string location, PersistenceIssueReason reason, string message)

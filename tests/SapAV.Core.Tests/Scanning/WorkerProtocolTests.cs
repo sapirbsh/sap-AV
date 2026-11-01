@@ -75,19 +75,19 @@ public sealed class WorkerProtocolTests : IDisposable
 
     // ---- Strict JSON ----
 
-    private const string ValidFailed = """{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Error":"x"}""";
+    private const string ValidFailed = """{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x"}""";
 
     [Fact]
     public void Json_ValidResponse_Parses() =>
         Assert.Equal(WorkerResponseKind.Failed, WorkerJson.Deserialize<WorkerResponse>(Encoding.UTF8.GetBytes(ValidFailed)).Kind);
 
     [Theory]
-    [InlineData("""{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Error":"x","Extra":1}""")] // unknown property
-    [InlineData("""{"Id":7,"Id":8,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Error":"x"}""")] // duplicate property
-    [InlineData("""{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null}""")] // missing required
-    [InlineData("""{"Id":7,"Kind":3,"Rules":null,"Report":null,"Probe":null,"Error":"x"}""")] // numeric enum
-    [InlineData("""{"Id":"7","Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Error":"x"}""")] // number as string
-    [InlineData("""{"Id":7,"Kind":"failed","Rules":null,"Report":null,"Probe":null,"Error":"x"}""")] // enum case
+    [InlineData("""{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x","Extra":1}""")] // unknown property
+    [InlineData("""{"Id":7,"Id":8,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x"}""")] // duplicate property
+    [InlineData("""{"Id":7,"Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Parsed":null}""")] // missing required
+    [InlineData("""{"Id":7,"Kind":3,"Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x"}""")] // numeric enum
+    [InlineData("""{"Id":"7","Kind":"Failed","Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x"}""")] // number as string
+    [InlineData("""{"Id":7,"Kind":"failed","Rules":null,"Report":null,"Probe":null,"Parsed":null,"Error":"x"}""")] // enum case
     [InlineData("""{ this is not json""")]
     [InlineData("""null""")]
     public void Json_WrongSchemaOrMalformed_IsAProtocolError(string json) =>

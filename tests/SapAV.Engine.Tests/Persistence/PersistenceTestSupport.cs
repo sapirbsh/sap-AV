@@ -1,4 +1,6 @@
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
+using SapAV.Core.Scanning.Isolation;
 using SapAV.Core.Persistence;
 using SapAV.Engine.Persistence;
 
@@ -73,8 +75,31 @@ internal sealed class SetProbe(params string[] existing) : IPathProbe
 internal static class PersistenceTestExtensions
 {
     public static PersistenceCollection Collect(this RegistryTestRoot root, IPathProbe probe, params IPersistenceSource[] sources) =>
-        new PersistenceCollector(root.View, probe, sources).Collect();
+        new PersistenceCollector(root.View, probe, sources, parser: WireTestParser.Instance).Collect();
 
     public static PersistenceEntry Single(this PersistenceCollection collection, string valueName) =>
         Assert.Single(collection.Entries, e => e.ValueName == valueName);
+}
+
+/// <summary>
+/// A stand-in for the sandboxed worker for collector tests that aren't about the sandbox: reads the handle and runs the
+/// same worker entry point + engine validation, in the test process. The worker path itself is tested in
+/// <c>PersistenceParsingInWorkerTests</c>.
+/// </summary>
+internal sealed class WireTestParser : IPersistenceFileParser
+{
+    public static WireTestParser Instance { get; } = new();
+
+    public int Calls { get; private set; }
+
+    public Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken)
+    {
+        Calls++;
+        var content = new byte[RandomAccess.GetLength(file)];
+        int read = RandomAccess.Read(file, content, 0);
+        var parsed = WireParsedFileCodec.FromWire(WireParsedFileCodec.ParseInWorker(kind, content[..read]), kind);
+        return Task.FromResult(parsed.Error is { } error
+            ? PersistenceParseResult.Malformed(error)
+            : new PersistenceParseResult(PersistenceParseStatus.Parsed, parsed.Task, parsed.Link, null));
+    }
 }

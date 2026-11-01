@@ -17,7 +17,8 @@ public sealed record ShellLinkInfo(
     string? EnvironmentTarget,
     string? RelativePath,
     string? WorkingDirectory,
-    string? Arguments);
+    string? Arguments,
+    bool Truncated = false);
 
 /// <summary>
 /// A minimal, bounded parser of the shell link binary format ([MS-SHLLINK]) for the Startup folder collector (ROADMAP C2).

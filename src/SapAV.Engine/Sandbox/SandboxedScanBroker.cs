@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using Microsoft.Win32.SafeHandles;
+using SapAV.Engine.Persistence;
 using Microsoft.Extensions.Logging;
 using SapAV.Core.Hashing;
 using SapAV.Core.Mitre;
@@ -24,7 +26,7 @@ namespace SapAV.Engine.Sandbox;
 /// <see cref="SandboxOptions.MaxFailuresPerFile"/> times is reported Suspicious (T1211) and not sent to a worker again.
 /// Worker death never throws out of <see cref="ScanAsync"/>; only the caller's own cancellation does.
 /// </summary>
-internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
+internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenceFileParser, IDisposable
 {
     private readonly SandboxOptions _options;
     private readonly IScanRulesSource _rulesSource;
@@ -71,6 +73,9 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
     /// <summary>Test seam: a fault for the worker to inject while scanning this item (honored only with worker test hooks).</summary>
     internal Func<ScanItem, WorkerTestFault>? FaultInjector { get; set; }
 
+    /// <summary>Test seam: a fault for the worker to inject while parsing this path (honored only with worker test hooks).</summary>
+    internal Func<string, WorkerTestFault>? ParseFaultInjector { get; set; }
+
     /// <summary>Test seam: the pool.</summary>
     internal IReadOnlyList<WorkerSlot> Slots => _slots;
 
@@ -105,7 +110,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         var notes = new List<ScanNote>(openNotes);
 
-        string key = FailureKey(item, opened);
+        string key = FailureKey(item.Path, opened.Handle, opened.Identity);
         if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
         {
             return CrashedTheEngine(item, opened, notes, previous, "seen before; not sent to a worker again");
@@ -177,6 +182,141 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
             slot.Lock.Release();
             _idle.Return(slot, priority);
         }
+    }
+
+    /// <summary>
+    /// Section C review H2: one shortcut or task definition through the worker, on a read-only duplicate of
+    /// <paramref name="file"/>. The answer is validated like any worker output. A crash, hang or broken answer replaces the
+    /// worker and is a Malformed result; a file version that does that <see cref="SandboxOptions.MaxFailuresPerFile"/> times
+    /// isn't sent again. Only "no worker at all" is Unavailable (the file isn't to blame).
+    /// </summary>
+    public async Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(displayPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        string key = "parse:" + FailureKey(displayPath, file, FileIdentity.TryCapture(file));
+        if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
+        {
+            return PersistenceParseResult.Malformed($"This file crashed or hung the sandboxed parser {previous} times; it is not sent to a worker again.");
+        }
+
+        RulePackage package;
+        try
+        {
+            package = await CurrentPackageAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
+        {
+            _lastError = ex.Message;
+            return PersistenceParseResult.Unavailable($"The scan worker's rules can't be loaded ({ex.GetType().Name}).");
+        }
+
+        var slot = await RentAsync(ScanPriority.High, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            WorkerProcess worker;
+            try
+            {
+                worker = await slot.EnsureReadyAsync(package, cancellationToken).ConfigureAwait(false);
+            }
+            catch (WorkerRequestException ex)
+            {
+                _lastError = ex.Message;
+                return PersistenceParseResult.Unavailable($"The sandboxed scan worker is unavailable: {ex.Message}");
+            }
+
+            return await ParseInWorkerAsync(slot, worker, file, kind, displayPath, key, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            slot.Lock.Release();
+            _idle.Return(slot, ScanPriority.High);
+        }
+    }
+
+    private async Task<PersistenceParseResult> ParseInWorkerAsync(
+        WorkerSlot slot, WorkerProcess worker, SafeFileHandle file, WorkerParseKind kind, string displayPath, string key, CancellationToken cancellationToken)
+    {
+        IntPtr remote = IntPtr.Zero;
+        try
+        {
+            WorkerResponse response;
+            try
+            {
+                remote = worker.DuplicateInto(file, WorkerProcess.ReadOnlyFileAccess);
+                response = await slot.ParseAsync(new WorkerParseRequest
+                {
+                    Kind = kind,
+                    FileHandle = remote,
+                    TestFault = ParseFaultInjector?.Invoke(displayPath) ?? WorkerTestFault.None,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (!worker.HasExited)
+                {
+                    worker.CloseInWorker(remote);
+                }
+            }
+
+            switch (BrokeredHandles.Check(file))
+            {
+                case BrokeredHandleState.StillHeld:
+                    slot.Discard($"worker {slot.Index} kept a copy of a brokered file handle");
+                    throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation, "The scan worker kept a copy of the file handle; its answer was discarded.");
+
+                case BrokeredHandleState.Unknown:
+                    slot.Discard($"worker {slot.Index}: the brokered handle could not be checked");
+                    throw new WorkerRequestException(WorkerFailureKind.Unavailable, "The brokered file handle could not be checked; the worker's answer was discarded.");
+            }
+
+            if (response.Kind == WorkerResponseKind.Failed)
+            {
+                slot.Succeeded(); // the worker survived and said so
+                slot.CountFileAndMaybeRecycle();
+                return PersistenceParseResult.Malformed($"The sandboxed parser refused the file: {SafeText.SingleLine(response.Error ?? "?", WorkerLimits.MaxTextLength)}");
+            }
+
+            ParsedPersistenceFile parsed;
+            try
+            {
+                parsed = WireParsedFileCodec.FromWire(response.Parsed!, kind);
+            }
+            catch (WorkerProtocolException ex)
+            {
+                slot.Kill(); // never reuse a worker that sent bad content
+                return ParseFailed(key, displayPath, nameof(WorkerFailureKind.ProtocolViolation), ex.Message);
+            }
+
+            slot.Succeeded();
+            slot.CountFileAndMaybeRecycle();
+            return parsed.Error is { } error
+                ? PersistenceParseResult.Malformed(SafeText.SingleLine(error, WorkerLimits.MaxTextLength))
+                : new PersistenceParseResult(PersistenceParseStatus.Parsed, parsed.Task, parsed.Link, null);
+        }
+        catch (WorkerRequestException ex) when (ex.Kind == WorkerFailureKind.Unavailable)
+        {
+            _lastError = ex.Message; // the worker is to blame (or unknown), not the file
+            return PersistenceParseResult.Unavailable(ex.Message);
+        }
+        catch (WorkerRequestException ex)
+        {
+            return ParseFailed(key, displayPath, ex.Kind.ToString(), ex.Message);
+        }
+        catch (Win32Exception ex)
+        {
+            slot.Kill(); // the worker went away between the start check and the duplication: not the file's fault
+            return PersistenceParseResult.Unavailable($"The scan worker could not receive the file handle: {ex.Message}");
+        }
+    }
+
+    private PersistenceParseResult ParseFailed(string key, string displayPath, string kind, string message)
+    {
+        int count = _failures.Record(key);
+        _lastError = message;
+        _logger.LogWarning("Parsing {Path} failed in the sandboxed worker ({Kind}, {Count}/{Max}): {Message}", displayPath, kind, count, _options.MaxFailuresPerFile, message);
+        return PersistenceParseResult.Malformed($"The sandboxed parser failed on this file ({kind}, {count} time(s)): {message}");
     }
 
     public async Task<RulesLoadSummary?> ReloadRulesAsync(CancellationToken cancellationToken = default)
@@ -403,20 +543,20 @@ internal sealed class SandboxedScanBroker : IScanBroker, IDisposable
         };
     }
 
-    private static string FailureKey(ScanItem item, OpenedScanFile opened)
+    private static string FailureKey(string path, SafeFileHandle handle, FileIdentity? identity)
     {
         long length = -1;
         DateTime lastWrite = default;
         try
         {
-            length = RandomAccess.GetLength(opened.Handle);
-            lastWrite = File.GetLastWriteTimeUtc(opened.Handle);
+            length = RandomAccess.GetLength(handle);
+            lastWrite = File.GetLastWriteTimeUtc(handle);
         }
         catch (IOException)
         {
             // metadata only; the key just gets coarser
         }
 
-        return FileFailureTracker.Key(opened.Identity, item.Path, length, lastWrite);
+        return FileFailureTracker.Key(identity, path, length, lastWrite);
     }
 }

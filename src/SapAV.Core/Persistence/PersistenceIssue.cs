@@ -34,6 +34,9 @@ public enum PersistenceIssueReason
     /// <summary>The collection's time budget ran out.</summary>
     TimeBudgetExceeded,
 
+    /// <summary>The sandboxed worker that parses shortcuts and task definitions is not available; they were not collected.</summary>
+    ParserUnavailable,
+
     /// <summary>Any other failure (a source threw, an I/O error).</summary>
     Error,
 }

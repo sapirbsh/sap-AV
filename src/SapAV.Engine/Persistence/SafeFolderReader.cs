@@ -7,9 +7,10 @@ using N = SapAV.Engine.Quarantine.Native.QuarantineNative;
 namespace SapAV.Engine.Persistence;
 
 /// <summary>
-/// Folder listing and small-file reads for the Startup folder and scheduled task sources (ROADMAP C2), through
+/// Folder listing and small-file opens for the Startup folder and scheduled task sources (ROADMAP C2), through
 /// <see cref="SafeTree"/>: every component opened relative to its parent, no junction / symlink / mount point followed,
-/// no network path, no cloud recall. Files are read only when they are regular disk files under a size cap.
+/// no network path, no cloud recall. The engine never reads these files: it hands the opened handle to the sandboxed
+/// worker (<see cref="IPersistenceFileParser"/>, section C review H2).
 /// </summary>
 internal static class SafeFolderReader
 {
@@ -43,13 +44,14 @@ internal static class SafeFolderReader
     }
 
     /// <summary>
-    /// Reads a file listed in <paramref name="folder"/>, at most <paramref name="maxBytes"/>; null with the reason and a
-    /// message otherwise (too large, not a regular file, locked, denied).
+    /// Opens a file listed in <paramref name="folder"/> for parsing in the worker: a regular local file of at most
+    /// <paramref name="maxBytes"/>. Null with the reason and a message otherwise (too large, not a regular file, locked,
+    /// denied, an I/O error). Never throws for one file's problem (section C review M3).
     /// </summary>
-    public static byte[]? ReadFile(SafeFileHandle folder, string name, int maxBytes, out PersistenceIssueReason failure, out string message)
+    public static SafeFileHandle? OpenForParsing(SafeFileHandle folder, string name, int maxBytes, out PersistenceIssueReason failure, out string message)
     {
         failure = PersistenceIssueReason.Error;
-        using var handle = SafeTree.OpenChild(folder, name, N.GenericRead, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var why, out int error);
+        var handle = SafeTree.OpenChild(folder, name, N.GenericRead, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var why, out int error);
         if (handle is null)
         {
             failure = why switch
@@ -62,34 +64,32 @@ internal static class SafeFolderReader
             return null;
         }
 
-        if (!SecureFile.Validate(handle, out var invalid, out _))
+        try
         {
-            message = $"Not a regular local file ({invalid.Reason}).";
-            return null;
-        }
-
-        long length = RandomAccess.GetLength(handle);
-        if (length > maxBytes)
-        {
-            failure = PersistenceIssueReason.TooLarge;
-            message = $"The file is {length} bytes, over the {maxBytes}-byte cap.";
-            return null;
-        }
-
-        var buffer = new byte[length];
-        int read = 0;
-        while (read < buffer.Length)
-        {
-            int n = RandomAccess.Read(handle, buffer.AsSpan(read), read);
-            if (n <= 0)
+            if (!SecureFile.Validate(handle, out var invalid, out _))
             {
-                break;
+                message = $"Not a regular local file ({invalid.Reason}).";
+                handle.Dispose();
+                return null;
             }
 
-            read += n;
-        }
+            long length = RandomAccess.GetLength(handle);
+            if (length > maxBytes)
+            {
+                failure = PersistenceIssueReason.TooLarge;
+                message = $"The file is {length} bytes, over the {maxBytes}-byte cap.";
+                handle.Dispose();
+                return null;
+            }
 
-        message = string.Empty;
-        return read == buffer.Length ? buffer : buffer[..read];
+            message = string.Empty;
+            return handle;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            message = $"The file can't be read ({ex.GetType().Name}).";
+            handle.Dispose();
+            return null;
+        }
     }
 }

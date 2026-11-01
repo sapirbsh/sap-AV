@@ -32,7 +32,7 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
                 return 0; // the broker went away
             }
 
-            var fault = request.Scan?.TestFault ?? WorkerTestFault.None;
+            var fault = request.Scan?.TestFault ?? request.Parse?.TestFault ?? WorkerTestFault.None;
             if (fault != WorkerTestFault.None && service.TestHooksEnabled && TryWriteFaultyResponse(request, fault))
             {
                 continue;
@@ -76,7 +76,7 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
 
             case WorkerTestFault.WrongSchemaResponse:
                 WorkerFraming.Write(output, Encoding.UTF8.GetBytes(
-                    $$"""{"Id":{{request.Id}},"Kind":"Scanned","Rules":null,"Report":{"Verdict":"Clean"},"Probe":null,"Error":null}"""),
+                    $$"""{"Id":{{request.Id}},"Kind":"Scanned","Rules":null,"Report":{"Verdict":"Clean"},"Probe":null,"Parsed":null,"Error":null}"""),
                     WorkerLimits.MaxResponseBytes);
                 return true;
 

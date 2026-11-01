@@ -59,6 +59,60 @@ public class TaskXmlTests
     }
 
     [Fact]
+    public void DeepNesting_IsRejected_WithoutBuildingATree()
+    {
+        // Review C H2: 140,000 levels fit under the 1 MiB cap and overflowed XElement.Value. Rejected at the depth cap, even
+        // on a small stack: this isn't a recursive parse.
+        string xml = "<Task>" + string.Concat(Enumerable.Repeat("<a>", 140_000)) + string.Concat(Enumerable.Repeat("</a>", 140_000)) + "</Task>";
+        TaskDefinitionInfo? task = new(true, null, []);
+        string? error = null;
+        var thread = new Thread(() => task = TaskXml.Parse(Encoding.UTF8.GetBytes(xml), out error), maxStackSize: 256 * 1024);
+
+        thread.Start();
+        thread.Join();
+
+        Assert.Null(task);
+        Assert.Contains("nested", error);
+    }
+
+    [Fact]
+    public void AtTheDepthCap_TheDocumentStillParses_AndOnlyTheFirstOfEachSectionCounts()
+    {
+        string padding = string.Concat(Enumerable.Repeat("<a>", TaskXml.MaxDepth - 2)) + string.Concat(Enumerable.Repeat("</a>", TaskXml.MaxDepth - 2));
+        string xml = $"""
+            <Task>
+              <x>{padding}</x>
+              <Settings><Enabled> false </Enabled><Enabled>true</Enabled></Settings>
+              <Principals><Principal><UserId>first</UserId></Principal><Principal><UserId>second</UserId></Principal></Principals>
+              <Actions><Exec><Command>a.exe</Command><Command>ignored.exe</Command></Exec></Actions>
+              <Actions><Exec><Command>second-section.exe</Command></Exec></Actions>
+            </Task>
+            """;
+
+        var task = TaskXml.Parse(Encoding.UTF8.GetBytes(xml), out var error);
+
+        Assert.Null(error);
+        Assert.False(task!.Enabled);
+        Assert.Equal("first", task.UserId);
+        Assert.Equal("a.exe", Assert.Single(task.Actions).Command);
+    }
+
+    [Fact]
+    public void TooManyActionsOrTooMuchText_SetTruncated()
+    {
+        string many = string.Concat(Enumerable.Repeat("<Exec><Command>a.exe</Command></Exec>", TaskXml.MaxActions + 1));
+        string long1 = $"<Exec><Command>a.exe</Command><Arguments>{new string('x', TaskXml.MaxTotalCharacters + 1)}</Arguments></Exec>";
+
+        var capped = TaskXml.Parse(Utf16(Task(many)), out _)!;
+        var cut = TaskXml.Parse(Utf16(Task(long1)), out _)!;
+
+        Assert.Equal(TaskXml.MaxActions, capped.Actions.Count);
+        Assert.True(capped.Truncated);
+        Assert.True(cut.Truncated);
+        Assert.True(cut.Actions[0].Arguments!.Length < TaskXml.MaxTotalCharacters);
+    }
+
+    [Fact]
     public void MalformedWrongRootAndOversized_AreRejectedWithAReason()
     {
         Assert.Null(TaskXml.Parse("<Task><Actions><Exec>"u8.ToArray(), out var broken));

@@ -22,19 +22,20 @@ internal interface IPersistenceCollector
 /// Runs the sources in order (registry autoruns, services, Startup folders, scheduled tasks) against one context: the
 /// machine environment and the user profiles are read once. A source that throws is reported as an
 /// <see cref="PersistenceIssueReason.Error"/> issue and the next one runs. Nothing is written, executed, or opened beyond
-/// registry keys, the Startup / Tasks folders and their files (no-follow, size-capped), and attribute-only existence
+/// registry keys, the Startup / Tasks folders and their files (no-follow, size-capped, parsed only in the sandboxed worker), and attribute-only existence
 /// probes where the CreateProcess search order needs one.
 /// </summary>
 internal sealed class PersistenceCollector(
     IRegistryView registry, IPathProbe probe, IReadOnlyList<IPersistenceSource> sources, PersistenceLimits? limits = null,
-    ILogger<PersistenceCollector>? logger = null) : IPersistenceCollector
+    ILogger<PersistenceCollector>? logger = null, IPersistenceFileParser? parser = null) : IPersistenceCollector
 {
     private readonly PersistenceLimits _limits = limits ?? new PersistenceLimits();
     private readonly ILogger _logger = logger ?? NullLogger<PersistenceCollector>.Instance;
 
     /// <summary>The real collector: the machine's registry, the safe probe, and every source.</summary>
-    public static PersistenceCollector CreateDefault(ILogger<PersistenceCollector>? logger = null) =>
-        new(new WindowsRegistryView(), new SafePathProbe(), DefaultSources(), logger: logger);
+    /// <param name="parser">Parses shortcuts and task definitions in the sandboxed worker; null = they are reported as not collected.</param>
+    public static PersistenceCollector CreateDefault(ILogger<PersistenceCollector>? logger = null, IPersistenceFileParser? parser = null) =>
+        new(new WindowsRegistryView(), new SafePathProbe(), DefaultSources(), logger: logger, parser: parser);
 
     public static IReadOnlyList<IPersistenceSource> DefaultSources() => [new RegistryAutorunSource(), new ServiceSource(), new StartupFolderSource(), new ScheduledTaskSource()];
 
@@ -43,7 +44,7 @@ internal sealed class PersistenceCollector(
         var clock = Stopwatch.StartNew();
         var resolver = new CommandLineResolver(probe is SafePathProbe safe ? safe.Fresh() : probe);
         var machine = RegistryEnvironment.Machine(registry);
-        var context = new PersistenceContext(registry, resolver, machine, [], _limits, cancellationToken, clock);
+        var context = new PersistenceContext(registry, resolver, machine, [], _limits, cancellationToken, clock, parser);
         context.Users = RegistryEnvironment.Profiles(registry, machine, context.AddIssue, max: 256);
         foreach (var source in sources)
         {

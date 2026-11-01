@@ -106,14 +106,16 @@ internal static class WorkerChannel
 
         bool shapeOk = response.Kind switch
         {
-            WorkerResponseKind.RulesLoaded => request.Kind == WorkerRequestKind.LoadRules && response.Rules is not null
+            WorkerResponseKind.RulesLoaded => request.Kind == WorkerRequestKind.LoadRules && response.Rules is not null && response.Parsed is null
                 && response.Report is null && response.Probe is null && response.Error is null,
-            WorkerResponseKind.Scanned => request.Kind == WorkerRequestKind.Scan && response.Report is not null
+            WorkerResponseKind.Scanned => request.Kind == WorkerRequestKind.Scan && response.Report is not null && response.Parsed is null
                 && response.Rules is null && response.Probe is null && response.Error is null,
-            WorkerResponseKind.Probed => request.Kind == WorkerRequestKind.Probe && response.Probe is not null
+            WorkerResponseKind.Probed => request.Kind == WorkerRequestKind.Probe && response.Probe is not null && response.Parsed is null
                 && response.Rules is null && response.Report is null && response.Error is null,
+            WorkerResponseKind.Parsed => request.Kind == WorkerRequestKind.Parse && response.Parsed is not null && response.Rules is null
+                && response.Report is null && response.Probe is null && response.Error is null,
             WorkerResponseKind.Failed => response.Error is not null && response.Error.Length <= WorkerLimits.MaxTextLength
-                && response.Rules is null && response.Report is null && response.Probe is null,
+                && response.Rules is null && response.Report is null && response.Probe is null && response.Parsed is null,
             _ => false,
         };
 

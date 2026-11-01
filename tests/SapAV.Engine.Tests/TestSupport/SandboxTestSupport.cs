@@ -102,6 +102,7 @@ internal static class WorkerTestClient
             },
             Scan = null,
             Probe = null,
+            Parse = null,
         }, WorkerLimits.MaxRulesRequestBytes, TimeSpan.FromSeconds(60), CancellationToken.None);
 
     public static Task<WorkerResponse> ProbeAsync(WorkerProcess worker, WorkerProbeKind kind, string? path = null, int port = 0, long handle = 0) =>
@@ -112,6 +113,7 @@ internal static class WorkerTestClient
             LoadRules = null,
             Scan = null,
             Probe = new WorkerProbeRequest { Kind = kind, Path = path, Port = port, Handle = handle },
+            Parse = null,
         }, WorkerLimits.MaxRequestBytes, TimeSpan.FromSeconds(30), CancellationToken.None);
 
     /// <summary>Opens <paramref name="path"/> here, duplicates it read-only into the worker, scans, closes it there.</summary>
@@ -135,6 +137,7 @@ internal static class WorkerTestClient
                     TestFault = fault,
                 },
                 Probe = null,
+                Parse = null,
             }, WorkerLimits.MaxRequestBytes, timeout ?? TimeSpan.FromSeconds(60), CancellationToken.None);
         }
         finally

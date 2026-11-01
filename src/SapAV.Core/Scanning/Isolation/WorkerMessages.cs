@@ -14,6 +14,9 @@ public enum WorkerRequestKind
     /// <summary>Scan the file behind the handle in <see cref="WorkerRequest.Scan"/>.</summary>
     Scan,
 
+    /// <summary>Parse the autostart definition file behind the handle in <see cref="WorkerRequest.Parse"/> (review C H2).</summary>
+    Parse,
+
     /// <summary>Test only: try an operation the sandbox must block (<see cref="WorkerRequest.Probe"/>).</summary>
     Probe,
 }
@@ -31,6 +34,8 @@ public sealed record WorkerRequest
     public required WorkerScanRequest? Scan { get; init; }
 
     public required WorkerProbeRequest? Probe { get; init; }
+
+    public required WorkerParseRequest? Parse { get; init; }
 }
 
 /// <summary>The rule package: YARA rule files (bytes, compiled in the worker) and the blocklist file's bytes.</summary>
@@ -146,6 +151,7 @@ public enum WorkerResponseKind
     RulesLoaded,
     Scanned,
     Probed,
+    Parsed,
 
     /// <summary>The worker could not handle the request (<see cref="WorkerResponse.Error"/>); the file is NotScanned.</summary>
     Failed,
@@ -163,6 +169,8 @@ public sealed record WorkerResponse
     public required WireScanReport? Report { get; init; }
 
     public required WorkerProbeResult? Probe { get; init; }
+
+    public required WireParsedFile? Parsed { get; init; }
 
     public required string? Error { get; init; }
 }

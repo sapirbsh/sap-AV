@@ -83,7 +83,7 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
 
         if (_generation != package.Generation)
         {
-            var response = await ExchangeAsync(WorkerRequestKind.LoadRules, package.Rules, null,
+            var response = await ExchangeAsync(WorkerRequestKind.LoadRules, package.Rules, null, null,
                 WorkerLimits.MaxRulesRequestBytes, options.RulesLoadTimeout, cancellationToken).ConfigureAwait(false);
             if (response.Kind != WorkerResponseKind.RulesLoaded)
             {
@@ -101,7 +101,11 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
 
     /// <summary>Sends a scan request to the ready worker. Failures kill the worker and start the backoff.</summary>
     public Task<WorkerResponse> ScanAsync(WorkerScanRequest scan, CancellationToken cancellationToken) =>
-        ExchangeAsync(WorkerRequestKind.Scan, null, scan, WorkerLimits.MaxRequestBytes, options.RequestTimeout, cancellationToken);
+        ExchangeAsync(WorkerRequestKind.Scan, null, scan, null, WorkerLimits.MaxRequestBytes, options.RequestTimeout, cancellationToken);
+
+    /// <summary>Sends a parse request to the ready worker. Failures kill the worker and start the backoff.</summary>
+    public Task<WorkerResponse> ParseAsync(WorkerParseRequest parse, CancellationToken cancellationToken) =>
+        ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.RequestTimeout, cancellationToken);
 
     /// <summary>A request completed normally: the backoff starts over.</summary>
     public void Succeeded() => _consecutiveFailures = 0;
@@ -149,11 +153,11 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     }
 
     private async Task<WorkerResponse> ExchangeAsync(
-        WorkerRequestKind kind, WorkerLoadRules? rules, WorkerScanRequest? scan, int maxBytes, TimeSpan timeout, CancellationToken cancellationToken)
+        WorkerRequestKind kind, WorkerLoadRules? rules, WorkerScanRequest? scan, WorkerParseRequest? parse, int maxBytes, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var worker = _worker ?? throw new WorkerRequestException(WorkerFailureKind.Unavailable, "No scan worker is running.");
         // Random request IDs (review L3): a frame the worker queued in advance can't guess the ID it must echo.
-        var request = new WorkerRequest { Id = NewRequestId(), Kind = kind, LoadRules = rules, Scan = scan, Probe = null };
+        var request = new WorkerRequest { Id = NewRequestId(), Kind = kind, LoadRules = rules, Scan = scan, Probe = null, Parse = parse };
         try
         {
             return await WorkerChannel.ExchangeAsync(worker, request, maxBytes, timeout, cancellationToken).ConfigureAwait(false);

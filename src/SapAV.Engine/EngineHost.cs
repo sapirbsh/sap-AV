@@ -89,7 +89,8 @@ public static class EngineHost
 
         // Persistence collectors (C2): read-only; Quick Scan (C4) and real-time monitoring (D4) use them.
         builder.Services.AddSingleton<Persistence.IPersistenceCollector>(sp =>
-            Persistence.PersistenceCollector.CreateDefault(sp.GetService<ILogger<Persistence.PersistenceCollector>>()));
+            Persistence.PersistenceCollector.CreateDefault(sp.GetService<ILogger<Persistence.PersistenceCollector>>(),
+                sp.GetRequiredService<IScanBroker>() as Persistence.IPersistenceFileParser)); // review C H2: no sandbox = not collected, never parsed here
 
         // Persistence judgement (C3), registered for C4 / D4: target files go through the sandboxed broker, the shared
         // verdict handler (file alert + auto-quarantine policy) runs on each target, and alerts 2001 / 2002 use the dispatcher.

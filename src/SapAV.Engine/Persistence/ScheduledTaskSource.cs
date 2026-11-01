@@ -1,4 +1,5 @@
 using Microsoft.Win32.SafeHandles;
+using SapAV.Core.Scanning.Isolation;
 using SapAV.Core.Persistence;
 using SapAV.Engine.Scanning;
 using CorePersistenceText = SapAV.Core.Persistence.PersistenceText;
@@ -7,7 +8,7 @@ namespace SapAV.Engine.Persistence;
 
 /// <summary>
 /// Scheduled tasks (ROADMAP C2) from their definition files under <c>%SystemRoot%\System32\Tasks</c>, walked recursively
-/// with <see cref="SafeTree"/> (no link followed, depth / count / size capped) and parsed by <see cref="TaskXml"/> (DTD
+/// with <see cref="SafeTree"/> (no link followed, depth / count / size capped) and parsed by <see cref="TaskXml"/> in the sandboxed worker (DTD
 /// refused, no resolver). One entry per action: an Exec's Command + Arguments is resolved like any program; a COM
 /// handler's CLSID is resolved read-only through <c>CLSID\{…}\InprocServer32</c>, with <c>taskhostw.exe</c> as the host.
 /// </summary>
@@ -55,7 +56,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             {
                 using (current.Handle)
                 {
-                    if (!context.CanContinue)
+                    if (!context.CanContinue || context.ParserDown)
                     {
                         return;
                     }
@@ -125,7 +126,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
                 continue;
             }
 
-            if (!context.CanContinue)
+            if (!context.CanContinue || context.ParserDown)
             {
                 return;
             }
@@ -136,18 +137,29 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
 
     private static void CollectTask(PersistenceContext context, SafeFileHandle folder, string name, string taskPath)
     {
-        var bytes = SafeFolderReader.ReadFile(folder, name, TaskXml.MaxBytes, out var failure, out var message);
-        if (bytes is null)
+        using var file = SafeFolderReader.OpenForParsing(folder, name, TaskXml.MaxBytes, out var failure, out var message);
+        if (file is null)
         {
             context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, failure, message);
             return;
         }
 
-        var task = TaskXml.Parse(bytes, out var error);
-        if (task is null)
+        var parsed = context.Parse(file, WorkerParseKind.ScheduledTask, taskPath, PersistenceKind.ScheduledTask);
+        if (parsed.Status == PersistenceParseStatus.Malformed)
         {
-            context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Malformed, error ?? "The task file can't be parsed.");
+            context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Malformed, parsed.Message ?? "The task file can't be parsed.");
             return;
+        }
+
+        if (parsed.Task is not { } task)
+        {
+            return; // Unavailable: reported once by the context, and the walk stops
+        }
+
+        if (task.Truncated)
+        {
+            context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.LimitReached,
+                $"The task has more than {TaskXml.MaxActions} actions or too much text; the rest wasn't read.");
         }
 
         var user = task.UserId is { } id && RegistryEnvironment.IsUserSid(id.Trim()) ? id.Trim() : null;
