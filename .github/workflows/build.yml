@@ -50,6 +50,22 @@ jobs:
           }
           Write-Output "Failed tests annotated: $count"
 
+      # Publish the elevated persistence-collection timings as a public notice (the runner is elevated, dev runs usually aren't).
+      - name: Report elevated collection timings
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($trx in Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue) {
+            [xml]$doc = Get-Content $trx.FullName -Raw
+            $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
+            foreach ($r in (Select-Xml -Xml $doc -XPath "//t:UnitTestResult[contains(@testName,'RealMachine_CollectsWithinBudget')]" -Namespace $ns)) {
+              $out = "$($r.Node.Output.StdOut)" -replace "`r?`n", ' '
+              if ($out.Length -gt 900) { $out = $out.Substring(0, 900) }
+              $out = $out -replace '%', '%25'
+              Write-Output "::notice title=Elevated collection timings::$out"
+            }
+          }
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
