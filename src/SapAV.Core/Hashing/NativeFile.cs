@@ -183,6 +183,11 @@ internal static class NativeFile
     [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern unsafe uint GetFinalPathNameByHandleW(SafeFileHandle hFile, char* path, uint length, uint flags);
 
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationByHandleW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern unsafe bool GetVolumeInformationByHandleW(
+        SafeFileHandle hFile, char* volumeName, uint volumeNameSize, uint* serial, uint* maxComponent, uint* flags, char* fileSystemName, uint fileSystemNameSize);
+
     [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode, ExactSpelling = true)]
     private static extern uint GetDriveTypeW(string rootPathName);
 
@@ -195,6 +200,13 @@ internal static class NativeFile
     /// change journal records a change to the file (data, size, timestamps, attributes, rename). False when the
     /// volume has no active change journal (the call fails or reports USN 0).
     /// </summary>
+    /// <summary>The file system name of the handle's volume (<c>NTFS</c>, <c>ReFS</c>, ...), or null if it can't be read.</summary>
+    internal static unsafe string? FileSystemName(SafeFileHandle handle)
+    {
+        char* name = stackalloc char[32];
+        return GetVolumeInformationByHandleW(handle, null, 0, null, null, null, name, 32) ? new string(name) : null;
+    }
+
     /// <summary>The reparse tag from the handle when <paramref name="attributes"/> has ReparsePoint; else (or if it can't be read) 0.</summary>
     internal static unsafe uint ReparseTagOf(SafeFileHandle handle, FileAttributes attributes)
     {

@@ -101,7 +101,7 @@ internal sealed class CacheHarness : IDisposable
 /// </summary>
 public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
 {
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task UnchangedFile_IsAHit_OnTheSecondScan_CountedAsCached_AndTheBrokerIsNotCalled()
     {
         using var h = new CacheHarness();
@@ -148,7 +148,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal(0, second.GetProgress().Counters.Cached);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task RenamedFile_KeepsItsIdentity_ButIsScannedAgain_BecauseTheVerdictDependsOnThePath()
     {
         using var h = new CacheHarness();
@@ -165,7 +165,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal(1, h.Cache.Store.Count());
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task RulesOrEngineChange_InvalidatesTheRow_AndCaseOnlyPathDifferencesStillHit()
     {
         using var h = new CacheHarness();
@@ -185,7 +185,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal(3, h.Jobs.Broker.Calls);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task BlocklistUpdate_FlagsACachedHashMalicious_WithoutReadingTheFileAgain()
     {
         using var h = new CacheHarness();
@@ -211,7 +211,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal(h.Fingerprints.Blocklist.Fingerprint, row.BlocklistFingerprint);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task SuspiciousFile_IsCached_AndTheResultSaysSo_InTheJobAndOnThePipe()
     {
         using var h = new CacheHarness();
@@ -246,7 +246,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal(0, h.Cache.Store.Count()); // the engine's blocklist already lists it (the worker may have had an older one)
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task StandardUserJobs_AndRemoteAllowingJobs_BypassTheCache_NeitherReadingNorWriting()
     {
         using var h = new CacheHarness();
@@ -389,7 +389,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Null(store.LastProblem);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task RepeatScan_OfATempTree_WithTheRealScanner_IsServedFromTheCache_AndFaster()
     {
         // The real pipeline in-process (hashing, Authenticode, YARA with the shipped rules, heuristics) and the real
@@ -438,6 +438,68 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
             cache.Dispose();
             SqliteConnection.ClearAllPools();
         }
+    }
+
+    [RequiresFact(Requires.UsnJournal)]
+    public async Task WithoutAUsn_NothingIsStored_AndAStoredRowIsNoHit()
+    {
+        // Review C H5: a same-size write + SetFileInformationByHandle restores last-write and change time without privilege,
+        // so a stamp without a USN can't vouch for an unchanged file.
+        using var h = new CacheHarness();
+        string path = h.Jobs.Write("a.txt", "alpha");
+        await h.RunAsync();
+        var noUsn = Stamp(path) with { Usn = null };
+        var item = new ScanItem(path, ScanTrigger.CustomScan);
+        var row = h.Cache.Store.Get(noUsn.Volume, noUsn.FileId)!;
+
+        var notes = new List<ScanNote>();
+        using var opened = SafeScanOpen.Open(item, notes, TimeProvider.System, out _);
+        var report = FakeScanBroker.Judge(item, opened!, h.Jobs.Time) with { Yara = YaraScanResult.Scanned([], 5, FakeFingerprints.DefaultRules) };
+
+        Assert.False(h.Cache.TryStore(item, noUsn, report));
+
+        h.Cache.Store.Put(row with { Stamp = noUsn });
+        Assert.Null(h.Cache.TryHit(item, opened!, noUsn, notes));
+    }
+
+    [Theory]
+    [InlineData("NTFS", true)]
+    [InlineData("ReFS", true)]
+    [InlineData("FAT32", false)]
+    [InlineData("exFAT", false)]
+    [InlineData(null, false)]
+    public void OnlyNtfsAndRefs_CanGiveAStamp(string? fileSystem, bool expected) =>
+        Assert.Equal(expected, FileStamp.IsJournalingFileSystem(fileSystem));
+
+    [RequiresFact(Requires.UsnJournal)]
+    public async Task AVerdictOlderThanTheAbsoluteAge_IsAMiss_HoweverRecentlyItWasUsed()
+    {
+        // Review C M1 part: MaxAge is an idle age, so a regularly used row used to live forever.
+        using var h = new CacheHarness();
+        string path = h.Jobs.Write("a.txt", "alpha");
+        await h.RunAsync();
+        var stamp = Stamp(path);
+        var row = h.Cache.Store.Get(stamp.Volume, stamp.FileId)!;
+        var item = new ScanItem(path, ScanTrigger.CustomScan);
+        var notes = new List<ScanNote>();
+        using var opened = SafeScanOpen.Open(item, notes, TimeProvider.System, out _);
+        Assert.NotNull(h.Cache.TryHit(item, opened!, Stamp(path), notes));
+
+        long old = DateTimeOffset.UtcNow.AddDays(-15).ToUnixTimeMilliseconds();
+        h.Cache.Store.Put(row with { ScannedAt = old, LastUsed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+
+        Assert.Null(h.Cache.TryHit(item, opened!, Stamp(path), notes));
+    }
+
+    [Fact]
+    public void YoungEnough_RefusesOldAndFutureRows()
+    {
+        var now = DateTimeOffset.UtcNow;
+        ScanCacheRow At(TimeSpan offset) => SampleRow(0) with { ScannedAt = (now + offset).ToUnixTimeMilliseconds() };
+
+        Assert.True(ScanCache.YoungEnough(At(TimeSpan.FromDays(-13)), now, TimeSpan.FromDays(14)));
+        Assert.False(ScanCache.YoungEnough(At(TimeSpan.FromDays(-15)), now, TimeSpan.FromDays(14)));
+        Assert.False(ScanCache.YoungEnough(At(TimeSpan.FromDays(2)), now, TimeSpan.FromDays(14)));
     }
 
     private static FileStamp Stamp(string path)

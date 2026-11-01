@@ -185,7 +185,8 @@ internal sealed class ScanFilePipeline(
     /// engine and administrator jobs (no requester access check, <paramref name="access"/> null) read or write the cache; a
     /// standard user's job bypasses it entirely, so no result from a restricted perspective is ever stored and a user can't
     /// learn from a fast hit that someone else scanned a file. Also bypassed: jobs that allow remote files, files on anything
-    /// but a local fixed volume (removable media, shares: file IDs and times there aren't trustworthy keys), and files opened
+    /// but a local fixed volume (removable media, shares: file IDs and times there aren't trustworthy keys), volumes without a
+    /// change journal (<see cref="Cache.FileStamp.Capture"/> gives no stamp: section C review H5), and files opened
     /// in the shared fallback (a writer has the file open, so it can change while we look).
     /// </summary>
     private Cache.FileStamp? CacheStamp(OpenedScanFile? opened, IScanAccessCheck? access, bool allowRemote)

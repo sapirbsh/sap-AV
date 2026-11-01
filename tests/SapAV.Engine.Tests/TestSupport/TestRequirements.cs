@@ -55,6 +55,9 @@ public enum Requires
     /// (C4). Off by default so a normal run and CI stay fast.
     /// </summary>
     SlowTests,
+
+    /// <summary>The temp volume has an active change journal (the scan cache keeps nothing without one).</summary>
+    UsnJournal,
 }
 
 internal static class TestRequirements
@@ -78,6 +81,7 @@ internal static class TestRequirements
         [Requires.AppContainer] = new(ProbeAppContainer),
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
         [Requires.AdminShare] = new(ProbeAdminShare),
+        [Requires.UsnJournal] = new(ProbeUsnJournal),
         [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),
@@ -88,6 +92,21 @@ internal static class TestRequirements
     {
         var full = Path.GetFullPath(localPath);
         return $@"\\localhost\{full[0]}$\{full[3..]}";
+    }
+
+    private static string? ProbeUsnJournal()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "sapav-usn-probe-" + Guid.NewGuid().ToString("N") + ".bin");
+        try
+        {
+            File.WriteAllBytes(path, [1]);
+            using var handle = File.OpenHandle(path);
+            return SapAV.Core.Hashing.NativeFile.TryGetUsn(handle, out _) ? null : "the temp volume has no active change journal";
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     private static string? ProbeAdminShare()

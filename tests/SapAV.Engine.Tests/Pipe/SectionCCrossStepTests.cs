@@ -199,7 +199,7 @@ public sealed class SectionCCrossStepTests
         Assert.True(first.Complete);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task Cache_IsFilledByAnAdminsCustomScan_HitByTheQuickScan_AndABlocklistUpdateTurnsTheCachedHashMalicious_WithoutARead()
     {
         await using var e = new SectionCEngine();
@@ -230,7 +230,7 @@ public sealed class SectionCCrossStepTests
         Assert.False(File.Exists(tool));
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task AStandardUsersCustomScan_NeverReadsOrWritesTheCache_EvenWhenAnAdminHasFilledIt()
     {
         await using var e = new SectionCEngine();

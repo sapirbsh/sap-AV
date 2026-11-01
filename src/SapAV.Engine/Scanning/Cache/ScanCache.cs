@@ -67,8 +67,10 @@ internal sealed record ScanCacheStats(long Hits, long Misses, long Stores, long 
 /// The scan cache (ROADMAP C5): skip a file the engine already judged when nothing about it changed.
 /// <para><b>Lookup</b> runs after the hardened open, on the scan's own handle (<see cref="FileStamp"/>). A row is a hit only
 /// if <b>all</b> of these match: the file object (volume serial + 128-bit file ID: the key), the exact path
-/// (case-insensitive), size, last-write time, change time, the USN (both absent, or equal), the YARA rules fingerprint and
-/// the engine version. Every hit's SHA-256 is then checked against the current blocklist (an O(1) lookup, no re-read): a
+/// (case-insensitive), size, last-write time, change time, the USN (a stamp without one is never cached or matched: section C
+/// review H5), the YARA rules fingerprint and
+/// the engine version, and the verdict is younger than <see cref="ScanCacheOptions.MaxVerdictAge"/> however often it was used.
+/// Every hit's SHA-256 is then checked against the current blocklist (an O(1) lookup, no re-read): a
 /// match makes it Malicious right there (the row is dropped and the normal verdict handler quarantines through the open
 /// handle, which re-hashes the file first). A blocklist change therefore never needs a rescan, and a rules change makes
 /// every row a miss (YARA must run again).</para>
@@ -183,17 +185,17 @@ internal sealed class ScanCache : IDisposable
 
     private FileScanReport? Hit(ScanItem item, OpenedScanFile opened, FileStamp stamp, IReadOnlyList<ScanNote> openNotes)
     {
-        if (_fingerprints.Current() is not { } context || _store.Get(stamp.Volume, stamp.FileId) is not { } row)
+        if (stamp.Usn is null || _fingerprints.Current() is not { } context || _store.Get(stamp.Volume, stamp.FileId) is not { } row)
         {
             return null;
         }
 
-        if (!Matches(row, stamp, KeyPath(item.Path), context))
+        var now = _time.GetUtcNow();
+        if (!Matches(row, stamp, KeyPath(item.Path), context) || !YoungEnough(row, now, _options.MaxVerdictAge))
         {
             return null; // replaced by this scan's store
         }
 
-        var now = _time.GetUtcNow();
         FileScanReport cached;
         try
         {
@@ -241,6 +243,13 @@ internal sealed class ScanCache : IDisposable
         return cached with { Identity = opened.Identity, Notes = notes.AsReadOnly() };
     }
 
+    /// <summary>The verdict was made recently enough; a row from the future (a clock set back) never counts.</summary>
+    internal static bool YoungEnough(ScanCacheRow row, DateTimeOffset now, TimeSpan maxAge)
+    {
+        var age = now - DateTimeOffset.FromUnixTimeMilliseconds(row.ScannedAt);
+        return age <= maxAge && age >= -TimeSpan.FromDays(1);
+    }
+
     /// <summary>Every hit condition except the blocklist (that one is re-checked, not compared).</summary>
     internal static bool Matches(ScanCacheRow row, FileStamp stamp, string keyPath, ScanCacheContext context) =>
         row.Stamp == stamp
@@ -251,7 +260,8 @@ internal sealed class ScanCache : IDisposable
     private ScanCacheRow? Row(ScanItem item, FileStamp stamp, FileScanReport report)
     {
         var result = report.Result;
-        if (_fingerprints.Current() is not { } context
+        if (stamp.Usn is null
+            || _fingerprints.Current() is not { } context
             || result.Status != ScanStatus.Scanned
             || result.Verdict is not (Verdict.Clean or Verdict.Suspicious)
             || result.Sha256 is not { } sha

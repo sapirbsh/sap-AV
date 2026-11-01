@@ -126,7 +126,7 @@ public sealed class FullScanTests(ITestOutputHelper output)
         Assert.True(drive.UsedBytes > 0);
     }
 
-    [Fact]
+    [RequiresFact(Requires.UsnJournal)]
     public async Task TempTreeFullScan_ScansEveryFile_SkipsSystemFiles_AndTheRepeatComesFromTheCache()
     {
         using var f = new FullScanHarness();
