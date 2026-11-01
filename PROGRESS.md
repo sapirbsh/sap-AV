@@ -8,13 +8,13 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C6 built, tester + reviewer pass done; fixing 5 High findings |
+| C — Scan modes | **In progress:** C1–C6 built, 5 High fixed; follow-up review running |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after section B): Core 1179 passed + 1 skipped, Engine 353 passed + 8 skipped. Simulated clean machine: 0 failed.
+Tests (after the section C fixes): Core 1324 passed + 1 skipped, Engine 572 passed + 10 skipped. Two load-sensitive tests are being fixed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green up to section B (check the run for `92ce762`).
 
 ## Section A — Detection engine (done)
@@ -168,9 +168,26 @@ The **section C reviewer pass** came back **NOT CLEAN**: 5 High, no Critical.
   mismatched shortcut). A new "Unverified" outcome fixes this.
 - **H5:** on a volume without a change journal, a user could keep a cached Clean after changing the file.
 
-**Now:** the section C fix round (these five, the slow collection finding, and M3, M4, M5, M7, M8 pulled forward). The
-other Medium/Low findings are in ROADMAP.md. Then a short follow-up review of the worker move and the Unverified change,
-and section C is done.
+**The fix round is built and pushed** (`edeeb2f`…`f73c749`): all five High findings, plus M3, M4, M5, M7 and M8.
+Shortcut and task-XML parsing now run only in the sandboxed worker. Plain Offline files are scanned. An autostart entry
+whose program wasn't scanned is reported as **Unverified**, never Clean. The cache requires a change journal, and verdicts
+expire after 14 days. Microsoft-signed files are now cached too. Tests: Core 1324 + 1 skipped, Engine 572 + 10 skipped.
+
+**Decisions the builder made (open to change):**
+- Collection budget raised again, from 30 s to 60 s.
+- A cloud reparse tag alone counts as a hydrated file and gets scanned; otherwise every hydrated OneDrive file would be
+  hidden.
+- The debug in-process mode no longer collects tasks and shortcuts.
+
+**Still open in section C:**
+- **Slow collection:** the cause is unconfirmed (probably opening every task file under real-time AV on a cold disk). CI now
+  publishes the elevated timings as a public notice (`a710828`), so the next CI run should show the real numbers.
+- **Two load-sensitive tests** (`TimeBudget_EachFolderPhaseGetsItsShare…`, `RealMachine_CollectsWithinBudget…`) fail
+  sometimes when Core and Engine run together. A tester is fixing them.
+- **Possible noise:** "Incomplete" now fires on any Unverified entry, so most real scans may say Incomplete. The review
+  is checking this.
+
+**Now:** the short follow-up review of the worker move and the Unverified change. Then section C is done.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
