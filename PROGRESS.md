@@ -182,8 +182,9 @@ expire after 14 days. Microsoft-signed files are now cached too. Tests: Core 132
 **Still open in section C:**
 - **Slow collection:** the cause is unconfirmed (probably opening every task file under real-time AV on a cold disk). CI now
   publishes the elevated timings as a public notice (`a710828`), so the next CI run should show the real numbers.
-- **Two load-sensitive tests** (`TimeBudget_EachFolderPhaseGetsItsShare…`, `RealMachine_CollectsWithinBudget…`) fail
-  sometimes when Core and Engine run together. A tester is fixing them.
+- ~~Two load-sensitive tests~~: **fixed.** `RealMachine_CollectsWithinBudget…` tripped the 5 s per-user budget under load
+  (`8cfafe1`). `TimeBudget_EachFolderPhaseGetsItsShare…` exposed a **real bug**: a job out of its whole budget could end
+  Completed instead of TimedOut, depending on thread timing (fixed in `ScanJob.Checks.cs`). Six full runs in a row passed.
 - **Possible noise:** "Incomplete" now fires on any Unverified entry, so most real scans may say Incomplete. The review
   is checking this.
 
