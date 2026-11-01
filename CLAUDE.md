@@ -24,7 +24,7 @@ The code is public on GitHub. Product name in the UI: "sap-AV".
 - Online lookup: VirusTotal API v3 (hash lookup only)
 - Local caches (VirusTotal results, scan cache): SQLite via `Microsoft.Data.Sqlite` (approved; added at step C5 / D2)
 - Alert output: Windows Event Log, source "sap-AV" (structured data for SIEM), in a dedicated "sap-AV" log that only
-  SYSTEM can write (ROADMAP B6; until then the Application log), in a dedicated "sap-AV" log that only SYSTEM can write (B6; until then the Application log)
+  SYSTEM and Administrators can write (ROADMAP B6)
 - Threat mapping: MITRE ATT&CK technique ID on every alert
 - Threat pack (planned, ROADMAP section E; packages need approval first): ETW via `Microsoft.Diagnostics.Tracing.TraceEvent`
   (process + file-read events), WMI via `System.Management` (Defender status/exclusions, process command lines),

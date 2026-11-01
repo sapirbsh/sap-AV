@@ -97,7 +97,7 @@ machine; 0 build warnings.
 - Admin-configured `ScanJobs:ExcludedFolders` are honoured without the ownership check (an admin setting).
 - A non-elevated dev console run sees its own bin folder as unverified, so it scans it and raises health alert 9008.
 
-## Current status (2026-10-25)
+## Current status (2026-11-01)
 
 **Section B is done.** Section C (scan modes) is in progress.
 
@@ -152,7 +152,14 @@ The **section C tester pass** is done (`9eae100`), with no production bugs: cros
 and quarantine; a guard that fails if tests touch the real `%ProgramData%\sap-AV`; two flaky tests made deterministic.
 Tests: Core 1273 + 1 skipped, Engine 526 + 10 skipped.
 
-**Now:** the section C reviewer pass.
+**CI:** green on all of section C (`f34a71c`, windows-latest, elevated).
+
+**Open finding, to fix in the section C round:** on the elevated CI machine the autostart collection sometimes hits its
+whole time budget (10 s before, 30 s now; run `624e52b` failed on it, the next run on the same code passed). On this PC,
+non-elevated, it takes 0.4 s. An elevated or SYSTEM run reads every scheduled task, so the real engine may be slow here
+or get cut short. Find which source is slow and fix it.
+
+**Now:** the section C reviewer pass, then the section C fix round.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
@@ -165,10 +172,8 @@ Tests: Core 1273 + 1 skipped, Engine 526 + 10 skipped.
 - ~~CI red from `e72bd52`~~: **fixed, CI green again at `1abd55c`** (build #57). Both failures were test assumptions on
   the elevated runner (an elevated admin's new files are owned by Administrators; collecting every scheduled task took
   10.1 s against a 10 s budget, now 30 s). CI now posts failed tests as public annotations (`fb65ca9`).
-- Optional: delete the ~212 old empty folders in `%TEMP%\sapav-tests` (from Oct 19 and 22).
 
 ## What's left
 
-- **C:** C1 Custom Scan → C2+C3 persistence collectors/judgement → C4 Quick Scan → C5+C6 scan cache + Full Scan,
-  then the section C tester + reviewer pass.
+- **C:** the section reviewer pass (running) and its fix round. C1–C6 and the tester pass are done.
 - Then D → E → F → G, ending with the Phase 1 security review (G5).
