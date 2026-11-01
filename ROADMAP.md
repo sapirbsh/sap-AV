@@ -465,6 +465,35 @@ already-impersonating thread) are fixed in C1.
       never seen. In skipped folders, still list one level and queue executables.
     - **Section C tester (L8):** the 800 ms budget test with 50 ms broker delays is load-sensitive on CI. Drive it with
       a FakeTimeProvider or widen the margins.
+- **Section C review (5 High: resolver stack overflow, TaskXml stack overflow + parsers moved to the worker, `attrib +O`
+  evasion, false Clean on autostart entries, stale Clean without a change journal). M3, M4, M5, M7, M8 pulled forward;
+  all fixed in the section C fix round. Remaining:**
+  - **D1 (M1):** worker compromise can poison the cache: verdict, SHA-256 and the rules fingerprint are worker-supplied,
+    and Clean outlives recycling. Compute the fingerprint in the engine from the RulePackage; record the worker generation
+    and purge its rows on a protocol violation; re-scan about 1% of hits in a fresh worker and purge on a mismatch.
+  - **D1 (M2):** USB-as-fixed and VHD volumes use the cache, and offline edits keep all stamp fields. Skip the cache for
+    BusTypeUsb and file-backed virtual disks (`IOCTL_STORAGE_QUERY_PROPERTY`).
+  - **D1 (M6):** root skip lists are by name only: `D:\pagefile.sys` on a data volume whose root users can modify is never
+    opened and still runs. Skip a file only on a sharing violation; skip `System Volume Information` only if SYSTEM-owned
+    with a SYSTEM-only DACL.
+  - **E4 (M9):** LOLBin arguments are ignored (`msiexec /i https://…`, `explorer.exe C:\Users\u\evil.exe`, `forfiles`,
+    `pcalua`, `conhost --headless`, `certutil`, `msbuild`). Extend E4 beyond PowerShell, mshta and rundll32.
+  - **D4 / E4 (M10):** COM hijack through `GroupId` tasks is missed: the override check runs only for a `UserId` SID. For
+    group or interactive principals, check every loaded `<SID>_Classes` hive.
+  - **E7 (M11):** volumes mounted on a folder are never scanned (letters only). Use `FindFirstVolume` +
+    `GetVolumePathNamesForVolumeName`.
+  - **D1 (L1):** cache disk use is bounded by rows, not bytes (several GB worst case), with no VACUUM. Add
+    `PRAGMA max_page_count` and a path-length limit; `quick_check` also blocks the first scan.
+  - **D1 (L2):** the USN moved 2–3 s after a mapped write, so one stale hit is possible in that window.
+  - **D4 (L3):** `AclPathWritability` checks only the file and its immediate folder. A writable grandparent allows
+    rename-and-replace, and DELETE + FILE_DELETE_CHILD isn't counted. Check ancestors for machine-wide targets.
+  - **D1 (L4):** the 25M entry cap is global and depth-first, so a user folder early on `C:\` can use it up. Use per-volume
+    budgets and name the first few too-deep paths.
+  - **E (L5):** named streams (ADS) aren't enumerated, so payloads in them aren't scanned.
+  - **D2 (L6):** a cache hit skips the online lookup, and VT outcomes get stored. Bind rows to the VT result or its age.
+  - **D1 (L7):** the journal ID isn't bound to rows (admin-only to exploit).
+  - **D1 L6 is downgraded for NTFS:** a deny-writers open fails with error 32 while a writable view exists, so it falls
+    back to the shared path and isn't cached.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.

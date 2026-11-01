@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C6 built, tester pass done; section reviewer pass running |
+| C — Scan modes | **In progress:** C1–C6 built, tester + reviewer pass done; fixing 5 High findings |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -159,7 +159,18 @@ whole time budget (10 s before, 30 s now; run `624e52b` failed on it, the next r
 non-elevated, it takes 0.4 s. An elevated or SYSTEM run reads every scheduled task, so the real engine may be slow here
 or get cut short. Find which source is slow and fix it.
 
-**Now:** the section C reviewer pass, then the section C fix round.
+The **section C reviewer pass** came back **NOT CLEAN**: 5 High, no Critical.
+- **H1:** a standard user can crash the SYSTEM engine with one Run value (a long `cmd /c call call …` overflows the stack).
+- **H2:** a crafted file in `System32\Tasks` crashes the engine the same way. Decision: shortcut and task-XML parsing move
+  into the sandboxed worker, with no exception to the B5 rule.
+- **H3:** `attrib +O` hides a file or whole folder from Quick and Full Scan.
+- **H4:** an autostart entry was judged Clean when its real program was never scanned (network paths, `&` chains, a
+  mismatched shortcut). A new "Unverified" outcome fixes this.
+- **H5:** on a volume without a change journal, a user could keep a cached Clean after changing the file.
+
+**Now:** the section C fix round (these five, the slow collection finding, and M3, M4, M5, M7, M8 pulled forward). The
+other Medium/Low findings are in ROADMAP.md. Then a short follow-up review of the worker move and the Unverified change,
+and section C is done.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
