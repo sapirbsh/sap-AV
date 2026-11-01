@@ -130,6 +130,7 @@ public sealed class YaraScannerTests : IDisposable
     public void OfflineFile_IsSkippedOffline_WithoutScanning()
     {
         var path = _dir.WriteFile("offline.txt", YaraTestRules.MarkerBytes());
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(path, FileAttributes.Offline);
         try
         {

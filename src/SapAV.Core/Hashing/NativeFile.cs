@@ -195,6 +195,19 @@ internal static class NativeFile
     /// change journal records a change to the file (data, size, timestamps, attributes, rename). False when the
     /// volume has no active change journal (the call fails or reports USN 0).
     /// </summary>
+    /// <summary>The reparse tag from the handle when <paramref name="attributes"/> has ReparsePoint; else (or if it can't be read) 0.</summary>
+    internal static unsafe uint ReparseTagOf(SafeFileHandle handle, FileAttributes attributes)
+    {
+        if (!attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            return 0;
+        }
+
+        // FILE_ATTRIBUTE_TAG_INFO: FileAttributes 0, ReparseTag 4.
+        uint* info = stackalloc uint[2];
+        return GetFileInformationByHandleEx(handle, 9 /* FileAttributeTagInfo */, info, 8) ? info[1] : 0;
+    }
+
     internal static unsafe bool TryGetUsn(SafeFileHandle handle, out long usn)
     {
         usn = 0;

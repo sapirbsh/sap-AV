@@ -194,6 +194,31 @@ public sealed class FullScanTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task PlainOffline_OnAFileAndAFolder_IsScannedAnyway_NothingCountedAsAPlaceholder()
+    {
+        // Review C H3: attrib +O needs no privilege, and such an exe still runs.
+        using var f = new FullScanHarness();
+        var file = f.Write(@"Hidden\attrib.exe");
+        var inside = f.Write(@"Hidden\Folder\inside.exe");
+        string folder = Path.GetDirectoryName(inside)!;
+        File.SetAttributes(file, FileAttributes.Offline);
+        File.SetAttributes(folder, FileAttributes.Directory | FileAttributes.Offline);
+        try
+        {
+            var job = await f.RunAsync();
+
+            Assert.True(f.WasScanned(file));
+            Assert.True(f.WasScanned(inside));
+            Assert.Contains(job.Phases[2].Notes, n => n.Contains("0 cloud placeholders", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.SetAttributes(folder, FileAttributes.Directory);
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
     public async Task CloudPlaceholders_FoldersArentListed_AndFilesArentQueued_CountedAsOffline()
     {
         using var f = new FullScanHarness();
@@ -201,6 +226,7 @@ public sealed class FullScanTests(ITestOutputHelper output)
         var inside = f.Write(@"OneDrive\Unpopulated\remote.docx");
         var dehydrated = f.Write(@"OneDrive\dehydrated.xlsx");
         string folder = Path.GetDirectoryName(inside)!;
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests(); // stands in for real cloud placeholders
         File.SetAttributes(dehydrated, FileAttributes.Offline);
         File.SetAttributes(folder, FileAttributes.Directory | FileAttributes.Offline); // what an unpopulated placeholder folder reports
         try

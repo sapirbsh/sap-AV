@@ -290,6 +290,7 @@ public sealed class QuickScanJobTests(ITestOutputHelper output)
         using var q = new QuickScanHarness();
         var local = q.Write(@"Users\alice\Downloads\local.exe");
         var cloud = q.Write(@"Users\alice\Downloads\cloud.exe");
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests(); // stands in for a dehydrated cloud file
         File.SetAttributes(cloud, FileAttributes.Offline); // what a dehydrated cloud file reports in the listing
         try
         {

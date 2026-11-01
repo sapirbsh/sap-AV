@@ -68,6 +68,9 @@ public sealed class FileHeuristics : IFileHeuristics
     public const int RiskyFolderScore = 15;
     public const int InternetOriginScore = 15;
 
+    /// <summary>Plain Offline on an executable (<c>attrib +O</c>): weak. Hidden from naive scanners, but also set by old HSM software.</summary>
+    public const int PlainOfflineScore = 10;
+
     /// <summary>Section-data entropy (bits/byte) at or above which a PE counts as packed or encrypted.</summary>
     public const double HighEntropyBitsPerByte = 7.2;
 
@@ -100,13 +103,13 @@ public sealed class FileHeuristics : IFileHeuristics
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
-        using var handle = SecureFile.OpenRegularFile(path, out var failure, out _);
+        using var handle = SecureFile.OpenRegularFile(path, out var failure, out var attributes);
         if (handle is null)
         {
             return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
-        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken);
+        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken, FilePlaceholder.IsPlainOffline(attributes, NativeFile.ReparseTagOf(handle, attributes)));
     }
 
     /// <inheritdoc/>
@@ -117,12 +120,12 @@ public sealed class FileHeuristics : IFileHeuristics
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (!SecureFile.Validate(handle, out var failure, out _))
+        if (!SecureFile.Validate(handle, out var failure, out var attributes))
         {
             return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
-        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken);
+        return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken, FilePlaceholder.IsPlainOffline(attributes, NativeFile.ReparseTagOf(handle, attributes)));
     }
 
     /// <summary>
@@ -143,12 +146,12 @@ public sealed class FileHeuristics : IFileHeuristics
         return AnalyzeValidated(new MemoryContent(content), path, context, cancellationToken);
     }
 
-    private HeuristicResult AnalyzeValidated(Content content, string path, HeuristicContext context, CancellationToken cancellationToken)
+    private HeuristicResult AnalyzeValidated(Content content, string path, HeuristicContext context, CancellationToken cancellationToken, bool plainOffline = false)
     {
         var findings = NameFindings(path);
         try
         {
-            InspectContent(content, path, context, findings, cancellationToken);
+            InspectContent(content, path, context, findings, cancellationToken, plainOffline);
             return new HeuristicResult(findings.AsReadOnly(), Threshold, contentInspected: true, null);
         }
         catch (Exception ex) when (Sha256Hasher.TryClassify(ex, out var reason))
@@ -178,7 +181,7 @@ public sealed class FileHeuristics : IFileHeuristics
     }
 
     private void InspectContent(
-        Content content, string path, HeuristicContext context, List<HeuristicFinding> findings, CancellationToken cancellationToken)
+        Content content, string path, HeuristicContext context, List<HeuristicFinding> findings, CancellationToken cancellationToken, bool plainOffline)
     {
         long length = content.Length;
         var head = new byte[(int)Math.Min(PeHeaders.HeaderReadSize, length)];
@@ -220,6 +223,12 @@ public sealed class FileHeuristics : IFileHeuristics
         {
             findings.Add(new(HeuristicKind.RiskyFolderExecutable, RiskyFolderScore,
                 $"executable in a {folder} folder", MitreTechniqueIds.MaliciousFile));
+        }
+
+        if (isExecutable && !trusted && plainOffline)
+        {
+            findings.Add(new(HeuristicKind.PlainOfflineAttribute, PlainOfflineScore, "executable with the Offline attribute set by hand (no cloud or HSM provider behind it)",
+                MitreTechniqueIds.HideArtifacts));
         }
 
         if (isExecutable && !trusted && context.MarkOfTheWeb is { IsFromInternet: true } mark)

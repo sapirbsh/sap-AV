@@ -204,9 +204,40 @@ public sealed class Sha256HasherSpecialTargetTests : IDisposable
     // --- Offline / cloud placeholders ---
 
     [Fact]
+    public async Task PlainOfflineFile_IsHashed()
+    {
+        // Review C H3: attrib +O needs no privilege, so it must not hide a file. A fresh file, no placeholder scope here.
+        var path = Path.Combine(Path.GetTempPath(), "sapav-offline-" + Guid.NewGuid().ToString("N") + ".bin");
+        await File.WriteAllTextAsync(path, "plain offline");
+        File.SetAttributes(path, FileAttributes.Offline);
+        try
+        {
+            var result = await new Sha256Hasher().HashFileAsync(path);
+
+            Assert.True(result.IsHashed, result.ErrorMessage);
+            Assert.True(result.Attributes?.HasFlag(FileAttributes.Offline));
+        }
+        finally
+        {
+            File.SetAttributes(path, FileAttributes.Normal);
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(0x00001000u | 0x00000400u, 0x9000001Au, true)]  // Offline + a cloud tag: dehydrated
+    [InlineData(0x00001000u | 0x00000400u, 0x9000F01Au, true)]  // CLOUD_F
+    [InlineData(0x00001000u | 0x00000400u, 0xC0000004u, true)]  // Offline + HSM
+    [InlineData(0x00001000u | 0x00000400u, 0x80000014u, false)] // Offline + an unrelated tag (NFS): the attribute alone
+    [InlineData(0x00000400u, 0x9000001Au, false)]               // a cloud tag alone: hydrated, the content is local
+    public void ReparseTags_DecidePlaceholders(uint attributes, uint tag, bool expected) =>
+        Assert.Equal(expected, FilePlaceholder.IsPlaceholder((FileAttributes)attributes, tag));
+
+    [Fact]
     public async Task OfflineFile_IsSkippedOffline_WithoutHashing()
     {
         var path = _dir.WriteFile("offline.bin", RandomBytes(50));
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(path, FileAttributes.Offline);
         try
         {
@@ -228,7 +259,7 @@ public sealed class Sha256HasherSpecialTargetTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0x00001000, true)]  // FILE_ATTRIBUTE_OFFLINE
+    [InlineData(0x00001000, false)] // plain FILE_ATTRIBUTE_OFFLINE: attrib +O, not a placeholder (review C H3)
     [InlineData(0x00040000, true)]  // FILE_ATTRIBUTE_RECALL_ON_OPEN
     [InlineData(0x00400000, true)]  // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
     [InlineData(0x00400000 | 0x00000020, true)]

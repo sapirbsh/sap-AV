@@ -347,7 +347,7 @@ internal sealed class ScanWalkFilter
 
     /// <summary>
     /// C6 / review B3 M2: don't descend into cloud-files placeholder folders whose content isn't local (RECALL_ON_OPEN /
-    /// RECALL_ON_DATA_ACCESS / Offline): listing one as SYSTEM would ask the user's sync provider to populate it. Counted
+    /// RECALL_ON_DATA_ACCESS / Offline with a cloud tag; plain Offline is walked): listing one as SYSTEM would ask the user's sync provider to populate it. Counted
     /// in <see cref="FoldersOffline"/>. Default on.
     /// </summary>
     public bool SkipPlaceholderFolders { get; init; } = true;

@@ -128,6 +128,7 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
     public async Task Offline_ClosesTheHandle()
     {
         var path = _dir.WriteFile("off.bin", new byte[10]);
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(path, FileAttributes.Offline);
         try
         {
@@ -144,6 +145,7 @@ public sealed class Sha256HasherHandleLeakTests(ITestOutputHelper output) : IDis
     public async Task Offline_10kTimes_HandleCountStaysFlat()
     {
         var path = _dir.WriteFile("off.bin", new byte[10]);
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(path, FileAttributes.Offline);
         try
         {

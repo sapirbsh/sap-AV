@@ -97,7 +97,7 @@ internal static class SecureFile
 
     /// <summary>
     /// Checks an open handle: a disk file (<c>GetFileType</c>), not a directory, and (unless
-    /// <paramref name="allowOffline"/>) not offline or a cloud placeholder. Never throws for I/O.
+    /// <paramref name="allowOffline"/>) not a cloud placeholder (<see cref="FilePlaceholder"/>; plain Offline is read). Never throws for I/O.
     /// </summary>
     public static bool Validate(SafeFileHandle handle, out SecureOpenFailure failure, out FileAttributes attributes, bool allowOffline = false)
     {
@@ -127,9 +127,9 @@ internal static class SecureFile
                 return false;
             }
 
-            if (!allowOffline && Sha256Hasher.IsOfflineOrPlaceholder(attributes))
+            if (!allowOffline && Sha256Hasher.IsOfflineOrPlaceholder(attributes, NativeFile.ReparseTagOf(handle, attributes)))
             {
-                failure = new(HashFailureReason.Offline, "File is offline or a cloud placeholder; not read to avoid a download.",
+                failure = new(HashFailureReason.Offline, "File is a cloud placeholder; not read to avoid a download.",
                     RandomAccess.GetLength(handle), attributes, File.GetLastWriteTimeUtc(handle));
                 return false;
             }

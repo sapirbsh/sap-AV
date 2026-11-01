@@ -176,7 +176,9 @@ public sealed class QuickScanSourceTests : IDisposable
     {
         var rules = new QuickScanFileRules(new QuickScanOptions());
 
-        Assert.True(rules.CountPlaceholder(new SafeTreeEntry("cloud.exe", FileAttributes.Offline, 0, 10)));
+        Assert.True(rules.CountPlaceholder(new SafeTreeEntry("cloud.exe", FileAttributes.Offline | FileAttributes.ReparsePoint, 0x9000101A, 10)));
+        Assert.False(rules.CountPlaceholder(new SafeTreeEntry("attrib.exe", FileAttributes.Offline, 0, 10))); // review C H3: plain Offline hides nothing
+        Assert.False(rules.CountPlaceholder(new SafeTreeEntry("hydrated.exe", FileAttributes.ReparsePoint, 0x9000001A, 10)));
         Assert.True(rules.CountPlaceholder(new SafeTreeEntry("od.exe", SafeTreeEntry.RecallOnDataAccess | FileAttributes.Archive, 0, 10)));
         Assert.False(rules.CountPlaceholder(new SafeTreeEntry("local.exe", FileAttributes.Archive, 0, 10)));
         Assert.Equal(2, rules.Placeholders);

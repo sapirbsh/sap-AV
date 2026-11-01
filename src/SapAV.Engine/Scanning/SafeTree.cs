@@ -59,14 +59,15 @@ internal readonly record struct SafeTreeEntry(
     public bool IsDirectory => Attributes.HasFlag(FileAttributes.Directory);
 
     /// <summary>
-    /// A cloud-files / HSM placeholder whose data (or, for a folder, whose content) isn't on the disk: Offline,
-    /// RECALL_ON_OPEN or RECALL_ON_DATA_ACCESS, from the listing. Opening or listing it as SYSTEM would ask the provider to
+    /// A cloud-files / HSM placeholder whose data (or, for a folder, whose content) isn't on the disk (<see cref="FilePlaceholder"/>):
+    /// RECALL_ON_OPEN, RECALL_ON_DATA_ACCESS, or Offline with a cloud / HSM reparse tag, from the listing; plain Offline (<c>attrib +O</c>,
+    /// section C review H3) is not one. Opening or listing a real one as SYSTEM would ask the provider to
     /// fetch it (review B3 M2, C4 L7), so walks count such entries instead of opening them.
     /// </summary>
-    public bool IsPlaceholder => (Attributes & (FileAttributes.Offline | RecallOnOpen | RecallOnDataAccess)) != 0;
+    public bool IsPlaceholder => FilePlaceholder.IsPlaceholder(Attributes, ReparseTag);
 
-    internal const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;
-    internal const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000;
+    internal const FileAttributes RecallOnOpen = FilePlaceholder.RecallOnOpen;
+    internal const FileAttributes RecallOnDataAccess = FilePlaceholder.RecallOnDataAccess;
 
     public bool IsNameSurrogate => Attributes.HasFlag(FileAttributes.ReparsePoint) && ScanNative.IsNameSurrogate(ReparseTag);
 }

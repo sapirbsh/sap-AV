@@ -46,9 +46,6 @@ public sealed class Sha256Hasher : IFileHasher
     private const int HResultVirusInfected = unchecked((int)0x800700E1);    // ERROR_VIRUS_INFECTED
     private const int HResultVirusDeleted = unchecked((int)0x800700E2);     // ERROR_VIRUS_DELETED
 
-    // Cloud-file attributes not named in System.IO.FileAttributes.
-    private const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;       // FILE_ATTRIBUTE_RECALL_ON_OPEN
-    private const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 
     private readonly int _bufferSize;
 
@@ -242,9 +239,8 @@ public sealed class Sha256Hasher : IFileHasher
         static bool IsSeparator(char c) => c is '\\' or '/';
     }
 
-    /// <summary>True for offline files and cloud placeholders whose content would have to be recalled.</summary>
-    internal static bool IsOfflineOrPlaceholder(FileAttributes attributes) =>
-        (attributes & (FileAttributes.Offline | RecallOnOpen | RecallOnDataAccess)) != 0;
+    /// <summary>True for cloud / HSM placeholders whose content would have to be recalled (<see cref="FilePlaceholder"/>); plain Offline is not one.</summary>
+    internal static bool IsOfflineOrPlaceholder(FileAttributes attributes, uint reparseTag = 0) => FilePlaceholder.IsPlaceholder(attributes, reparseTag);
 
     /// <summary>Maps a Win32 error from <c>CreateFileW</c> to a reason (exact codes).</summary>
     internal static HashFailureReason MapWin32Error(int error) => error switch

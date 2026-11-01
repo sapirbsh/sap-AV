@@ -31,6 +31,9 @@ public enum HeuristicKind
 
     /// <summary>An executable downloaded from the Internet or Restricted zone (Mark-of-the-Web, A6).</summary>
     InternetOrigin,
+
+    /// <summary>An executable with plain Offline set (<c>attrib +O</c>): scanned anyway; a weak sign it was hidden on purpose (review C H3).</summary>
+    PlainOfflineAttribute,
 }
 
 /// <summary>One heuristic that fired, with its score contribution.</summary>

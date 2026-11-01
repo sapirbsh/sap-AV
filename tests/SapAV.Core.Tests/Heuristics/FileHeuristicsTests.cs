@@ -272,6 +272,28 @@ public sealed class FileHeuristicsTests : IDisposable
         Assert.Contains(HeuristicKind.UnsignedExecutable, Kinds(AnalyzeInMemory("cut.exe", truncated, UnsignedContext)));
     }
 
+    [Fact]
+    public void PlainOfflineExecutable_IsAWeakSignal_ANormalOneIsNot()
+    {
+        // Review C H3. A script needs no real PE on disk, so a real antivirus can't get in the way.
+        string path = _dir.WriteFile("run.ps1", System.Text.Encoding.ASCII.GetBytes("Write-Output 1"));
+        var normal = _heuristics.Analyze(path, HeuristicContext.None);
+        File.SetAttributes(path, FileAttributes.Offline);
+        try
+        {
+            var offline = _heuristics.Analyze(path, HeuristicContext.None);
+
+            Assert.True(offline.ContentInspected);
+            var finding = Assert.Single(offline.Findings, f => f.Kind == HeuristicKind.PlainOfflineAttribute);
+            Assert.True(finding.Score < offline.Threshold / 2);
+            Assert.DoesNotContain(normal.Findings, f => f.Kind == HeuristicKind.PlainOfflineAttribute);
+        }
+        finally
+        {
+            File.SetAttributes(path, FileAttributes.Normal);
+        }
+    }
+
     // --- On-disk synthetic PE: the real handle/I/O path ---
 
     public static TheoryData<string> OnDiskPeSamples => new(SyntheticPe.OnDiskSamples.Select(s => s.Name));

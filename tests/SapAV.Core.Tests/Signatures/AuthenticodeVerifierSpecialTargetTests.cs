@@ -104,6 +104,7 @@ public sealed class AuthenticodeVerifierSpecialTargetTests(ITestOutputHelper out
     public void OfflineFile_IsNotChecked_Offline()
     {
         var path = _dir.WriteFile("offline.exe", [0x4D, 0x5A]);
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(path, FileAttributes.Offline);
         try
         {

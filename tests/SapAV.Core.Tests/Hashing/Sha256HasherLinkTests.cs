@@ -459,6 +459,7 @@ public sealed class Sha256HasherLinkTests(ITestOutputHelper output) : IDisposabl
     {
         var target = _dir.WriteFile("offline-target.bin", Data(40));
         var link = _dir.File("to-offline.bin");
+        using var placeholder = SapAV.Core.Hashing.FilePlaceholder.OfflineIsPlaceholderForTests();
         File.SetAttributes(target, FileAttributes.Offline);
         try
         {
