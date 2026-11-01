@@ -194,7 +194,7 @@ public static class TaskXml
                     OpenAction(name);
                     break;
 
-                case 3 when _inFirstTop && _path[1] == "Principals" && _inPrincipal && name == "UserId" && !_userIdSeen:
+                case 3 when _inFirstTop && _path[1] == "Principals" && _path[2] == "Principal" && _inPrincipal && name == "UserId" && !_userIdSeen:
                     _userIdSeen = true;
                     Begin(_userId, depth);
                     break;

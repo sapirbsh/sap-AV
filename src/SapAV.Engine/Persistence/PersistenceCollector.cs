@@ -175,7 +175,8 @@ internal sealed class SafePathProbe : IPathProbe, IDisposable
             return Classify(SafeTree.Open(path, N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var failure, out _), failure);
         }
 
-        var (folder, folderFailure) = Folder(path[..separator]);
+        string parent = path[..separator];
+        var (folder, folderFailure) = Folder(parent.EndsWith(':') ? parent + @"\" : parent); // \\?\C: alone isn't a folder
         if (folder is null)
         {
             return folderFailure == SafeTreeFailure.NotFound ? PathProbeResult.Missing : PathProbeResult.Unknown;

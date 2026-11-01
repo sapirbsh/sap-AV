@@ -161,6 +161,23 @@ public sealed class UnverifiedFindingTests : IDisposable
         Assert.Empty(user.Persistence.UnverifiedReasons);
     }
 
+    [Theory]
+    [InlineData(PersistenceIssueReason.HiveNotLoaded, false)] // expected: that user isn't logged on
+    [InlineData(PersistenceIssueReason.AccessDenied, true)]
+    [InlineData(PersistenceIssueReason.Malformed, true)]
+    [InlineData(PersistenceIssueReason.ParserUnavailable, true)]
+    public async Task EveryIssueButTheExpectedOnes_MakesThePhaseIncomplete(PersistenceIssueReason reason, bool incomplete)
+    {
+        // Review C M3: the phase said Completed for anything but a budget or a cap.
+        using var q = new QuickScanHarness();
+        q.Issues.Add(new PersistenceIssue(null, null, "somewhere", reason, "a problem"));
+
+        var job = await q.RunAsync();
+
+        var phase = job.Phases.Single(p => p.Name == "Autostart entries");
+        Assert.Equal(incomplete, phase.State == ScanPhaseState.Incomplete);
+    }
+
     [Fact]
     public void AMismatchedShortcut_IsResolvedToEveryCandidate()
     {

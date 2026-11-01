@@ -142,6 +142,8 @@ internal sealed class QuickScanHarness : IDisposable
 
     public string Folder(string relative) => Dir(relative);
 
+    public List<PersistenceIssue> Issues { get; } = [];
+
     public FakeCollector? Collector { get; private set; }
 
     public string Write(string relative, string content = "synthetic test content")
@@ -158,7 +160,7 @@ internal sealed class QuickScanHarness : IDisposable
 
     public QuickScanFactory Factory()
     {
-        Collector = new FakeCollector(new PersistenceCollection(Entries, [], TimeSpan.Zero));
+        Collector = new FakeCollector(new PersistenceCollection(Entries, Issues, TimeSpan.Zero));
         var scanner = new PersistenceScanner(Jobs.Broker, Alerts, Jobs.Time, NullLogger.Instance,
             new PersistenceJudge(new PersistenceJudgeOptions { SystemRoot = @"C:\Windows" }), () => new AdminOnlyWritability());
         UserFolders[] users = [new UserFolders("S-1-5-21-1-2-3-1001", Profile, Desktop, Downloads, Temp, Roaming, Local), .. ExtraUsers];

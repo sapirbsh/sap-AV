@@ -502,6 +502,87 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.False(ScanCache.YoungEnough(At(TimeSpan.FromDays(2)), now, TimeSpan.FromDays(14)));
     }
 
+    [RequiresFact(Requires.UsnJournal)]
+    public void AMicrosoftSignedFile_WithoutAYaraScan_IsCached_AndHit()
+    {
+        // Review C M8: the pipeline skips YARA for Microsoft-signed files, so those were never cached at all.
+        using var h = new CacheHarness();
+        string path = h.Jobs.Write("signed.exe", "signed");
+        var item = new ScanItem(path, ScanTrigger.CustomScan);
+        var notes = new List<ScanNote>();
+        using var opened = SafeScanOpen.Open(item, notes, TimeProvider.System, out _);
+        var plain = FakeScanBroker.Judge(item, opened!, h.Jobs.Time);
+        var signature = Core.Signatures.SignatureCheckResult.Trusted(Core.Signatures.SignatureStatus.Microsoft, Core.Signatures.SignatureKind.Catalog,
+            new Core.Signatures.SignatureSigner([new Core.Signatures.SignatureCertificate("CN=Microsoft Windows", "CN=Microsoft Windows Production PCA 2011", new string('B', 40), new string('B', 64))], null));
+        var signed = plain with
+        {
+            Signature = signature,
+            Yara = null,
+            Result = new ScanResult(item, [], plain.Result.Timestamp, plain.Result.Sha256, ScanStatus.Scanned, signature.Status, signature.TrustedSignerName),
+        };
+        var stamp = Stamp(path);
+
+        Assert.True(h.Cache.TryStore(item, stamp, signed));
+
+        var hit = h.Cache.TryHit(item, opened!, stamp, notes);
+        Assert.NotNull(hit);
+        Assert.Equal(Core.Signatures.SignatureStatus.Microsoft, hit.Result.SignatureStatus);
+        Assert.Equal(Verdict.Clean, hit.Result.Verdict);
+    }
+
+    [RequiresFact(Requires.UsnJournal)]
+    public void AnUnsignedFileWithoutAYaraScan_IsStillNotCached()
+    {
+        using var h = new CacheHarness();
+        string path = h.Jobs.Write("plain.exe", "plain");
+        var item = new ScanItem(path, ScanTrigger.CustomScan);
+        var notes = new List<ScanNote>();
+        using var opened = SafeScanOpen.Open(item, notes, TimeProvider.System, out _);
+
+        Assert.False(h.Cache.TryStore(item, Stamp(path), FakeScanBroker.Judge(item, opened!, h.Jobs.Time) with { Yara = null }));
+    }
+
+    private sealed class ThrowingKeys(Exception error) : IQuarantineKeyProvider
+    {
+        public byte[] GetOrCreateKey(string storeRoot, QuarantineAccessPolicy policy) => throw error;
+    }
+
+    [Theory]
+    [InlineData(typeof(DllNotFoundException))]
+    [InlineData(typeof(TypeLoadException))]
+    public void AnyCacheStartFailure_LeavesNoCache_AndThrowsNothing(Type errorType)
+    {
+        // Review C M7: a native SQLite load failure isn't an SqliteException.
+        using var temp = new TempDir();
+        var error = (Exception)Activator.CreateInstance(errorType)!;
+
+        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, "unused", new FakeScanBroker(), new ThrowingKeys(error),
+            CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false, fingerprints: new FakeFingerprints());
+
+        Assert.Null(cache);
+    }
+
+    [Fact]
+    public async Task ACacheFactoryThatThrows_DoesntStopScanning_ForThisFileOrTheNext()
+    {
+        // Review C M7: Lazy caches a factory's exception, which made every file NotScanned.
+        using var temp = new TempDir();
+        File.WriteAllText(Path.Combine(temp.Path, "a.txt"), "a");
+        File.WriteAllText(Path.Combine(temp.Path, "b.txt"), "b");
+        var broker = new FakeScanBroker();
+        using var service = new ScanJobService(new ScanJobOptions(), broker, ExclusionSet.Always(new FolderSet([])), null, null, TimeProvider.System, NullLogger.Instance,
+            cacheFactory: () => throw new DllNotFoundException("e_sqlite3"));
+
+        var job = service.Create(new ScanJobRequest([temp.Path], ScanTrigger.CustomScan));
+        Assert.Equal(ScanJobStartResult.Started, service.Start(job.Id));
+        await JobWait.Done(job);
+
+        Assert.Equal(ScanJobState.Completed, job.State);
+        Assert.Equal(2, broker.Calls);
+        Assert.All(job.Results, r => Assert.Equal(ScanStatus.Scanned, r.Status));
+        Assert.Null(service.ResultCache);
+    }
+
     private static FileStamp Stamp(string path)
     {
         using var handle = File.OpenHandle(path);

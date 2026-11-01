@@ -8,7 +8,7 @@ namespace SapAV.Engine.Scanning.Checks;
 
 /// <summary>
 /// Quick Scan phase 2 (C4): every autostart location. <see cref="IPersistenceCollector.Collect"/> (read-only, its own
-/// 30 s budget), then <see cref="IPersistenceScanner.ScanAsync"/> with:
+/// 60 s budget), then <see cref="IPersistenceScanner.ScanAsync"/> with:
 /// <list type="bullet">
 /// <item><b>Parallelism 1 and the job's inline scan</b> (<see cref="IScanCheckContext.ScanNow"/>) as the target scanner,
 /// so every open stays on the job's background-mode thread (C3 note), pause and the budget apply per target, and a target
@@ -57,7 +57,7 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
         };
 
         var result = scanner.ScanAsync(collection, options, context.CancellationToken).GetAwaiter().GetResult();
-        foreach (var finding in result.Findings.Where(f => f.Outcome != PersistenceOutcome.Clean))
+        foreach (var finding in result.Ranked)
         {
             context.AddFinding(ScanFinding.From(finding));
         }
@@ -70,9 +70,12 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
             context.Note($"{group.Count()} location(s) not fully collected: {group.Key}.");
         }
 
-        if (result.Issues.Any(i => i.Reason is PersistenceIssueReason.TimeBudgetExceeded or PersistenceIssueReason.LimitReached))
+        // Section C review M3: anything not collected makes the phase Incomplete, except what is simply how the machine is
+        // (a user who isn't logged on has no loaded hive).
+        var incomplete = result.Issues.Where(i => i.Reason is not PersistenceIssueReason.HiveNotLoaded).Select(i => i.Reason).Distinct().Order().ToArray();
+        if (incomplete.Length > 0)
         {
-            context.MarkIncomplete("The autostart collection hit its time budget or a cap.");
+            context.MarkIncomplete($"Some autostart locations weren't fully collected: {string.Join(", ", incomplete)}.");
         }
 
         if (result.Findings.Any(f => f.Judgement.IsUnverified))

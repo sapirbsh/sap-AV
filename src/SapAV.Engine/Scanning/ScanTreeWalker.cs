@@ -54,6 +54,9 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     /// <summary>Deepest folder nesting walked (review B3 C6 M2); deeper folders are reported Unreadable.</summary>
     public const int MaxDepth = 256;
 
+    /// <summary>Most entries read from one folder (section C review M5); a bigger folder is reported Unreadable (TooManyEntries).</summary>
+    public const int MaxFolderEntries = 1_000_000;
+
     /// <summary>Walks every root in order, calling <paramref name="emit"/> for each entry (it may block for back-pressure or pause).</summary>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public void Walk(
@@ -206,10 +209,17 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return null;
         }
 
-        List<SafeTreeEntry> entries;
+        // Section C review M5: the listing itself stops at the cap, so a gigantic folder is never loaded first.
+        long room = filter is null ? MaxFolderEntries : Math.Max(filter.MaxEntries - filter.EntriesSeen, 0);
+        int cap = (int)Math.Min(room, MaxFolderEntries);
+        List<SafeTreeEntry> entries = [];
+        bool truncated = filter is { LimitReached: true };
         try
         {
-            entries = SafeTree.List(handle);
+            if (!truncated)
+            {
+                entries = SafeTree.List(handle, cap, out truncated);
+            }
         }
         catch (IOException ex)
         {
@@ -218,15 +228,23 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             return null;
         }
 
-        if (filter is not null)
+        if (truncated)
         {
-            if (filter.LimitReached || filter.EntriesSeen + entries.Count > filter.MaxEntries)
+            handle.Dispose();
+            if (filter is null || (!filter.LimitReached && room > MaxFolderEntries))
+            {
+                emit(new(shown, ScanTreeEntryKind.Unreadable, Detail: "TooManyEntries")); // reported: this one folder wasn't scanned
+            }
+            else
             {
                 filter.LimitReached = true; // C6 / B3 M2: nothing more is listed or emitted by this job's walks
-                handle.Dispose();
-                return null;
             }
 
+            return null;
+        }
+
+        if (filter is not null)
+        {
             filter.EntriesSeen += entries.Count;
         }
 

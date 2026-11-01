@@ -55,9 +55,16 @@ internal sealed record PersistenceScanOptions
 internal sealed record PersistenceScanResult(
     IReadOnlyList<PersistenceFinding> Findings, IReadOnlyList<PersistenceIssue> Issues, int FilesScanned, int FilesSkipped, TimeSpan Duration)
 {
-    /// <summary>The Suspicious / Malicious findings, worst and highest priority first.</summary>
+    /// <summary>The Suspicious / Malicious findings, worst first, machine-wide before per-user, then highest priority.</summary>
     public IEnumerable<PersistenceFinding> Detections =>
-        Findings.Where(f => f.Verdict != Verdict.Clean).OrderByDescending(f => f.Verdict).ThenByDescending(f => f.Judgement.Priority);
+        Findings.Where(f => f.Verdict != Verdict.Clean).OrderByDescending(f => f.Verdict).ThenBy(f => f.Entry.IsMachineScope ? 0 : 1).ThenByDescending(f => f.Judgement.Priority);
+
+    /// <summary>
+    /// Every finding that isn't Clean, for the job's capped list (section C review M4): by outcome (Malicious, Suspicious, Unverified),
+    /// then machine-wide before per-user, so one user's entries can't crowd out machine-wide autostarts.
+    /// </summary>
+    public IEnumerable<PersistenceFinding> Ranked =>
+        Findings.Where(f => f.Outcome != PersistenceOutcome.Clean).OrderByDescending(f => f.Outcome).ThenBy(f => f.Entry.IsMachineScope ? 0 : 1).ThenByDescending(f => f.Judgement.Priority);
 }
 
 /// <summary>
@@ -169,12 +176,12 @@ internal sealed class PersistenceScanner(
         return new PersistenceScanResult(findings, issues, scanned, skipped, clock.Elapsed);
     }
 
-    /// <summary>Target and host paths in first-seen order, each once (case-insensitive); targets known to be missing are left out.</summary>
+    /// <summary>Machine-wide entries' files first, then in first-seen order, each once (case-insensitive); targets known to be missing are left out.</summary>
     internal static IReadOnlyList<string> DistinctFiles(IEnumerable<PersistenceEntry> entries)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<string>();
-        foreach (var entry in entries)
+        foreach (var entry in entries.OrderBy(e => e.IsMachineScope ? 0 : 1)) // section C review M4: stable, machine-wide first
         {
             var resolution = entry.Resolution;
             foreach (var command in resolution.AllCommands)

@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using Microsoft.Data.Sqlite;
 using SapAV.Core.Blocklist;
 using SapAV.Core.Models;
 using SapAV.Core.Scanning;
@@ -79,7 +77,8 @@ internal sealed record ScanCacheStats(long Hits, long Misses, long Stores, long 
 /// <para><b>Never cached</b> (the caller only offers engine / administrator-perspective scans of local files opened with
 /// writers denied, see <see cref="ScanFilePipeline"/>): NotScanned results, Malicious ones (they are quarantined or need the
 /// user), a SHA-256 the current blocklist lists, reports without a complete YARA scan under the current rules, without a
-/// hash or identity, or larger than <see cref="ScanCacheOptions.MaxReportBytes"/>.</para>
+/// hash or identity, or larger than <see cref="ScanCacheOptions.MaxReportBytes"/>. (A Microsoft-signed file with no detection has no YARA
+/// scan by design, and is cached.)</para>
 /// <para>A hit's report is the stored worker report rebuilt through <see cref="WireReportCodec.FromWire"/> (treated as
 /// untrusted, like a worker's), with the scan's own identity and a note saying it came from the cache. Never throws:
 /// anything wrong is a miss.</para>
@@ -131,10 +130,10 @@ internal sealed class ScanCache : IDisposable
             logger.LogInformation("Scan cache: {Path} ({Rows} rows).", store.DatabasePath, store.Count());
             return new ScanCache(store, fingerprints ?? new EngineScanFingerprints(broker, blocklistPath, logger), options, time, logger);
         }
-        catch (Exception ex) when (ex is QuarantineStoreException or IOException or UnauthorizedAccessException or SqliteException
-            or CryptographicException or ArgumentException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            logger.LogWarning("The scan cache is not available ({Why}); files are scanned uncached.", ex.Message);
+            // Section C review M7: anything, also a native SQLite load failure (DllNotFoundException, TypeInitializationException).
+            logger.LogWarning("The scan cache is not available ({Type}: {Why}); files are scanned uncached.", ex.GetType().Name, ex.Message);
             return null;
         }
     }
@@ -257,6 +256,23 @@ internal sealed class ScanCache : IDisposable
         && string.Equals(row.RulesFingerprint, context.RulesFingerprint, StringComparison.Ordinal)
         && string.Equals(row.EngineVersion, context.EngineVersion, StringComparison.Ordinal);
 
+    /// <summary>
+    /// The rules fingerprint a report may be cached under, or null: its complete YARA scan under the current rules, or (review C
+    /// M8) no YARA scan at all when the pipeline skipped it because the file is Microsoft-signed with no detection. Such a
+    /// row is still tied to the current rules: a rule change is simply one more scan.
+    /// </summary>
+    private static string? CachedRules(FileScanReport report, ScanResult result, ScanCacheContext context)
+    {
+        if (report.Yara is { Status: ScanStatus.Scanned, RulesFingerprint: { } rules })
+        {
+            return string.Equals(rules, context.RulesFingerprint, StringComparison.Ordinal) ? rules : null;
+        }
+
+        return report.Yara is null && result.SignatureStatus == Core.Signatures.SignatureStatus.Microsoft && result.Detections.Count == 0
+            ? context.RulesFingerprint
+            : null;
+    }
+
     private ScanCacheRow? Row(ScanItem item, FileStamp stamp, FileScanReport report)
     {
         var result = report.Result;
@@ -267,8 +283,7 @@ internal sealed class ScanCache : IDisposable
             || result.Sha256 is not { } sha
             || !report.Hash.IsHashed || report.Hash.Length != stamp.Size
             || report.Identity is null
-            || report.Yara is not { Status: ScanStatus.Scanned, RulesFingerprint: { } rules }
-            || !string.Equals(rules, context.RulesFingerprint, StringComparison.Ordinal)
+            || CachedRules(report, result, context) is not { } rules
             || context.Blocklist.Contains(sha))
         {
             return null;

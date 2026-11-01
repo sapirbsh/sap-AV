@@ -66,7 +66,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         _preflight = preflight;
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _cache = new Lazy<Cache.ScanCache?>(cacheFactory ?? (() => cache), LazyThreadSafetyMode.ExecutionAndPublication);
+        _cache = new Lazy<Cache.ScanCache?>(GuardedCacheFactory(cacheFactory ?? (() => cache), logger), LazyThreadSafetyMode.ExecutionAndPublication);
         _pipeline = new ScanFilePipeline(broker, excluded, handler, time, logger, remoteProbe, _cache);
         _walker = new ScanTreeWalker(excluded, reparseTag, remoteProbe);
         Excluded = excluded;
@@ -94,6 +94,23 @@ public sealed class ScanJobService : IScanJobService, IDisposable
             services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.ScanCache"));
         return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger, cacheFactory: CreateCache);
     }
+
+    /// <summary>
+    /// Section C review M7: a Lazy caches the exception of its factory, so a throw here would make every later file NotScanned.
+    /// Whatever goes wrong (even a native SQLite load failure), files are simply scanned uncached.
+    /// </summary>
+    private static Func<Cache.ScanCache?> GuardedCacheFactory(Func<Cache.ScanCache?> factory, ILogger logger) => () =>
+    {
+        try
+        {
+            return factory();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            logger.LogWarning(ex, "The scan cache could not be created; files are scanned uncached.");
+            return null;
+        }
+    };
 
     /// <summary>C5: the scan cache every job uses (engine / administrator perspective only), or null when it is off or unavailable.</summary>
     internal Cache.ScanCache? ResultCache => _cache.Value;
