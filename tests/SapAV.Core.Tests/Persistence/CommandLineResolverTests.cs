@@ -30,6 +30,32 @@ public class CommandLineResolverTests
     private CommandLineResolver Resolver => new(_probe);
 
     [Fact]
+    public void A32KBCallChain_ReturnsOnASmallStack_AsNestingTooDeep()
+    {
+        // Review C H1: ~6,000 "call" repeats used to overflow the stack (uncatchable). 256 KiB of stack can't hold that
+        // recursion, so returning at all proves there is no recursion per prefix.
+        string chain = @"C:\Windows\System32\cmd.exe /c " + string.Concat(Enumerable.Repeat("call ", 6_500)) + @"C:\Tools\helper.exe";
+        Assert.True(chain.Length is > 32_000 and <= EnvironmentBlock.MaxExpandedLength);
+        ResolvedCommand? result = null;
+        var thread = new Thread(() => result = Resolver.Resolve(chain, Machine), maxStackSize: 256 * 1024);
+
+        thread.Start();
+        thread.Join();
+
+        Assert.Null(result!.TargetPath);
+        Assert.Equal(TargetUnresolvedReason.NestingTooDeep, result.UnresolvedReason);
+    }
+
+    [Fact]
+    public void AFewCallPrefixes_StillResolveTheTarget()
+    {
+        var result = Resolver.Resolve(@"cmd /c call call C:\Tools\helper.exe /x", Machine);
+
+        Assert.Equal(@"C:\Tools\helper.exe", result.TargetPath);
+        Assert.Equal("/x", result.Arguments);
+    }
+
+    [Fact]
     public void QuotedPath_IsTheTarget_AndTheRestAreArguments()
     {
         var result = Resolver.Resolve("\"C:\\Program Files\\Vendor\\app.exe\" --minimized /x", Machine);

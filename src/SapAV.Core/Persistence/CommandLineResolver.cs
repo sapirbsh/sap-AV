@@ -30,12 +30,17 @@ namespace SapAV.Core.Persistence;
 /// </list>
 /// Bounded: input over <see cref="EnvironmentBlock.MaxExpandedLength"/> is <see cref="TargetUnresolvedReason.TooLong"/>,
 /// at most <see cref="MaxCandidates"/> candidates and <see cref="MaxProbes"/> probes per command line. Never throws for any input.
+/// Recursion happens only through <c>ResolveCommandLine → Unwrap → Cmd → ResolveNested</c>, and that path counts
+/// <see cref="MaxDepth"/>; nothing else here recurses, so no input can overflow the stack.
 /// </remarks>
 public sealed class CommandLineResolver(IPathProbe probe)
 {
     public const int MaxDepth = 3;
     public const int MaxCandidates = 16;
     public const int MaxProbes = 256;
+
+    /// <summary>Most <c>call</c> prefixes followed in one <c>cmd</c> command; more is <see cref="TargetUnresolvedReason.NestingTooDeep"/>.</summary>
+    public const int MaxCallPrefixes = 8;
 
     private static readonly HashSet<string> CmdBuiltins = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -503,18 +508,26 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
     private ResolvedCommand CmdInner(string host, string inner, State state, int depth)
     {
+        // "call" prefixes are stripped in a capped loop, never by recursion: a Run value is attacker-chosen, and an
+        // uncatchable stack overflow here would take the SYSTEM engine down (section C review H1).
         var tokens = Tokenize(inner);
+        for (int calls = 0; tokens.Count > 0 && tokens[0].Value.Equals("call", StringComparison.OrdinalIgnoreCase); calls++)
+        {
+            if (calls >= MaxCallPrefixes)
+            {
+                return state.Unresolved(TargetUnresolvedReason.NestingTooDeep, host, inner);
+            }
+
+            inner = inner[tokens[0].End..].Trim();
+            tokens = Tokenize(inner);
+        }
+
         if (tokens.Count == 0)
         {
             return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host);
         }
 
         string verb = tokens[0].Value;
-        if (verb.Equals("call", StringComparison.OrdinalIgnoreCase))
-        {
-            return CmdInner(host, inner[tokens[0].End..].Trim(), state, depth);
-        }
-
         if (verb.Equals("start", StringComparison.OrdinalIgnoreCase))
         {
             int i = 1;
