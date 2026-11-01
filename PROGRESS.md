@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C6 built; section C tester + reviewer pass next |
+| C — Scan modes | **In progress:** C1–C6 built, tester pass done; section reviewer pass running |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -148,7 +148,11 @@ phase; phase 4 skipped folders phase 3 never finished) are being fixed in the C5
   covers folders phase 3 didn't finish). This also fixed a dedupe bug that dropped files between phases.
 Tests: Core 1272 + 1 skipped, Engine 521 + 10 skipped.
 
-**Now:** the section C tester pass, then the section C reviewer pass.
+The **section C tester pass** is done (`9eae100`), with no production bugs: cross-step tests through the real pipe, cache
+and quarantine; a guard that fails if tests touch the real `%ProgramData%\sap-AV`; two flaky tests made deterministic.
+Tests: Core 1273 + 1 skipped, Engine 526 + 10 skipped.
+
+**Now:** the section C reviewer pass.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
