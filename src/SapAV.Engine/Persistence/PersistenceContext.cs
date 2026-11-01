@@ -22,10 +22,16 @@ internal sealed record PersistenceLimits
     /// <summary>Most subkeys / values read from one key (Services, IFEO, a Run key).</summary>
     public int MaxKeyItems { get; init; } = 4_096;
 
-    /// <summary>Quick Scan budget (ROADMAP C2: well under 10 s); whatever is left is reported as an issue.</summary>
-    // 30 s: an elevated or SYSTEM run reads every scheduled task, and slower machines (CI runners) took just over 10 s.
-    // Still a small part of the 3-minute Quick Scan target.
-    public TimeSpan TimeBudget { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>The whole collection's budget (ROADMAP C2); whatever is left is reported as an issue.</summary>
+    // An elevated or SYSTEM run opens every scheduled task; on a cold disk with real-time antivirus each open can cost tens of
+    // milliseconds (a CI runner hit 10 s and 30 s budgets, the next run on the same code didn't). The per-source timings tell.
+    public TimeSpan TimeBudget { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Most entries from one user's own locations (section C review M4): one user can't crowd out the others.</summary>
+    public int MaxEntriesPerUser { get; init; } = 2_000;
+
+    /// <summary>Longest one user's own locations may take; machine-wide locations are always collected first.</summary>
+    public TimeSpan UserTimeBudget { get; init; } = TimeSpan.FromSeconds(5);
 }
 
 /// <summary>
@@ -39,6 +45,10 @@ internal sealed class PersistenceContext
     private readonly Stopwatch _clock;
     private bool _entryCapReported;
     private bool _budgetReported;
+    private UserProfile? _currentUser;
+    private bool _userReported;
+    private int _userEntries;
+    private TimeSpan _userStarted;
 
     public PersistenceContext(
         IRegistryView registry, CommandLineResolver resolver, EnvironmentBlock machine, IReadOnlyList<UserProfile> users,
@@ -99,12 +109,59 @@ internal sealed class PersistenceContext
                 return false;
             }
 
-            return !_entryCapReported;
+            return !_entryCapReported && UserCanContinue();
         }
+    }
+
+    /// <summary>Section C review M4: from here on, what is collected counts against this user's sub-budget.</summary>
+    public void BeginUser(UserProfile user)
+    {
+        _currentUser = user;
+        _userReported = false;
+        _userEntries = 0;
+        _userStarted = _clock.Elapsed;
+    }
+
+    /// <summary>The current user's part is over: back to the collection's own budget.</summary>
+    public void EndUser() => _currentUser = null;
+
+    private bool UserCanContinue()
+    {
+        if (_currentUser is not { } user)
+        {
+            return true;
+        }
+
+        if (_clock.Elapsed - _userStarted > Limits.UserTimeBudget || _userEntries >= Limits.MaxEntriesPerUser)
+        {
+            if (!_userReported)
+            {
+                _userReported = true;
+                bool outOfTime = _userEntries < Limits.MaxEntriesPerUser;
+                AddIssue(null, user.Sid, @"HKU\" + user.Sid, outOfTime ? PersistenceIssueReason.TimeBudgetExceeded : PersistenceIssueReason.LimitReached,
+                    outOfTime
+                        ? $"The user's own locations took over {Limits.UserTimeBudget.TotalSeconds:0.#} s; the rest of them were not collected."
+                        : $"More than {Limits.MaxEntriesPerUser} entries in the user's own locations; the rest were not collected.");
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     public void Add(PersistenceEntry entry)
     {
+        if (_currentUser is not null)
+        {
+            if (!UserCanContinue())
+            {
+                return;
+            }
+
+            _userEntries++;
+        }
+
         if (_entries.Count >= Limits.MaxEntries)
         {
             if (!_entryCapReported)
@@ -132,7 +189,22 @@ internal sealed class PersistenceContext
             return PersistenceParseResult.Unavailable("The sandboxed parser isn't available.");
         }
 
-        var result = Parser.ParseAsync(file, kind, displayPath, CancellationToken).GetAwaiter().GetResult();
+        long started = Stopwatch.GetTimestamp();
+        PersistenceParseResult result;
+        try
+        {
+            result = Parser.ParseAsync(file, kind, displayPath, CancellationToken).GetAwaiter().GetResult();
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
+        {
+            result = PersistenceParseResult.Malformed($"The sandboxed parser failed on this file ({ex.GetType().Name})."); // review C M3
+        }
+        finally
+        {
+            ParsedFiles++;
+            ParseTime += Stopwatch.GetElapsedTime(started);
+        }
+
         if (result.Status == PersistenceParseStatus.Unavailable)
         {
             ParserDown = true;
@@ -221,5 +293,10 @@ internal sealed class PersistenceContext
         }
     }
 
-    public PersistenceCollection ToCollection() => new(_entries, _issues, _clock.Elapsed);
+    /// <summary>Definition files sent to the parser so far, and how long the parser took (for the per-source timings).</summary>
+    public int ParsedFiles { get; private set; }
+
+    public TimeSpan ParseTime { get; private set; }
+
+    public PersistenceCollection ToCollection(IReadOnlyList<PersistenceSourceTiming>? timings = null) => new(_entries, _issues, _clock.Elapsed, timings);
 }

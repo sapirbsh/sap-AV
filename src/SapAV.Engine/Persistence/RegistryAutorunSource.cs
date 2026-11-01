@@ -7,7 +7,11 @@ internal interface IPersistenceSource
 {
     string Name { get; }
 
-    void Collect(PersistenceContext context);
+    /// <summary>What runs for every user or as SYSTEM. The collector runs this for every source before any user's part (section C review M4).</summary>
+    void CollectMachine(PersistenceContext context);
+
+    /// <summary>What belongs to one user, under that user's sub-budget, so one user's entries can't crowd out anything machine-wide or another user's.</summary>
+    void CollectUser(PersistenceContext context, UserProfile user) { }
 }
 
 /// <summary>
@@ -36,32 +40,27 @@ internal sealed class RegistryAutorunSource : IPersistenceSource
 
     public string Name => "registry autoruns";
 
-    public void Collect(PersistenceContext context)
+    public void CollectMachine(PersistenceContext context)
     {
         CollectRunKeys(context, RegistryRoot.LocalMachine, "SOFTWARE", null, context.Machine);
         CollectRunKeys(context, RegistryRoot.LocalMachine, @"SOFTWARE\WOW6432Node", null, context.Machine, wow: true);
         CollectWinlogon(context, RegistryRoot.LocalMachine, "SOFTWARE", null, context.Machine);
-        foreach (var user in context.Users)
-        {
-            if (!context.CanContinue)
-            {
-                return;
-            }
-
-            if (!user.HiveLoaded)
-            {
-                context.AddIssue(null, user.Sid, @"HKU\" + user.Sid, PersistenceIssueReason.HiveNotLoaded,
-                    "The user isn't logged on, so their registry hive isn't loaded; their Run, RunOnce and Winlogon values weren't collected.");
-                continue;
-            }
-
-            CollectRunKeys(context, RegistryRoot.Users, user.Sid + @"\Software", user.Sid, user.Environment);
-            CollectWinlogon(context, RegistryRoot.Users, user.Sid + @"\Software", user.Sid, user.Environment);
-        }
-
         CollectIfeo(context, IfeoKey);
         CollectIfeo(context, IfeoWowKey);
         CollectSilentProcessExit(context);
+    }
+
+    public void CollectUser(PersistenceContext context, UserProfile user)
+    {
+        if (!user.HiveLoaded)
+        {
+            context.AddIssue(null, user.Sid, @"HKU\" + user.Sid, PersistenceIssueReason.HiveNotLoaded,
+                "The user isn't logged on, so their registry hive isn't loaded; their Run, RunOnce and Winlogon values weren't collected.");
+            return;
+        }
+
+        CollectRunKeys(context, RegistryRoot.Users, user.Sid + @"\Software", user.Sid, user.Environment);
+        CollectWinlogon(context, RegistryRoot.Users, user.Sid + @"\Software", user.Sid, user.Environment);
     }
 
     private static void CollectRunKeys(

@@ -23,7 +23,7 @@ internal sealed class ServiceSource : IPersistenceSource
 
     public string Name => "services";
 
-    public void Collect(PersistenceContext context)
+    public void CollectMachine(PersistenceContext context)
     {
         using var services = context.TryOpen(RegistryRoot.LocalMachine, ServicesKey, PersistenceKind.Service, null, out var display);
         if (services is null)

@@ -27,48 +27,55 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
 
     public string Name => "startup folders";
 
-    public void Collect(PersistenceContext context)
+    public void CollectMachine(PersistenceContext context)
     {
-        foreach (var (folder, sid) in folderOverride ?? Folders(context))
+        if (folderOverride is not null)
         {
-            if (!context.CanContinue)
+            foreach (var (folder, sid) in folderOverride)
             {
-                return;
+                if (context.CanContinue)
+                {
+                    CollectOne(context, folder, sid);
+                }
             }
 
-            var environment = sid is null ? context.Machine : context.Users.FirstOrDefault(u => u.Sid == sid)?.Environment ?? context.Machine;
-            using var approved = sid is null
-                ? context.TryOpen(RegistryRoot.LocalMachine, @"SOFTWARE\" + Approved, PersistenceKind.StartupFolder, null, out _)
-                : context.Users.Any(u => u.Sid == sid && u.HiveLoaded)
-                    ? context.TryOpen(RegistryRoot.Users, $@"{sid}\Software\{Approved}", PersistenceKind.StartupFolder, sid, out _)
-                    : null;
-            CollectFolder(context, folder, sid, environment, approved);
+            return;
         }
-    }
 
-    private static List<(string, string?)> Folders(PersistenceContext context)
-    {
-        var folders = new List<(string, string?)>();
         string? common = ShellFolder(context, RegistryRoot.LocalMachine, @"SOFTWARE\" + ShellFolders, "Common Startup", context.Machine)
             ?? (context.Machine.Get("ProgramData") is { } programData ? Path.Join(programData, DefaultSuffix) : null);
         if (common is not null)
         {
-            folders.Add((common, null));
+            CollectOne(context, common, null);
         }
+    }
 
-        foreach (var user in context.Users)
+    public void CollectUser(PersistenceContext context, UserProfile user)
+    {
+        if (folderOverride is not null)
         {
-            string? folder = user.HiveLoaded
-                ? ShellFolder(context, RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}", "Startup", user.Environment)
-                : null;
-            folder ??= user.ProfilePath is { } profile ? Path.Join(profile, @"AppData\Roaming", DefaultSuffix) : null;
-            if (folder is not null)
-            {
-                folders.Add((folder, user.Sid));
-            }
+            return;
         }
 
-        return folders;
+        string? folder = user.HiveLoaded
+            ? ShellFolder(context, RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}", "Startup", user.Environment)
+            : null;
+        folder ??= user.ProfilePath is { } profile ? Path.Join(profile, @"AppData\Roaming", DefaultSuffix) : null;
+        if (folder is not null)
+        {
+            CollectOne(context, folder, user.Sid);
+        }
+    }
+
+    private static void CollectOne(PersistenceContext context, string folder, string? sid)
+    {
+        var environment = sid is null ? context.Machine : context.Users.FirstOrDefault(u => u.Sid == sid)?.Environment ?? context.Machine;
+        using var approved = sid is null
+            ? context.TryOpen(RegistryRoot.LocalMachine, @"SOFTWARE\" + Approved, PersistenceKind.StartupFolder, null, out _)
+            : context.Users.Any(u => u.Sid == sid && u.HiveLoaded)
+                ? context.TryOpen(RegistryRoot.Users, $@"{sid}\Software\{Approved}", PersistenceKind.StartupFolder, sid, out _)
+                : null;
+        CollectFolder(context, folder, sid, environment, approved);
     }
 
     private static string? ShellFolder(PersistenceContext context, RegistryRoot root, string path, string name, EnvironmentBlock environment)
@@ -106,7 +113,11 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
         List<SafeTreeEntry> items;
         try
         {
-            items = SafeTree.List(handle);
+            items = SafeTree.List(handle, MaxItems, out bool truncated);
+            if (truncated)
+            {
+                context.AddIssue(PersistenceKind.StartupFolder, sid, display, PersistenceIssueReason.LimitReached, $"More than {MaxItems} items; the rest were skipped.");
+            }
         }
         catch (IOException)
         {
@@ -114,12 +125,7 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             return;
         }
 
-        if (items.Count > MaxItems)
-        {
-            context.AddIssue(PersistenceKind.StartupFolder, sid, display, PersistenceIssueReason.LimitReached, $"More than {MaxItems} items; the rest were skipped.");
-        }
-
-        foreach (var item in items.Take(MaxItems))
+        foreach (var item in items)
         {
             if (!context.CanContinue)
             {
@@ -131,9 +137,23 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
                 continue;
             }
 
+            CollectItem(context, handle, display, item, sid, environment, approved);
+        }
+    }
+
+    /// <summary>One item; its failure is reported and the next item is collected (section C review M3).</summary>
+    private static void CollectItem(
+        PersistenceContext context, SafeFileHandle folder, string display, SafeTreeEntry item, string? sid, EnvironmentBlock environment, IRegistryKeyReader? approved)
+    {
+        try
+        {
             bool enabled = approved is null || RegistryAutorunSource.IsApproved(PersistenceContext.ReadValue(approved, item.Name));
-            var (command, resolution) = Resolve(context, handle, display, item, environment);
+            var (command, resolution) = Resolve(context, folder, display, item, environment);
             context.Add(new PersistenceEntry(PersistenceKind.StartupFolder, sid, display, item.Name, command, resolution, enabled));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            context.AddIssue(PersistenceKind.StartupFolder, sid, SafeTree.Child(display, item.Name), PersistenceIssueReason.Error, $"The item can't be read ({ex.GetType().Name}).");
         }
     }
 

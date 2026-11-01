@@ -236,8 +236,18 @@ internal static unsafe class SafeTree
 
     /// <summary>Lists a folder from its handle (opened with FILE_LIST_DIRECTORY, synchronous). "." and ".." are skipped.</summary>
     /// <exception cref="IOException">The listing failed.</exception>
-    public static List<SafeTreeEntry> List(SafeFileHandle directory)
+    public static List<SafeTreeEntry> List(SafeFileHandle directory) => List(directory, int.MaxValue, out _);
+
+    /// <summary>
+    /// Lists at most <paramref name="maxEntries"/> entries, batch by batch, and stops there (section C review M5): a folder with
+    /// millions of files can't take the engine's memory before a cap is looked at.
+    /// </summary>
+    /// <param name="truncated">The folder has more entries than were returned.</param>
+    /// <exception cref="IOException">The listing failed.</exception>
+    public static List<SafeTreeEntry> List(SafeFileHandle directory, int maxEntries, out bool truncated)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxEntries);
+        truncated = false;
         var entries = new List<SafeTreeEntry>();
         const int size = 64 * 1024;
         byte* buffer = (byte*)NativeMemory.Alloc(size);
@@ -258,7 +268,11 @@ internal static unsafe class SafeTree
                 }
 
                 infoClass = FileFullDirectoryInfoClass;
-                Parse(buffer, size, entries);
+                if (!Parse(buffer, size, entries, maxEntries))
+                {
+                    truncated = true;
+                    return entries;
+                }
             }
         }
         finally
@@ -271,7 +285,8 @@ internal static unsafe class SafeTree
     public static string Child(string directory, string name) =>
         directory.EndsWith('\\') ? directory + name : directory + "\\" + name;
 
-    private static void Parse(byte* buffer, int size, List<SafeTreeEntry> entries)
+    /// <returns>False when an entry didn't fit under <paramref name="maxEntries"/>.</returns>
+    private static bool Parse(byte* buffer, int size, List<SafeTreeEntry> entries, int maxEntries)
     {
         // FILE_FULL_DIR_INFO: NextEntryOffset 0, FileIndex 4, times 8-39, EndOfFile 40, AllocationSize 48, FileAttributes 56,
         // FileNameLength 60, EaSize 64 (the reparse tag when FILE_ATTRIBUTE_REPARSE_POINT is set), FileName 68.
@@ -292,6 +307,11 @@ internal static unsafe class SafeTree
                 string name = new((char*)(entry + 68), 0, nameBytes / 2);
                 if (name is not ("." or ".."))
                 {
+                    if (entries.Count >= maxEntries)
+                    {
+                        return false;
+                    }
+
                     bool reparse = (attributes & N.FileAttributeReparsePoint) != 0;
                     entries.Add(new SafeTreeEntry(name, (FileAttributes)attributes, reparse ? tag : 0, length, created, written, changed));
                 }
@@ -299,11 +319,13 @@ internal static unsafe class SafeTree
 
             if (next == 0)
             {
-                return;
+                return true;
             }
 
             offset += (int)next;
         }
+
+        return true;
     }
 
     private static SafeTreeFailure Map(int error) => error switch

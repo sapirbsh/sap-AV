@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Persistence;
 using SapAV.Engine.Scanning;
 using N = SapAV.Engine.Quarantine.Native.QuarantineNative;
@@ -19,7 +20,8 @@ internal interface IPersistenceCollector
 }
 
 /// <summary>
-/// Runs the sources in order (registry autoruns, services, Startup folders, scheduled tasks) against one context: the
+/// Runs each source's machine-wide part in order (registry autoruns, services, Startup folders, scheduled tasks), then each
+/// user's own part under that user's sub-budget (section C review M4), against one context: the
 /// machine environment and the user profiles are read once. A source that throws is reported as an
 /// <see cref="PersistenceIssueReason.Error"/> issue and the next one runs. Nothing is written, executed, or opened beyond
 /// registry keys, the Startup / Tasks folders and their files (no-follow, size-capped, parsed only in the sandboxed worker), and attribute-only existence
@@ -42,36 +44,73 @@ internal sealed class PersistenceCollector(
     public PersistenceCollection Collect(CancellationToken cancellationToken = default)
     {
         var clock = Stopwatch.StartNew();
-        var resolver = new CommandLineResolver(probe is SafePathProbe safe ? safe.Fresh() : probe);
+        using var freshProbe = probe is SafePathProbe safe ? safe.Fresh() : null;
+        var resolver = new CommandLineResolver(freshProbe ?? probe);
         var machine = RegistryEnvironment.Machine(registry);
         var context = new PersistenceContext(registry, resolver, machine, [], _limits, cancellationToken, clock, parser);
         context.Users = RegistryEnvironment.Profiles(registry, machine, context.AddIssue, max: 256);
+        var timings = sources.ToDictionary(s => s, s => new PersistenceSourceTiming(s.Name, TimeSpan.Zero, 0, 0, 0, TimeSpan.Zero));
+
+        // Section C review M4: everything machine-wide first, so no user's own entries can use up what it needs.
         foreach (var source in sources)
+        {
+            RunSource(context, source, timings, s => s.CollectMachine(context));
+        }
+
+        foreach (var user in context.Users)
         {
             if (!context.CanContinue)
             {
                 break;
             }
 
-            try
+            context.BeginUser(user);
+            foreach (var source in sources)
             {
-                source.Collect(context);
+                RunSource(context, source, timings, s => s.CollectUser(context, user));
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Persistence source {Source} failed", source.Name);
-                context.AddIssue(null, null, source.Name, PersistenceIssueReason.Error, $"The {source.Name} collector failed ({ex.GetType().Name}).");
-            }
+
+            context.EndUser();
         }
 
-        var result = context.ToCollection();
-        _logger.LogInformation("Persistence collection: {Entries} entries, {Issues} issues in {Milliseconds} ms",
-            result.Entries.Count, result.Issues.Count, (long)result.Duration.TotalMilliseconds);
+        var result = context.ToCollection(sources.Select(s => timings[s]).ToArray());
+        _logger.LogInformation("Persistence collection: {Entries} entries, {Issues} issues in {Milliseconds} ms. {Timings}",
+            result.Entries.Count, result.Issues.Count, (long)result.Duration.TotalMilliseconds, string.Join("; ", result.SourceTimings));
         return result;
+    }
+
+    private void RunSource(
+        PersistenceContext context, IPersistenceSource source, Dictionary<IPersistenceSource, PersistenceSourceTiming> timings, Action<IPersistenceSource> collect)
+    {
+        if (!context.CanContinue)
+        {
+            return;
+        }
+
+        var (started, entries, issues, parsed, parseTime) = (Stopwatch.GetTimestamp(), context.Entries.Count, context.Issues.Count, context.ParsedFiles, context.ParseTime);
+        try
+        {
+            collect(source);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Persistence source {Source} failed", source.Name);
+            context.AddIssue(null, null, source.Name, PersistenceIssueReason.Error, $"The {source.Name} collector failed ({ex.GetType().Name}).");
+        }
+
+        var soFar = timings[source];
+        timings[source] = soFar with
+        {
+            Duration = soFar.Duration + Stopwatch.GetElapsedTime(started),
+            Entries = soFar.Entries + context.Entries.Count - entries,
+            Issues = soFar.Issues + context.Issues.Count - issues,
+            ParsedFiles = soFar.ParsedFiles + context.ParsedFiles - parsed,
+            ParseTime = soFar.ParseTime + context.ParseTime - parseTime,
+        };
     }
 }
 
@@ -80,9 +119,20 @@ internal sealed class PersistenceCollector(
 /// never following a junction / symlink / mount point, never on a network drive or UNC path (so SYSTEM can't be made to
 /// authenticate to a server), never recalling a cloud file, never reading content. Answers are cached per collection.
 /// </summary>
-internal sealed class SafePathProbe : IPathProbe
+/// <remarks>
+/// Speed (the slow-collection finding): opening a path component by component costs one NtCreateFile per folder, and an elevated
+/// run probes thousands of candidates along the same few folders (System32, each PATH entry). So each folder is opened once,
+/// through <see cref="SafeTree"/>, and kept for this collection (at most <see cref="MaxFolders"/>); a probe is then one
+/// relative open, and a folder that doesn't exist answers for everything below it without any open at all.
+/// </remarks>
+internal sealed class SafePathProbe : IPathProbe, IDisposable
 {
+    public const int MaxFolders = 128;
+
+    private const uint FolderAccess = N.FileTraverse | N.FileReadAttributes;
+
     private readonly Dictionary<string, PathProbeResult> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (SafeFileHandle? Handle, SafeTreeFailure Failure)> _folders = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A probe with an empty cache (one per collection, so a file created since is seen).</summary>
     public SafePathProbe Fresh() => new();
@@ -102,9 +152,59 @@ internal sealed class SafePathProbe : IPathProbe
             _cache.Clear();
         }
 
-        using var handle = SafeTree.Open(path, N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var failure, out _);
-        var result = handle is not null ? PathProbeResult.Exists : failure == SafeTreeFailure.NotFound ? PathProbeResult.Missing : PathProbeResult.Unknown;
+        var result = ProbeUncached(path);
         _cache[path] = result;
         return result;
+    }
+
+    public void Dispose()
+    {
+        foreach (var (handle, _) in _folders.Values)
+        {
+            handle?.Dispose();
+        }
+
+        _folders.Clear();
+    }
+
+    private PathProbeResult ProbeUncached(string path)
+    {
+        int separator = path.LastIndexOf('\\');
+        if (separator <= 2 || separator == path.Length - 1)
+        {
+            return Classify(SafeTree.Open(path, N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var failure, out _), failure);
+        }
+
+        var (folder, folderFailure) = Folder(path[..separator]);
+        if (folder is null)
+        {
+            return folderFailure == SafeTreeFailure.NotFound ? PathProbeResult.Missing : PathProbeResult.Unknown;
+        }
+
+        return Classify(SafeTree.OpenChild(folder, path[(separator + 1)..], N.FileReadAttributes, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var childFailure, out _), childFailure);
+    }
+
+    private static PathProbeResult Classify(SafeFileHandle? handle, SafeTreeFailure failure)
+    {
+        using (handle)
+        {
+            return handle is not null ? PathProbeResult.Exists : failure == SafeTreeFailure.NotFound ? PathProbeResult.Missing : PathProbeResult.Unknown;
+        }
+    }
+
+    private (SafeFileHandle? Handle, SafeTreeFailure Failure) Folder(string path)
+    {
+        if (_folders.TryGetValue(path, out var known))
+        {
+            return known;
+        }
+
+        if (_folders.Count >= MaxFolders)
+        {
+            Dispose(); // over the cap: start over, so a hostile PATH can't hold many handles
+        }
+
+        var handle = SafeTree.Open(path, FolderAccess, SafeTree.ShareAll, N.FileDirectoryFile, out var failure, out _);
+        return _folders[path] = (handle, failure);
     }
 }

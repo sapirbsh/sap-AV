@@ -87,11 +87,21 @@ public sealed record PersistenceIssue
     public string Message { get; }
 }
 
+/// <summary>What one source cost during a collection (machine and per-user parts together), for the log and for finding slow sources.</summary>
+/// <param name="ParsedFiles">Shortcuts / task definitions sent to the sandboxed parser.</param>
+/// <param name="ParseTime">Time spent waiting for that parser (part of <paramref name="Duration"/>).</param>
+public sealed record PersistenceSourceTiming(string Source, TimeSpan Duration, int Entries, int Issues, int ParsedFiles, TimeSpan ParseTime)
+{
+    public override string ToString() =>
+        $"{Source}: {Duration.TotalMilliseconds:0} ms, {Entries} entries, {Issues} issues, {ParsedFiles} files parsed ({ParseTime.TotalMilliseconds:0} ms)";
+}
+
 /// <summary>The result of one collection: the entries and what couldn't be collected. Never thrown, always returned.</summary>
 public sealed record PersistenceCollection
 {
     [JsonConstructor]
-    public PersistenceCollection(IReadOnlyList<PersistenceEntry> entries, IReadOnlyList<PersistenceIssue> issues, TimeSpan duration)
+    public PersistenceCollection(
+        IReadOnlyList<PersistenceEntry> entries, IReadOnlyList<PersistenceIssue> issues, TimeSpan duration, IReadOnlyList<PersistenceSourceTiming>? sourceTimings = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(issues);
@@ -103,7 +113,11 @@ public sealed record PersistenceCollection
         Entries = Array.AsReadOnly(entries.ToArray());
         Issues = Array.AsReadOnly(issues.ToArray());
         Duration = duration < TimeSpan.Zero ? TimeSpan.Zero : duration;
+        SourceTimings = Array.AsReadOnly((sourceTimings ?? []).ToArray());
     }
+
+    /// <summary>What each source cost, in the order they first ran.</summary>
+    public IReadOnlyList<PersistenceSourceTiming> SourceTimings { get; }
 
     public IReadOnlyList<PersistenceEntry> Entries { get; }
 

@@ -159,6 +159,6 @@ public sealed class RegistryCollectorTests : IDisposable
     {
         public string Name => "thrower";
 
-        public void Collect(PersistenceContext context) => throw new InvalidOperationException("boom");
+        public void CollectMachine(PersistenceContext context) => throw new InvalidOperationException("boom");
     }
 }

@@ -27,7 +27,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
 
     public string Name => "scheduled tasks";
 
-    public void Collect(PersistenceContext context)
+    public void CollectMachine(PersistenceContext context)
     {
         string? root = tasksRoot ?? (context.Machine.SystemRoot is { } systemRoot ? Path.Join(systemRoot, @"System32\Tasks") : null);
         if (root is null || CorePersistenceText.NormalizeLocalPath(root) is not { } folder)
@@ -81,7 +81,11 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
         List<SafeTreeEntry> items;
         try
         {
-            items = SafeTree.List(folder.Handle);
+            items = SafeTree.List(folder.Handle, MaxFiles, out bool truncated);
+            if (truncated)
+            {
+                context.AddIssue(PersistenceKind.ScheduledTask, null, folder.TaskPath + @"\", PersistenceIssueReason.LimitReached, $"More than {MaxFiles} items in one task folder; the rest were skipped.");
+            }
         }
         catch (IOException)
         {
@@ -131,7 +135,15 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
                 return;
             }
 
-            CollectTask(context, folder.Handle, item.Name, taskPath);
+            try
+            {
+                CollectTask(context, folder.Handle, item.Name, taskPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // Section C review M3: one task's problem is that task's issue, not the whole source's.
+                context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Error, $"The task can't be read ({ex.GetType().Name}).");
+            }
         }
     }
 
