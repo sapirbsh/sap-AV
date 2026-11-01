@@ -26,7 +26,11 @@ public class RealMachineCollectionTests(ITestOutputHelper output)
             WorkerCount = 1,
             Isolation = WorkerIsolation.UnsandboxedForTests,
         }, new FakeRulesSource(), NullLogger.Instance);
-        var collector = PersistenceCollector.CreateDefault(parser: broker);
+        // CreateDefault's wiring with one change: a user's own locations get the whole budget instead of 5 s. The 5 s per-user
+        // sub-budget is real load shedding (it reports TimeBudgetExceeded for that user, honestly), and under a combined test run
+        // the CPU is shared with other projects, so it tripped here. The whole-collection budget is still asserted below.
+        var collector = new PersistenceCollector(new WindowsRegistryView(), new SafePathProbe(), PersistenceCollector.DefaultSources(),
+            new PersistenceLimits { UserTimeBudget = new PersistenceLimits().TimeBudget }, parser: broker);
 
         var result = collector.Collect();
 
