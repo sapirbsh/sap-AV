@@ -105,6 +105,34 @@ public sealed class ScanBrokerAppContainerTests(AppContainerFixture fixture) : I
     }
 
     [RequiresFact(Requires.AppContainer)]
+    public void TasksAndShortcuts_AreParsedInsideTheContainer_DeepXmlIsMalformed_AndACrashIsAnIssue()
+    {
+        // Review C H2 in the sandbox the service really uses: brokered read-only handles, the worker can't open anything by path.
+        var broker = new SandboxedScanBroker(fixture.Container.Options(), new FakeRulesSource(), NullLogger.Instance)
+        {
+            ParseFaultInjector = path => path.EndsWith("Crash", StringComparison.Ordinal) ? WorkerTestFault.Crash : WorkerTestFault.None,
+        };
+        _owned.Add(broker);
+        const string task = @"<Task><Actions><Exec><Command>C:\Tools\ok.exe</Command></Exec></Actions></Task>";
+        File.WriteAllText(Path.Combine(_dir, "Crash"), task);
+        File.WriteAllText(Path.Combine(_dir, "Good"), task);
+        File.WriteAllText(Path.Combine(_dir, "Deep"), "<Task>" + string.Concat(Enumerable.Repeat("<a>", 140_000)) + string.Concat(Enumerable.Repeat("</a>", 140_000)) + "</Task>");
+        var links = Directory.CreateDirectory(Path.Combine(_dir, "links")).FullName;
+        File.WriteAllBytes(Path.Combine(links, "app.lnk"), new Core.Tests.TestSupport.ShellLinkBuilder { IdListPath = @"C:\Tools\app.exe" }.Build());
+        using var root = new Persistence.RegistryTestRoot();
+
+        var result = new SapAV.Engine.Persistence.PersistenceCollector(root.View, new Persistence.SetProbe(),
+            [new SapAV.Engine.Persistence.StartupFolderSource([(links, null)]), new SapAV.Engine.Persistence.ScheduledTaskSource(_dir)], parser: broker).Collect();
+
+        Assert.Contains(result.Entries, e => e.ValueName == "app.lnk" && e.Resolution.TargetPath == @"C:\Tools\app.exe");
+        Assert.Contains(result.Entries, e => e.Location == @"\Good" && e.Resolution.TargetPath == @"C:\Tools\ok.exe");
+        Assert.Contains(result.Issues, i => i.Location == @"\Deep" && i.Reason == Core.Persistence.PersistenceIssueReason.Malformed);
+        Assert.Contains(result.Issues, i => i.Location == @"\Crash" && i.Reason == Core.Persistence.PersistenceIssueReason.Malformed);
+        Assert.DoesNotContain(result.Issues, i => i.Reason == Core.Persistence.PersistenceIssueReason.ParserUnavailable);
+        Assert.True(broker.Slots[0].Worker!.QueryToken().IsAppContainer);
+    }
+
+    [RequiresFact(Requires.AppContainer)]
     public async Task CrashInsideTheContainer_IsNotScanned_AndTheWorkerRestarts()
     {
         var broker = new SandboxedScanBroker(fixture.Container.Options(), new FakeRulesSource(), NullLogger.Instance)
