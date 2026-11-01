@@ -656,6 +656,10 @@ public sealed partial class ScanJob
         {
             if (inWalk && entry.Kind == ScanTreeEntryKind.File)
             {
+                // Whole-job budget first: the last phase's deadline equals it, and if the workers have already drained the
+                // queue nothing else would notice, so a job out of budget could end Completed instead of TimedOut.
+                job.CheckBudget();
+
                 lock (job._lock)
                 {
                     if (job.ElapsedLocked() > Phase.Deadline || job.ElapsedLocked() > _rootDeadline)
