@@ -8,7 +8,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C6 built, 5 High fixed; follow-up review running |
+| C — Scan modes | **In progress:** C1–C6 built; follow-up review found 4 more High, being fixed |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
@@ -188,7 +188,22 @@ expire after 14 days. Microsoft-signed files are now cached too. Tests: Core 132
 - **Possible noise:** "Incomplete" now fires on any Unverified entry, so most real scans may say Incomplete. The review
   is checking this.
 
-**Now:** the short follow-up review of the worker move and the Unverified change. Then section C is done.
+The **follow-up review** confirmed that the worker move (H2), the cache fix (H5) and the stack-overflow fix (H1) hold, but
+found **4 more High**, three of them new ways an unscanned payload still comes out Clean:
+- **H-A:** `cmd.exe /d/c evil.exe` (and `/cevil.exe`, or more than 64 switches) was read as "just cmd.exe" → Clean.
+- **H-B:** a payload judged "missing" when it isn't: an unquoted path with a dotted folder, or `ev^il.exe` (cmd removes
+  the `^`).
+- **H-C:** a shortcut whose real target sits in an ID list the parser doesn't support → only the decoy target is scanned.
+- **H-D:** any standard user can mark a folder as a cloud placeholder (no OneDrive needed), and Quick and Full Scan then
+  skip it silently.
+
+**Now:** fixing these four, plus two items pulled forward: Unverified entries that are expected (like OneDrive's own
+inline Run commands) won't make every scan say "Incomplete", and autostart collection gets at most ~25% of Quick Scan's
+time, with a short parse timeout. The other Medium/Low findings are in ROADMAP.md.
+
+**Note:** making autostart judging airtight is an arms race (every launcher has its own argument tricks). The rule kept
+here is the one that matters: if sap-AV can't see the real payload, the entry is **Unverified, never Clean**. Remaining
+launcher tricks are listed under E4.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine

@@ -494,6 +494,30 @@ already-impersonating thread) are fixed in C1.
   - **D1 (L7):** the journal ID isn't bound to rows (admin-only to exploit).
   - **D1 L6 is downgraded for NTFS:** a deny-writers open fails with error 32 while a writable view exists, so it falls
     back to the shared path and isn't cached.
+- **Section C follow-up review (4 High: cmd switch parsing, false "missing" targets, unsupported shortcut ID lists,
+  user-settable placeholder folders; fixed in the follow-up fix round, together with M3 Unverified classes and M6
+  collection budget share). Remaining:**
+  - **C2 follow-up (M1):** `System32\Tasks` is user-writable (`Authenticated Users:(CI)(W,Rc)`). Root files count as
+    machine scope and come before `\Microsoft\…`, so 625 fake files × 32 actions reach MaxEntries 20,000 and blind every
+    later task and user entry. Use TaskCache (admin-only) as the authoritative task list, bucket files with no TaskCache
+    entry by file owner with their own cap, walk admin-owned subfolders first, and give each source its own entry share.
+  - **C2 follow-up (M2 rest):** parse crashes push up the restart backoff on the shared scan slots (about 12 crashing
+    files use up 60 s and stall other jobs). Add a per-collection failure limit and a dedicated parse slot.
+  - **E4 (M4):** host-argument payloads behind Microsoft binaries come out Clean: `regsvr32 /i:C:\…\evil.sct scrobj.dll`,
+    `regsvr32 /s evil.dll scrobj.dll` (only the last DLL is kept), `rundll32 url.dll,FileProtocolHandler <exe>`,
+    `rundll32 shell32.dll,ShellExec_RunDLL <exe>`, `conhost --headless <exe>`, `forfiles /c`. Extract the argument
+    payloads or mark them Unverified.
+  - **D4 (M5):** tasks with `<GroupId>` or a name principal never check user `Classes\CLSID` overrides, and
+    `ComClassNotRegistered` with an unloaded hive is treated as "nothing runs". Check every loaded `_Classes`; an unknown
+    hive is Unverified.
+  - **C5 (L2):** cached Microsoft-signed rows are tied to `EngineInfo.Version`, which carries the git SHA only when built
+    from git. Add a trust-policy fingerprint (allowlist + trust store) to the cache context.
+  - **C3 / B6 (L3):** Unverified entries write no Event Log record, so a SIEM never sees them. Consider an informational
+    event.
+  - **F (L4):** the alert `FilePath` and the pipe `TargetPath` show only the primary command, even when the detection came
+    from an `Additional` command. Show the command that matched.
+  - **C2 (L5):** a `Win32Exception` while duplicating a handle marks the parser down for the whole collection. Retry once
+    with a fresh slot.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.
