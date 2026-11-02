@@ -187,6 +187,56 @@ public class CommandLineResolverTests
         Assert.Equal(TargetUnresolvedReason.InlineCommand, builtin.UnresolvedReason);
     }
 
+    [Theory]
+    [InlineData(@"cmd.exe /d/c C:\Users\me\evil.exe")] // follow-up review H-A: attached switches
+    [InlineData(@"cmd.exe /cC:\Users\me\evil.exe")] // the command attached to /c
+    [InlineData(@"cmd.exe /Q /D /V:ON /e:off /T:0A /S /K C:\Users\me\evil.exe")]
+    [InlineData(@"cmd.exe /q/r C:\Users\me\evil.exe")]
+    public void Cmd_SwitchesAreReadLikeCmd_AttachedFormsIncluded(string commandLine)
+    {
+        var result = Resolver.Resolve(commandLine, Machine);
+
+        Assert.Equal(@"C:\Users\me\evil.exe", result.TargetPath);
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", result.HostPath);
+    }
+
+    [Fact]
+    public void Cmd_ManySwitches_AreNotCutAtTheTokenCap_AndPastTheSwitchCapAreUnknown()
+    {
+        string Repeat(int n) => @"cmd.exe " + string.Concat(Enumerable.Repeat("/d ", n)) + @"/c C:\Users\me\evil.exe";
+
+        var withinCap = Resolver.Resolve(Repeat(CmdSwitches.MaxSwitches - 1), Machine);
+        var overCap = Resolver.Resolve(Repeat(70), Machine);
+
+        Assert.Equal(@"C:\Users\me\evil.exe", withinCap.TargetPath);
+        Assert.Null(overCap.TargetPath); // never "cmd.exe itself"
+        Assert.Equal(TargetUnresolvedReason.SearchLimitReached, overCap.UnresolvedReason);
+    }
+
+    [Theory]
+    [InlineData(@"cmd.exe foo /c C:\Users\me\evil.exe")]
+    [InlineData(@"cmd.exe /z /c C:\Users\me\evil.exe")]
+    [InlineData(@"cmd.exe ""/c"" C:\Users\me\evil.exe")]
+    [InlineData(@"cmd.exe /dx /c C:\Users\me\evil.exe")]
+    public void Cmd_ArgumentsThatArentKnownSwitches_AreNotUnderstood_NotAnInteractiveShell(string commandLine)
+    {
+        var result = Resolver.Resolve(commandLine, Machine);
+
+        Assert.Null(result.TargetPath);
+        Assert.Equal(TargetUnresolvedReason.HostArgumentsNotUnderstood, result.UnresolvedReason);
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", result.HostPath);
+    }
+
+    [Fact]
+    public void Cmd_OnlyKnownSwitches_IsAnInteractiveShell_AndRegsvr32PastTheTokenCapIsUnknown()
+    {
+        var shell = Resolver.Resolve("cmd.exe /d /q", Machine);
+        var regsvr32 = Resolver.Resolve("regsvr32 " + string.Concat(Enumerable.Repeat("/s ", 70)) + @"C:\Users\me\evil.dll", Machine);
+
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", shell.TargetPath);
+        Assert.Equal(TargetUnresolvedReason.SearchLimitReached, regsvr32.UnresolvedReason);
+    }
+
     [Fact]
     public void PowerShell_File_IsTheTarget_CommandsAreInline()
     {

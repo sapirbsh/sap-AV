@@ -21,7 +21,9 @@ namespace SapAV.Core.Persistence;
 /// <see cref="TargetUnresolvedReason.NetworkPath"/>; <c>\\.\</c>, <c>\??\</c>, <c>\\?\GLOBALROOT</c> are device paths.</item>
 /// <item>System hosts in System32 / SysWOW64 (or PowerShell 7 under Program Files) are unwrapped to their payload:
 /// <c>rundll32 &lt;dll&gt;,&lt;entry&gt;</c>, <c>regsvr32 [/s /u /n /i:x] &lt;dll&gt;</c> (a URL in <c>/i:</c> is
-/// <see cref="ResolutionFlag.RemotePayload"/>), <c>cmd /c|/k &lt;command&gt;</c> (resolved again; <c>start</c> and
+/// <see cref="ResolutionFlag.RemotePayload"/>), <c>cmd /c|/k|/r &lt;command&gt;</c> (switches read as cmd reads them, attached
+/// forms like <c>/d/c</c> and <c>/cX</c> included, see <see cref="CmdSwitches"/>; anything else before the command is
+/// <see cref="TargetUnresolvedReason.HostArgumentsNotUnderstood"/>; the command is resolved again; <c>start</c> and
 /// <c>call</c> skipped; other built-ins are <see cref="ResolutionFlag.InlineCommand"/>; every command of a <c>&amp;</c> / <c>|</c> chain is resolved),
 /// <c>powershell|pwsh -File &lt;script&gt;</c> (<c>-Command</c>, <c>-EncodedCommand</c> and their prefixes are inline),
 /// <c>wscript|cscript &lt;script&gt;</c>, <c>mshta &lt;hta|url|javascript:&gt;</c>. A host elsewhere (a copied
@@ -513,7 +515,12 @@ public sealed class CommandLineResolver(IPathProbe probe)
     private ResolvedCommand Regsvr32(string host, string args, State state)
     {
         state.Flags.Add(ResolutionFlag.InterpreterHost);
-        var tokens = Tokenize(args);
+        var tokens = Tokenize(args, out bool truncated);
+        if (truncated)
+        {
+            return state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host, args); // the DLL is the last name: past the cap it's unknown
+        }
+
         int dllIndex = -1;
         for (int i = 0; i < tokens.Count; i++)
         {
@@ -559,16 +566,23 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
     private ResolvedCommand Cmd(string host, string args, State state, int depth)
     {
-        var tokens = Tokenize(args);
-        int index = tokens.FindIndex(t => t.Value.Equals("/c", StringComparison.OrdinalIgnoreCase)
-            || t.Value.Equals("/k", StringComparison.OrdinalIgnoreCase) || t.Value.Equals("/r", StringComparison.OrdinalIgnoreCase));
-        if (index < 0)
+        var switches = CmdSwitches.Parse(args);
+        if (switches.Outcome == CmdSwitches.Kind.InteractiveShell)
         {
-            return state.Resolved(host, args); // an interactive shell: cmd itself is the target
+            return state.Resolved(host, args); // only known switches and no /c /k /r: cmd itself is the target
         }
 
         state.Flags.Add(ResolutionFlag.InterpreterHost);
-        string inner = args[tokens[index].End..].Trim();
+        if (switches.Outcome != CmdSwitches.Kind.Command)
+        {
+            // Follow-up review H-A: text cmd may read differently from us (an unknown switch, a word, too many switches) is
+            // never "cmd itself": what it runs is unknown.
+            return state.Unresolved(switches.Outcome == CmdSwitches.Kind.TooMany
+                ? TargetUnresolvedReason.SearchLimitReached
+                : TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+        }
+
+        string inner = args[switches.CommandStart..].Trim();
         if (inner.Length >= 2 && inner[0] == '"' && inner[^1] == '"' && inner.Count(c => c == '"') > 2)
         {
             inner = inner[1..^1].Trim(); // cmd strips the outer quotes in this case (see cmd /?)
@@ -708,7 +722,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
     private ResolvedCommand PowerShell(string host, string args, State state, bool positionalIsFile)
     {
-        var tokens = Tokenize(args);
+        var tokens = Tokenize(args, out bool truncated);
         if (tokens.Count == 0)
         {
             return state.Resolved(host, args); // an interactive shell
@@ -716,7 +730,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
         state.Flags.Add(ResolutionFlag.InterpreterHost);
         NotePowerShellStealth(tokens, state);
-        for (int i = 0; i < tokens.Count; i++)
+        bool stopped = false; // an inline command, stdin or a positional command came before the tokens ran out
+        for (int i = 0; i < tokens.Count && !stopped; i++)
         {
             string value = tokens[i].Value;
             if (value.Length > 1 && IsDash(value[0]))
@@ -731,7 +746,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
                 if (IsInlinePowerShellParameter(name))
                 {
-                    break;
+                    stopped = true;
+                    continue;
                 }
 
                 if (TakesPowerShellValue(name))
@@ -744,7 +760,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
             if (value == "-")
             {
-                break; // commands from standard input
+                stopped = true; // commands from standard input
+                continue;
             }
 
             if (positionalIsFile)
@@ -752,7 +769,12 @@ public sealed class CommandLineResolver(IPathProbe probe)
                 return ScriptPayload(host, value, args[tokens[i].End..].Trim(), state);
             }
 
-            break; // Windows PowerShell: a positional argument is a command
+            stopped = true; // Windows PowerShell: a positional argument is a command
+        }
+
+        if (truncated && !stopped)
+        {
+            return state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host, args); // a -File may lie past the cap
         }
 
         state.Flags.Add(ResolutionFlag.InlineCommand);
@@ -807,10 +829,10 @@ public sealed class CommandLineResolver(IPathProbe probe)
     private ResolvedCommand ScriptHost(string host, string args, State state)
     {
         state.Flags.Add(ResolutionFlag.InterpreterHost);
-        var tokens = Tokenize(args);
+        var tokens = Tokenize(args, out bool truncated);
         int index = tokens.FindIndex(t => !t.Value.StartsWith("//", StringComparison.Ordinal));
         return index < 0
-            ? state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args)
+            ? state.Unresolved(truncated ? TargetUnresolvedReason.SearchLimitReached : TargetUnresolvedReason.MissingHostArgument, host, args)
             : ScriptPayload(host, tokens[index].Value, args[tokens[index].End..].Trim(), state);
     }
 
@@ -850,12 +872,19 @@ public sealed class CommandLineResolver(IPathProbe probe)
         return file.Path is { } path ? state.Resolved(path, remaining, host) : state.Unresolved(file.Reason!.Value, host, remaining);
     }
 
-    /// <summary>Splits arguments by the MSVC rules (quotes group, <c>\"</c> is a literal quote); at most 64 tokens.</summary>
-    internal static List<(string Value, string Raw, int Start, int End)> Tokenize(string text)
+    /// <summary>Most tokens <see cref="Tokenize(string)"/> returns.</summary>
+    public const int MaxTokens = 64;
+
+    /// <summary>Splits arguments by the MSVC rules (quotes group, <c>\"</c> is a literal quote); at most <see cref="MaxTokens"/> tokens.</summary>
+    internal static List<(string Value, string Raw, int Start, int End)> Tokenize(string text) => Tokenize(text, out _);
+
+    /// <param name="truncated">True when text is left after <see cref="MaxTokens"/> tokens (what a host does with it is unknown).</param>
+    internal static List<(string Value, string Raw, int Start, int End)> Tokenize(string text, out bool truncated)
     {
         var tokens = new List<(string, string, int, int)>();
         int i = 0;
-        while (i < text.Length && tokens.Count < 64)
+        truncated = false;
+        while (i < text.Length)
         {
             while (i < text.Length && text[i] is ' ' or '\t')
             {
@@ -864,6 +893,12 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
             if (i >= text.Length)
             {
+                break;
+            }
+
+            if (tokens.Count >= MaxTokens)
+            {
+                truncated = true;
                 break;
             }
 

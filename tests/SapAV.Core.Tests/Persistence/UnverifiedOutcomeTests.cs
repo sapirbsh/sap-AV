@@ -74,6 +74,17 @@ public class UnverifiedOutcomeTests
     }
 
     [Fact]
+    public void CmdWithArgumentsItDoesntUnderstand_IsUnverified_EvenWithCmdScannedClean()
+    {
+        // Follow-up review H-A: this used to resolve to Microsoft-signed cmd.exe ("an interactive shell") and come out Clean.
+        var resolved = Resolve(@"cmd.exe /z /c C:\Users\u\evil.exe");
+
+        var judgement = Judge.Judge(RunEntry(resolved), null, Report(Cmd, signature: MicrosoftSigned()), new FakeAcl());
+
+        Assert.Equal(PersistenceOutcome.Unverified, judgement.Outcome);
+    }
+
+    [Fact]
     public void AChain_ResolvesEveryCommand_AndAMaliciousLaterCommandIsCarried()
     {
         var resolved = Resolve(@"cmd /c notepad.exe & C:\Users\u\evil.exe /x && C:\Tools\missing.exe || del C:\x");

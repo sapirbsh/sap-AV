@@ -54,4 +54,10 @@ public enum TargetUnresolvedReason
 
     /// <summary>The probe or candidate cap ran out before the search order did, so the target is unknown (not known missing).</summary>
     SearchLimitReached,
+
+    /// <summary>
+    /// A host's own arguments hold something the resolver doesn't read the way the host does (an unknown <c>cmd</c> switch, a
+    /// word before <c>/c</c>): what it runs is unknown, never "the host itself".
+    /// </summary>
+    HostArgumentsNotUnderstood,
 }
