@@ -153,15 +153,26 @@ public static class PersistenceRules
                 return; // nothing runs
             }
 
-            context.AddUnverified($"What this entry runs isn't known or has no file to scan ({reason}).");
+            context.AddUnverified($"What this entry runs isn't known or has no file to scan ({reason}).", KindOf(reason));
         }
+
+        /// <summary>
+        /// M3: a cap or a resolver limit is a gap in the scan; everything else here is how the entry is written (inline code, a
+        /// URL / network / device path, a relative or unknown path, no file named), which no scan could verify.
+        /// </summary>
+        internal static UnverifiedKind KindOf(TargetUnresolvedReason? reason) => reason switch
+        {
+            TargetUnresolvedReason.SearchLimitReached or TargetUnresolvedReason.NestingTooDeep or TargetUnresolvedReason.HostArgumentsNotUnderstood
+                or null => UnverifiedKind.Coverage,
+            _ => UnverifiedKind.Inherent,
+        };
 
         private static void NotScanned(PersistenceRuleContext context)
         {
             var report = context.Target;
             string why = report is null ? "it wasn't scanned" : $"it couldn't be scanned ({report.Result.Status})";
             context.Add(PersistenceRuleIds.TargetNotScanned, 0, $"The autostart target {context.TargetName} has no verdict: {why}.");
-            context.AddUnverified($"{context.TargetName}: {why}.");
+            context.AddUnverified($"{context.TargetName}: {why}.", UnverifiedKind.Coverage); // M3: the scan didn't reach it
 
             // A program that SYSTEM can't read or reach, but that the entry still starts, is a signal by itself.
             string? unreadable = report?.Hash.FailureReason switch

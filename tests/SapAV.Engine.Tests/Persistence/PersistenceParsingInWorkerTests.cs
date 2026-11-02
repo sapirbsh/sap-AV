@@ -35,7 +35,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         _folder.Dispose();
     }
 
-    private SandboxedScanBroker Broker(Func<string, WorkerTestFault>? faults = null, int maxFailures = 2)
+    private SandboxedScanBroker Broker(Func<string, WorkerTestFault>? faults = null, int maxFailures = 2, TimeSpan? parseTimeout = null)
     {
         var broker = new SandboxedScanBroker(new SandboxOptions
         {
@@ -44,6 +44,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
             EnableWorkerTestHooks = true,
             Isolation = WorkerIsolation.UnsandboxedForTests,
             RequestTimeout = TimeSpan.FromSeconds(30),
+            ParseTimeout = parseTimeout ?? TimeSpan.FromSeconds(5),
             RestartBackoffInitial = TimeSpan.FromMilliseconds(10),
             RestartBackoffMax = TimeSpan.FromMilliseconds(100),
             MaxFailuresPerFile = maxFailures,
@@ -128,6 +129,23 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
 
         Assert.Equal(2, crashes);
         Assert.Contains(third.Issues, i => i.Location == @"\Crash" && i.Reason == PersistenceIssueReason.Malformed && i.Message.Contains("not sent"));
+    }
+
+    [Fact]
+    public void AHangingParse_StopsAtTheShortParseTimeout_NotTheScanRequestTimeout()
+    {
+        // Follow-up review M2: one hanging parse used to hold the collection for the 60 s scan RequestTimeout (30 s here).
+        WriteTask("Hang", GoodTask);
+        WriteTask("Good", GoodTask.Replace("ok.exe", "fine.exe", StringComparison.Ordinal));
+        var broker = Broker(path => path.EndsWith("Hang", StringComparison.Ordinal) ? WorkerTestFault.Hang : WorkerTestFault.None,
+            parseTimeout: TimeSpan.FromSeconds(1));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var result = Collect(broker, new ScheduledTaskSource(_folder.Path));
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(20), $"took {clock.Elapsed}");
+        Assert.Equal(@"C:\Tools\fine.exe", Assert.Single(result.Entries).Resolution.TargetPath);
+        Assert.Contains(result.Issues, i => i.Location == @"\Hang" && i.Reason == PersistenceIssueReason.Malformed);
     }
 
     [Theory]

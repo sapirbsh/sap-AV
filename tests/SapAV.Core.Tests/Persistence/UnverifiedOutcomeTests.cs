@@ -223,6 +223,28 @@ public class UnverifiedOutcomeTests
         Assert.Equal(expected, Judge.Judge(entry, null, null, new FakeAcl()).Outcome);
     }
 
+    [Theory]
+    [InlineData(TargetUnresolvedReason.InlineCommand, UnverifiedKind.Inherent)] // M3: how the entry is written
+    [InlineData(TargetUnresolvedReason.NetworkPath, UnverifiedKind.Inherent)]
+    [InlineData(TargetUnresolvedReason.SearchLimitReached, UnverifiedKind.Coverage)] // a cap: the scan fell short
+    [InlineData(TargetUnresolvedReason.HostArgumentsNotUnderstood, UnverifiedKind.Coverage)]
+    public void UnverifiedReasons_AreClassedInherentOrCoverage(TargetUnresolvedReason reason, UnverifiedKind expected)
+    {
+        Assert.Equal(expected, Run(Entry(null, unresolved: reason)).UnverifiedKind);
+    }
+
+    [Fact]
+    public void ATargetThatWasntScanned_IsACoverageGap_EvenNextToAnInherentOne()
+    {
+        var resolved = Resolve(@"cmd /c echo hi & C:\Users\u\evil.exe"); // evil.exe gets no report
+
+        var judgement = JudgeScanned(resolved, Cmd);
+
+        Assert.Equal(UnverifiedKind.Coverage, judgement.UnverifiedKind);
+        Assert.Equal(UnverifiedKind.Coverage, Run(Entry(Evil)).UnverifiedKind);
+        Assert.Null(Run(Entry(Evil), Report(Evil, signature: VendorSigned())).UnverifiedKind); // scanned: nothing unverified
+    }
+
     [Fact]
     public void ADisabledUnverifiedEntry_IsLowPriority()
     {

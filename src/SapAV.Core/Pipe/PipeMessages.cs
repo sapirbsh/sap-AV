@@ -387,7 +387,11 @@ public enum PhaseState
 }
 
 /// <summary>One phase of a multi-phase job; name and notes are engine text (sanitised, capped).</summary>
-public sealed record ScanPhaseInfo(string Name, PhaseState State, TimeSpan Duration, long Files, int Findings, IReadOnlyList<string> Notes);
+/// <param name="UnverifiedEntries">
+/// M3: autostart entries unverified by how they are written (inline commands, network / device paths, no file): counted, the phase
+/// stays Completed. Absent in older messages (0).
+/// </param>
+public sealed record ScanPhaseInfo(string Name, PhaseState State, TimeSpan Duration, long Files, int Findings, IReadOnlyList<string> Notes, int UnverifiedEntries = 0);
 
 [JsonConverter(typeof(StrictEnumConverter<FindingCategory>))]
 public enum FindingCategory
@@ -421,10 +425,11 @@ public sealed record ScanFindingsRequest(Guid JobId, int Offset = 0, int Limit =
 /// <param name="TargetVerdict">The target file's scan verdict, if it was scanned.</param>
 /// <param name="Outcome">What the entry is. <see cref="Persistence.PersistenceOutcome.Unverified"/>: something it runs has no scan result, and the finding has no verdict.</param>
 /// <param name="UnverifiedReasons">Why (administrators: the judgement's text, sanitised; everyone else: nothing beyond the outcome).</param>
+/// <param name="UnverifiedKind">M3: for an Unverified entry, whether that is how it is written (Inherent) or a gap in the scan (Coverage).</param>
 public sealed record PersistenceFindingInfo(
     Persistence.PersistenceKind Kind, bool MachineWide, string? UserSid, WirePath Location, WirePath? ValueName, WirePath? CommandLine,
     WirePath? TargetPath, bool Enabled, IReadOnlyList<string> RuleIds, Verdict? TargetVerdict, Persistence.PersistenceOutcome Outcome,
-    IReadOnlyList<string> UnverifiedReasons);
+    IReadOnlyList<string> UnverifiedReasons, Persistence.UnverifiedKind? UnverifiedKind = null);
 
 /// <param name="FindingId">Stable index of the finding in its job (findings are only appended).</param>
 /// <param name="Verdict">Null when there is no verdict: an Unverified autostart entry (see <see cref="PersistenceFindingInfo.Outcome"/>).</param>

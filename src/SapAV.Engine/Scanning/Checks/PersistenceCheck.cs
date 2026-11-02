@@ -7,8 +7,9 @@ using SapAV.Engine.Persistence;
 namespace SapAV.Engine.Scanning.Checks;
 
 /// <summary>
-/// Quick Scan phase 2 (C4): every autostart location. <see cref="IPersistenceCollector.Collect"/> (read-only, its own
-/// 60 s budget), then <see cref="IPersistenceScanner.ScanAsync"/> with:
+/// Quick Scan phase 2 (C4): every autostart location. <see cref="IPersistenceCollector.Collect"/> (read-only; M6: a budget of
+/// min(60 s, about a quarter of the job's remaining time), the job's pause / cancel / budget checked between sources), then
+/// <see cref="IPersistenceScanner.ScanAsync"/> with:
 /// <list type="bullet">
 /// <item><b>Parallelism 1 and the job's inline scan</b> (<see cref="IScanCheckContext.ScanNow"/>) as the target scanner,
 /// so every open stays on the job's background-mode thread (C3 note), pause and the budget apply per target, and a target
@@ -32,9 +33,29 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
 
     public bool NeedsEarlierReports => true;
 
+    /// <summary>Most of a job's remaining time the collection may take (M6); the scans of the targets and the later phases need the rest.</summary>
+    public const double CollectionShare = 0.25;
+
+    /// <summary>The shortest collection budget given, however little of the job is left.</summary>
+    public static readonly TimeSpan MinCollectionBudget = TimeSpan.FromSeconds(1);
+
+    /// <summary>M6: min(the collector's own limit, about a quarter of the job's remaining time), never under <see cref="MinCollectionBudget"/>.</summary>
+    internal static TimeSpan CollectionBudget(TimeSpan remaining, TimeSpan limit)
+    {
+        var share = remaining <= TimeSpan.Zero ? TimeSpan.Zero
+            : remaining >= TimeSpan.FromDays(1) ? limit // no job budget to speak of (Full Scan)
+            : TimeSpan.FromTicks((long)(remaining.Ticks * CollectionShare));
+        var budget = share < limit ? share : limit;
+        return budget < MinCollectionBudget ? MinCollectionBudget : budget;
+    }
+
     public void Run(IScanCheckContext context)
     {
-        var collection = collector.Collect(context.CancellationToken);
+        var collection = collector.Collect(context.CancellationToken, new PersistenceCollectOptions
+        {
+            TimeBudget = CollectionBudget(context.RemainingBudget, new PersistenceLimits().TimeBudget),
+            Checkpoint = context.Checkpoint, // pause, cancel and the job's budget between sources
+        });
         context.Checkpoint();
         int skippedByBudget = 0;
         var options = new PersistenceScanOptions
@@ -64,7 +85,10 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
 
         int detections = result.Findings.Count(f => f.Verdict != Verdict.Clean);
         int unverified = result.Findings.Count(f => f.Outcome == PersistenceOutcome.Unverified);
-        context.Note($"{result.Findings.Count} autostart entries, {detections} flagged, {unverified} unverified, {result.FilesScanned} target files scanned.");
+        int inherent = result.Findings.Count(f => f.Outcome == PersistenceOutcome.Unverified && f.Judgement.UnverifiedKind == UnverifiedKind.Inherent);
+        context.CountUnverified(inherent);
+        context.Note($"{result.Findings.Count} autostart entries, {detections} flagged, {unverified} unverified ({inherent} by how they are written: "
+            + $"inline commands, network or device paths, no file), {result.FilesScanned} target files scanned.");
         foreach (var group in result.Issues.GroupBy(i => i.Reason).OrderBy(g => g.Key))
         {
             context.Note($"{group.Count()} location(s) not fully collected: {group.Key}.");
@@ -78,9 +102,12 @@ internal sealed class PersistenceCheck(IPersistenceCollector collector, IPersist
             context.MarkIncomplete($"Some autostart locations weren't fully collected: {string.Join(", ", incomplete)}.");
         }
 
-        if (result.Findings.Any(f => f.Judgement.IsUnverified))
+        // M3: only a gap in the scan makes the phase Incomplete; an entry that is unverifiable by how it is written (OneDrive's own
+        // Run values, inline commands) is counted above and the phase stays Completed. Also a flagged entry can have a gap.
+        int gaps = result.Findings.Count(f => f.Judgement.UnverifiedKind == UnverifiedKind.Coverage);
+        if (gaps > 0)
         {
-            context.MarkIncomplete($"{result.Findings.Count(f => f.Judgement.IsUnverified)} autostart entries run something that could not be scanned.");
+            context.MarkIncomplete($"{gaps} autostart entries run something the scan didn't reach (time, a cap, a locked, denied or placeholder file, a resolver limit).");
         }
 
         if (skippedByBudget > 0)

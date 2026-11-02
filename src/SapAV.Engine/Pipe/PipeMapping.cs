@@ -163,7 +163,7 @@ internal static class PipeMapping
 
     public static ScanPhaseInfo Phase(Scanning.Checks.ScanPhaseSummary p) =>
         new(Text(p.Name, MaxPhaseNameLength), Enum.Parse<PhaseState>(p.State.ToString()), p.Duration, p.Files, p.Findings,
-            p.Notes.Take(MaxPhaseNotes).Select(n => Text(n)).ToArray());
+            p.Notes.Take(MaxPhaseNotes).Select(n => Text(n)).ToArray(), Math.Max(0, p.UnverifiedEntries));
 
     /// <summary>
     /// One finding for a client (C4). Entry text (registry values, task files, shortcut targets) is attacker-controlled, so
@@ -195,7 +195,8 @@ internal static class PipeMapping
                 forAdmin ? WirePath.From(entry.CommandLine) : null,
                 entry.Resolution.TargetPath is { } target ? WirePath.From(target) : null,
                 entry.Enabled, rules, p.Target?.Verdict, judgement.Outcome,
-                forAdmin ? judgement.UnverifiedReasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray() : []);
+                forAdmin ? judgement.UnverifiedReasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray() : [],
+                judgement.UnverifiedKind);
         }
 
         return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence);

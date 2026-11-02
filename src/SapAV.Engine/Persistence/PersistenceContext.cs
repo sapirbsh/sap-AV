@@ -49,6 +49,7 @@ internal sealed class PersistenceContext
     private bool _userReported;
     private int _userEntries;
     private TimeSpan _userStarted;
+    private TimeSpan _paused;
 
     public PersistenceContext(
         IRegistryView registry, CommandLineResolver resolver, EnvironmentBlock machine, IReadOnlyList<UserProfile> users,
@@ -86,7 +87,13 @@ internal sealed class PersistenceContext
 
     public IReadOnlyList<PersistenceIssue> Issues => _issues;
 
-    public TimeSpan Elapsed => _clock.Elapsed;
+    public TimeSpan Elapsed => Now;
+
+    /// <summary>Running time: the clock minus the time a scan job held the collection paused (M6).</summary>
+    private TimeSpan Now => _clock.Elapsed - _paused;
+
+    /// <summary>M6: time the job's checkpoint blocked (paused); it doesn't count against the budgets.</summary>
+    public void AddPausedTime(TimeSpan paused) => _paused += paused > TimeSpan.Zero ? paused : TimeSpan.Zero;
 
     /// <summary>
     /// False once the entry cap or the time budget is reached (each reported once): sources stop their loops.
@@ -97,7 +104,7 @@ internal sealed class PersistenceContext
         get
         {
             CancellationToken.ThrowIfCancellationRequested();
-            if (_clock.Elapsed > Limits.TimeBudget)
+            if (Now > Limits.TimeBudget)
             {
                 if (!_budgetReported)
                 {
@@ -119,7 +126,7 @@ internal sealed class PersistenceContext
         _currentUser = user;
         _userReported = false;
         _userEntries = 0;
-        _userStarted = _clock.Elapsed;
+        _userStarted = Now;
     }
 
     /// <summary>The current user's part is over: back to the collection's own budget.</summary>
@@ -132,7 +139,7 @@ internal sealed class PersistenceContext
             return true;
         }
 
-        if (_clock.Elapsed - _userStarted > Limits.UserTimeBudget || _userEntries >= Limits.MaxEntriesPerUser)
+        if (Now - _userStarted > Limits.UserTimeBudget || _userEntries >= Limits.MaxEntriesPerUser)
         {
             if (!_userReported)
             {
@@ -298,5 +305,5 @@ internal sealed class PersistenceContext
 
     public TimeSpan ParseTime { get; private set; }
 
-    public PersistenceCollection ToCollection(IReadOnlyList<PersistenceSourceTiming>? timings = null) => new(_entries, _issues, _clock.Elapsed, timings);
+    public PersistenceCollection ToCollection(IReadOnlyList<PersistenceSourceTiming>? timings = null) => new(_entries, _issues, Now, timings);
 }

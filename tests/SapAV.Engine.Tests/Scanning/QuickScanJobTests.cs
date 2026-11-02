@@ -35,9 +35,13 @@ internal sealed class FakeCollector(PersistenceCollection collection) : IPersist
 {
     public int Calls { get; private set; }
 
-    public PersistenceCollection Collect(CancellationToken cancellationToken = default)
+    /// <summary>The options of the last call (M6: the collection budget and the job's checkpoint).</summary>
+    public PersistenceCollectOptions? LastOptions { get; private set; }
+
+    public PersistenceCollection Collect(CancellationToken cancellationToken = default, PersistenceCollectOptions? options = null)
     {
         Calls++;
+        LastOptions = options;
         return collection;
     }
 }

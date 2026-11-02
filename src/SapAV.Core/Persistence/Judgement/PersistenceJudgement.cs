@@ -48,6 +48,25 @@ public enum PersistenceOutcome
     Malicious,
 }
 
+/// <summary>
+/// Why an Unverified entry is unverified (section C follow-up review M3). Serialized to JSON by name.
+/// </summary>
+[JsonConverter(typeof(StrictEnumConverter<UnverifiedKind>))]
+public enum UnverifiedKind
+{
+    /// <summary>
+    /// How the entry itself is: an inline command or script body, a URL / network / device path, no file it names, a path that
+    /// depends on an unknown folder. No scan could verify it; it is counted, and the scan is still complete.
+    /// </summary>
+    Inherent,
+
+    /// <summary>
+    /// The scan fell short: a time budget, a cap, the worker unavailable, a locked / denied / placeholder target, a resolver limit.
+    /// The scan didn't cover the entry, so the phase is Incomplete.
+    /// </summary>
+    Coverage,
+}
+
 /// <summary>Stable IDs of the C3 rules' signals (UI, tests and E4's added rules key on them).</summary>
 public static class PersistenceRuleIds
 {
@@ -135,7 +154,8 @@ public sealed record PersistenceJudgement
 
     public PersistenceJudgement(
         Verdict verdict, int score, int threshold, PersistencePriority priority, string techniqueId, IReadOnlyList<string> secondaryTechniqueIds,
-        IReadOnlyList<PersistenceSignal> signals, IReadOnlyList<Detection> detections, IReadOnlyList<string>? unverifiedReasons = null)
+        IReadOnlyList<PersistenceSignal> signals, IReadOnlyList<Detection> detections, IReadOnlyList<string>? unverifiedReasons = null,
+        UnverifiedKind? unverifiedKind = null)
     {
         if (!Enum.IsDefined(verdict) || !Enum.IsDefined(priority))
         {
@@ -161,7 +181,20 @@ public sealed record PersistenceJudgement
         Detections = Array.AsReadOnly(detections.ToArray());
         UnverifiedReasons = Array.AsReadOnly((unverifiedReasons ?? []).Select(r => SafeText.SingleLine(r, PersistenceSignal.MaxReasonLength))
             .Distinct(StringComparer.Ordinal).Take(MaxUnverifiedReasons).ToArray());
+        if (unverifiedKind is { } kind && !Enum.IsDefined(kind))
+        {
+            throw new ArgumentOutOfRangeException(nameof(unverifiedKind), kind, "Undefined unverified kind.");
+        }
+
+        // Without a kind, unverified counts as a coverage gap: the safe side (the scan says it is incomplete).
+        UnverifiedKind = UnverifiedReasons.Count == 0 ? null : unverifiedKind ?? Persistence.UnverifiedKind.Coverage;
     }
+
+    /// <summary>
+    /// M3: why the entry is unverified; null when it isn't. <see cref="Persistence.UnverifiedKind.Coverage"/> when any part of it
+    /// is a coverage gap, else <see cref="Persistence.UnverifiedKind.Inherent"/>.
+    /// </summary>
+    public UnverifiedKind? UnverifiedKind { get; }
 
     /// <summary>The detections' worst verdict; Clean when there are none, which doesn't mean verified: see <see cref="Outcome"/>.</summary>
     public Verdict Verdict { get; }

@@ -15,8 +15,23 @@ internal interface IPersistenceCollector
     /// Collects the entries, read-only. Never throws for a collection problem: access denied, an unloaded hive, a
     /// malformed task, the time budget or a cap become <see cref="PersistenceCollection.Issues"/>.
     /// </summary>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    PersistenceCollection Collect(CancellationToken cancellationToken = default);
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled, or <see cref="PersistenceCollectOptions.Checkpoint"/> threw it.
+    /// </exception>
+    PersistenceCollection Collect(CancellationToken cancellationToken = default, PersistenceCollectOptions? options = null);
+}
+
+/// <summary>Follow-up review M6: what a scan job adds to one collection.</summary>
+internal sealed record PersistenceCollectOptions
+{
+    /// <summary>The whole collection's budget instead of <see cref="PersistenceLimits.TimeBudget"/> (never more than it); null = the limit's.</summary>
+    public TimeSpan? TimeBudget { get; init; }
+
+    /// <summary>
+    /// Called between sources and between users (a scan job's pause / cancel / budget check). Time spent in it (paused) doesn't
+    /// count against the budget; whatever it throws ends the collection.
+    /// </summary>
+    public Action? Checkpoint { get; init; }
 }
 
 /// <summary>
@@ -41,24 +56,27 @@ internal sealed class PersistenceCollector(
 
     public static IReadOnlyList<IPersistenceSource> DefaultSources() => [new RegistryAutorunSource(), new ServiceSource(), new StartupFolderSource(), new ScheduledTaskSource()];
 
-    public PersistenceCollection Collect(CancellationToken cancellationToken = default)
+    public PersistenceCollection Collect(CancellationToken cancellationToken = default, PersistenceCollectOptions? options = null)
     {
         var clock = Stopwatch.StartNew();
         using var freshProbe = probe is SafePathProbe safe ? safe.Fresh() : null;
         var resolver = new CommandLineResolver(freshProbe ?? probe);
         var machine = RegistryEnvironment.Machine(registry);
-        var context = new PersistenceContext(registry, resolver, machine, [], _limits, cancellationToken, clock, parser);
+        var limits = options?.TimeBudget is { } budget && budget < _limits.TimeBudget ? _limits with { TimeBudget = budget } : _limits;
+        var context = new PersistenceContext(registry, resolver, machine, [], limits, cancellationToken, clock, parser);
         context.Users = RegistryEnvironment.Profiles(registry, machine, context.AddIssue, max: 256);
         var timings = sources.ToDictionary(s => s, s => new PersistenceSourceTiming(s.Name, TimeSpan.Zero, 0, 0, 0, TimeSpan.Zero));
 
         // Section C review M4: everything machine-wide first, so no user's own entries can use up what it needs.
         foreach (var source in sources)
         {
+            Checkpoint(context, options);
             RunSource(context, source, timings, s => s.CollectMachine(context));
         }
 
         foreach (var user in context.Users)
         {
+            Checkpoint(context, options);
             if (!context.CanContinue)
             {
                 break;
@@ -77,6 +95,25 @@ internal sealed class PersistenceCollector(
         _logger.LogInformation("Persistence collection: {Entries} entries, {Issues} issues in {Milliseconds} ms. {Timings}",
             result.Entries.Count, result.Issues.Count, (long)result.Duration.TotalMilliseconds, string.Join("; ", result.SourceTimings));
         return result;
+    }
+
+    /// <summary>M6: the job's checkpoint between sources; time it blocks (paused) is taken off the collection's budget clock.</summary>
+    private static void Checkpoint(PersistenceContext context, PersistenceCollectOptions? options)
+    {
+        if (options?.Checkpoint is not { } checkpoint)
+        {
+            return;
+        }
+
+        long started = Stopwatch.GetTimestamp();
+        try
+        {
+            checkpoint();
+        }
+        finally
+        {
+            context.AddPausedTime(Stopwatch.GetElapsedTime(started));
+        }
     }
 
     private void RunSource(

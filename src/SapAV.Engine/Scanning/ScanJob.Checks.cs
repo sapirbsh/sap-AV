@@ -52,6 +52,8 @@ public sealed partial class ScanJob
 
         public bool Incomplete { get; set; }
 
+        public int Unverified { get; set; }
+
         public bool WalkDone { get; set; }
 
         public bool ShareNoted { get; set; }
@@ -68,7 +70,7 @@ public sealed partial class ScanJob
         public long ExpectedBytes { get; set; }
 
         public ScanPhaseSummary Snapshot(TimeSpan now) =>
-            new(Check.Name, State, State == ScanPhaseState.Running ? now - Started : Duration, Files, Findings, Notes.ToArray());
+            new(Check.Name, State, State == ScanPhaseState.Running ? now - Started : Duration, Files, Findings, Notes.ToArray()) { UnverifiedEntries = Unverified };
     }
 
     /// <summary>Findings that aren't single-file results (persistence entries, later the threat pack's), in the order found.</summary>
@@ -639,6 +641,14 @@ public sealed partial class ScanJob
                 {
                     Phase.Notes.Add(SafeText.SingleLine(message, MaxNoteLength));
                 }
+            }
+        }
+
+        public void CountUnverified(int count)
+        {
+            lock (job._lock)
+            {
+                Phase.Unverified += Math.Max(0, count);
             }
         }
 

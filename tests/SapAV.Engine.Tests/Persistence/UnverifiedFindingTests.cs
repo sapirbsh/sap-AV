@@ -147,7 +147,7 @@ public sealed class UnverifiedFindingTests : IDisposable
 
         var phase = job.Phases.Single(p => p.Name == "Autostart entries");
         Assert.Equal(ScanPhaseState.Incomplete, phase.State);
-        Assert.Contains(phase.Notes, n => n.Contains("could not be scanned", StringComparison.Ordinal));
+        Assert.Contains(phase.Notes, n => n.Contains("the scan didn't reach", StringComparison.Ordinal)); // M3: a resolver limit is a coverage gap
         var finding = Assert.Single(job.Findings);
         Assert.Null(finding.Verdict); // never "Clean"
         Assert.DoesNotContain(q.Alerts.Snapshot(), a => a.Autostart is not null);
@@ -159,6 +159,44 @@ public sealed class UnverifiedFindingTests : IDisposable
         var user = PipeMapping.Finding(0, finding, forAdmin: false);
         Assert.Equal(PersistenceOutcome.Unverified, user.Persistence!.Outcome);
         Assert.Empty(user.Persistence.UnverifiedReasons);
+    }
+
+    [Fact]
+    public async Task InherentlyUnverifiedEntries_AreCounted_AndThePhaseStaysCompleted_AndThePipeSaysHowMany()
+    {
+        // Follow-up review M3: OneDrive's own HKCU Run values resolve to inline commands, so every Quick Scan said Incomplete.
+        using var q = new QuickScanHarness();
+        q.Entries.Add(new PersistenceEntry(PersistenceKind.RunKey, null, MachineRun, "Inline", "cmd /c echo hi",
+            ResolvedCommand.Unresolved(TargetUnresolvedReason.InlineCommand, flags: [ResolutionFlag.InlineCommand]), enabled: true));
+        q.Entries.Add(new PersistenceEntry(PersistenceKind.RunKey, null, MachineRun, "Share", @"\\server\share\a.exe",
+            ResolvedCommand.Unresolved(TargetUnresolvedReason.NetworkPath), enabled: false));
+
+        var job = await q.RunAsync();
+
+        var phase = job.Phases.Single(p => p.Name == "Autostart entries");
+        Assert.Equal(ScanPhaseState.Completed, phase.State);
+        Assert.Equal(2, phase.UnverifiedEntries);
+        Assert.Equal(2, PipeMapping.Phase(phase).UnverifiedEntries);
+        var inline = job.Findings.Single(f => f.Persistence!.Entry.ValueName == "Inline");
+        Assert.Equal(UnverifiedKind.Inherent, PipeMapping.Finding(0, inline, forAdmin: false).Persistence!.UnverifiedKind);
+    }
+
+    [Fact]
+    public async Task AnInherentAndACoverageGap_TheGapMakesThePhaseIncomplete()
+    {
+        using var q = new QuickScanHarness();
+        var locked = q.Write(@"Apps\locked.exe");
+        q.Entries.Add(new PersistenceEntry(PersistenceKind.RunKey, null, MachineRun, "Inline", "cmd /c echo hi",
+            ResolvedCommand.Unresolved(TargetUnresolvedReason.InlineCommand), enabled: true));
+        q.Entries.Add(new PersistenceEntry(PersistenceKind.RunKey, null, MachineRun, "Locked", locked, ResolvedCommand.Resolved(locked), enabled: true));
+        using var holder = new FileStream(locked, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        var job = await q.RunAsync();
+
+        var phase = job.Phases.Single(p => p.Name == "Autostart entries");
+        Assert.Equal(ScanPhaseState.Incomplete, phase.State);
+        Assert.Equal(1, phase.UnverifiedEntries); // the inline one; the locked one is the gap
+        Assert.Contains(phase.Notes, n => n.Contains("1 autostart entries run something the scan didn't reach", StringComparison.Ordinal));
     }
 
     [Theory]

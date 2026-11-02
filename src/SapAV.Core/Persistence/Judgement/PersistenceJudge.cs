@@ -172,7 +172,8 @@ public sealed class PersistenceJudge
             priority--;
         }
 
-        return new PersistenceJudgement(verdict, score, threshold, priority, primary, allTechniques, signals, detections, context.UnverifiedReasons);
+        return new PersistenceJudgement(verdict, score, threshold, priority, primary, allTechniques, signals, detections, context.UnverifiedReasons,
+            context.HasCoverageGap ? UnverifiedKind.Coverage : UnverifiedKind.Inherent);
     }
 }
 
@@ -281,12 +282,22 @@ public sealed class PersistenceRuleContext
     /// <summary>Why something this entry runs has no scan result (section C review H4).</summary>
     public IReadOnlyList<string> UnverifiedReasons => _unverified;
 
-    /// <summary>Marks the entry Unverified: without a detection it must never read as Clean.</summary>
-    public void AddUnverified(string reason)
+    /// <summary>
+    /// Marks the entry Unverified: without a detection it must never read as Clean. M3: <paramref name="kind"/> says whether it is
+    /// how the entry is (<see cref="UnverifiedKind.Inherent"/>) or a gap in the scan (<see cref="UnverifiedKind.Coverage"/>, the default).
+    /// </summary>
+    public void AddUnverified(string reason, UnverifiedKind kind = UnverifiedKind.Coverage)
     {
         ArgumentNullException.ThrowIfNull(reason);
         _unverified.Add(reason);
+        if (kind == UnverifiedKind.Coverage || !Enum.IsDefined(kind))
+        {
+            HasCoverageGap = true;
+        }
     }
+
+    /// <summary>M3: some <see cref="AddUnverified"/> was a coverage gap.</summary>
+    public bool HasCoverageGap { get; private set; }
 
     /// <summary>Takes over what the rules found about another command of this entry (the same signal counts once).</summary>
     internal void Merge(PersistenceRuleContext other)
@@ -301,6 +312,7 @@ public sealed class PersistenceRuleContext
 
         _carried.AddRange(other.Carried);
         _unverified.AddRange(other.UnverifiedReasons);
+        HasCoverageGap |= other.HasCoverageGap;
     }
 
     public void Add(PersistenceSignal signal)

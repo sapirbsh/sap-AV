@@ -89,6 +89,9 @@ internal interface IScanCheckContext
 
     /// <summary>This phase couldn't cover everything (its own cap or budget); the job summary says so.</summary>
     void MarkIncomplete(string why);
+
+    /// <summary>M3: adds <paramref name="count"/> to the phase's <see cref="ScanPhaseSummary.UnverifiedEntries"/>.</summary>
+    void CountUnverified(int count);
 }
 
 /// <summary>What a finding is about (E adds Defender, proxy / hosts, process behaviour ...).</summary>
@@ -140,4 +143,11 @@ public enum ScanPhaseState
 /// <param name="Duration">Running time spent in the phase (paused time excluded), including waiting for its queued files.</param>
 /// <param name="Files">Files queued or scanned inline by the phase (after dedupe).</param>
 /// <param name="Findings">Findings the phase added.</param>
-public sealed record ScanPhaseSummary(string Name, ScanPhaseState State, TimeSpan Duration, long Files, int Findings, IReadOnlyList<string> Notes);
+public sealed record ScanPhaseSummary(string Name, ScanPhaseState State, TimeSpan Duration, long Files, int Findings, IReadOnlyList<string> Notes)
+{
+    /// <summary>
+    /// M3: autostart entries that are unverified by how they are written (inline commands, network / device paths, no file), counted
+    /// without making the phase Incomplete (<see cref="Core.Persistence.UnverifiedKind.Inherent"/>). Coverage gaps make it Incomplete instead.
+    /// </summary>
+    public int UnverifiedEntries { get; init; }
+}

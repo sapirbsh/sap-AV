@@ -105,7 +105,7 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
 
     /// <summary>Sends a parse request to the ready worker. Failures kill the worker and start the backoff.</summary>
     public Task<WorkerResponse> ParseAsync(WorkerParseRequest parse, CancellationToken cancellationToken) =>
-        ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.RequestTimeout, cancellationToken);
+        ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.ParseTimeout, cancellationToken);
 
     /// <summary>A request completed normally: the backoff starts over.</summary>
     public void Succeeded() => _consecutiveFailures = 0;

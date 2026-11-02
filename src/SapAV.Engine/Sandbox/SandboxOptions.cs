@@ -26,6 +26,12 @@ public sealed class SandboxOptions
     /// <summary>Per-file time limit; a worker that takes longer is killed and restarted, the file is NotScanned.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// Time limit for parsing one autostart definition (a shortcut, a task file: a few KiB, milliseconds of work). Its own short
+    /// limit, not <see cref="RequestTimeout"/>, so one hanging parse can't use up the autostart collection's budget (follow-up review M2).
+    /// </summary>
+    public TimeSpan ParseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     /// <summary>Time limit for compiling a rule package in a worker.</summary>
     public TimeSpan RulesLoadTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -92,6 +98,7 @@ public sealed class SandboxOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(WorkerCount, 1, nameof(WorkerCount));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(WorkerCount, 8, nameof(WorkerCount));
         ArgumentOutOfRangeException.ThrowIfLessThan(RequestTimeout, TimeSpan.FromMilliseconds(100), nameof(RequestTimeout));
+        ArgumentOutOfRangeException.ThrowIfLessThan(ParseTimeout, TimeSpan.FromMilliseconds(100), nameof(ParseTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(RulesLoadTimeout, TimeSpan.FromSeconds(1), nameof(RulesLoadTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThan(WorkerMemoryLimitMegabytes, 64, nameof(WorkerMemoryLimitMegabytes));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(WorkerMemoryLimitMegabytes, 16 * 1024, nameof(WorkerMemoryLimitMegabytes));
