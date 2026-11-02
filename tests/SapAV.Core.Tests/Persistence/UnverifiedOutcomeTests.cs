@@ -326,6 +326,45 @@ public class UnverifiedOutcomeTests
     }
 
     [Fact]
+    public void Shortcuts_AnIdListTheEngineCantRead_IsAMismatchWithAnUnreadableSource()
+    {
+        // Follow-up review H-C: the shell launches the ID list's target; LinkInfo saying notepad.exe proves nothing.
+        var environment = new EnvironmentBlock(new Dictionary<string, string> { ["SystemRoot"] = @"C:\Windows" });
+        var network = ShellLinkBuilder.NetworkFolder;
+        byte[] withLinkInfo = new ShellLinkBuilder { IdListPath = @"C:\Users\u\evil.exe", IdListRoot = network, LocalBasePath = @"C:\Windows\notepad.exe" }.Build();
+        byte[] alone = new ShellLinkBuilder { IdListPath = @"C:\Users\u\evil.exe", IdListRoot = network, RelativePath = @"..\evil.exe" }.Build();
+
+        var info = ShellLinkParser.Parse(withLinkInfo, out _)!;
+        var mixed = ShellLinkTarget.Select(info, environment, @"C:\Startup");
+        var only = ShellLinkTarget.Select(ShellLinkParser.Parse(alone, out _)!, environment, @"C:\Startup");
+
+        Assert.True(info.IdListUnsupported);
+        Assert.Equal(@"C:\Windows\notepad.exe", mixed.Path);
+        Assert.True(mixed.Mismatch);
+        Assert.True(mixed.UnreadableSource);
+        Assert.Null(only.Path); // a stale relative path doesn't stand in for the shell's real target
+        Assert.True(only.UnreadableSource);
+    }
+
+    [Fact]
+    public void Shortcuts_AProfileRootedIdList_IsTheOwnersProfile_AndUnknownForAllUsers()
+    {
+        // What the shell writes for any target inside the user's profile: no mismatch when the owner's profile is known.
+        var user = new EnvironmentBlock(new Dictionary<string, string> { ["SystemRoot"] = @"C:\Windows", ["USERPROFILE"] = @"C:\Users\u" });
+        var machine = new EnvironmentBlock(new Dictionary<string, string> { ["SystemRoot"] = @"C:\Windows" });
+        byte[] link = new ShellLinkBuilder { IdListPath = @"AppData\Local\app.exe", IdListRoot = ShellLinkBuilder.UsersFiles, LocalBasePath = @"C:\Users\u\AppData\Local\app.exe" }.Build();
+        var info = ShellLinkParser.Parse(link, out _)!;
+
+        var own = ShellLinkTarget.Select(info, user, @"C:\Startup");
+        var allUsers = ShellLinkTarget.Select(info, machine, @"C:\Startup");
+
+        Assert.Equal(@"C:\Users\u\AppData\Local\app.exe", own.Path);
+        Assert.False(own.Mismatch || own.UnreadableSource);
+        Assert.False(allUsers.Mismatch); // each user's own profile: unknown, but no sign of tampering
+        Assert.True(allUsers.UnreadableSource);
+    }
+
+    [Fact]
     public void Shortcuts_The32And64BitProgramFolders_AreNoMismatch()
     {
         var environment = new EnvironmentBlock(new Dictionary<string, string>

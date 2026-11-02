@@ -4,8 +4,11 @@ using System.Text;
 namespace SapAV.Core.Persistence;
 
 /// <summary>What a shell link (<c>.lnk</c>) file says about its target, as stored (nothing resolved or expanded).</summary>
-/// <param name="IdListPath">The path built from the LinkTargetIDList (My Computer, a drive, file entries); null if absent or not a file-system path.</param>
-/// <param name="IdListUnsupported">An ID list is there, but its items aren't a plain drive path (a special folder, a network place...).</param>
+/// <param name="IdListPath">
+/// The path built from the LinkTargetIDList (My Computer, a drive, file entries; or the user's profile folder as
+/// <c>%USERPROFILE%\</c> and file entries); null if absent or not a file-system path.
+/// </param>
+/// <param name="IdListUnsupported">An ID list is there, but its items aren't a plain drive or profile path (another special folder, a network place...).</param>
 /// <param name="LinkInfoPath">LinkInfo LocalBasePath + CommonPathSuffix; null if absent or ignored (ForceNoLinkInfo).</param>
 /// <param name="LinkInfoNetworkShare">LinkInfo's network share name (<c>\\server\share</c>), when the target is on a share.</param>
 /// <param name="EnvironmentTarget">The EnvironmentVariableDataBlock target (e.g. <c>%windir%\notepad.exe</c>), unexpanded.</param>
@@ -53,6 +56,10 @@ public static class ShellLinkParser
 
     private static readonly Guid LinkClsid = new("00021401-0000-0000-C000-000000000046");
     private static readonly Guid MyComputer = new("20D04FE0-3AEA-1069-A2D8-08002B30309D");
+    private static readonly Guid UsersFiles = new("59031A47-3F72-44A7-89C5-5595FE6B30EE"); // FOLDERID_UsersFiles: %USERPROFILE%
+
+    /// <summary>How an ID list rooted at the user's profile folder starts in <see cref="ShellLinkInfo.IdListPath"/>.</summary>
+    public const string UsersFilesVariable = @"%USERPROFILE%\";
 
     /// <summary>Parses a shell link; null (and <paramref name="error"/>) when it isn't a well-formed link.</summary>
     public static ShellLinkInfo? Parse(ReadOnlySpan<byte> data, out string? error)
@@ -186,6 +193,12 @@ public static class ShellLinkParser
             {
                 // root: My Computer
             }
+            else if (type == 0x1F && size >= 20 && items == 0 && new Guid(item.Slice(4, 16)) == UsersFiles)
+            {
+                // root: the user's profile folder, what the shell writes for any target inside the profile. Left as a variable:
+                // the engine expands it with the Startup folder owner's environment (for all users it stays unknown).
+                drive = UsersFilesVariable;
+            }
             else if ((type & 0x70) == 0x20 && drive is null && parts.Count == 0)
             {
                 drive = NullTerminatedAscii(item[3..]);
@@ -200,6 +213,10 @@ public static class ShellLinkParser
             else if ((type & 0x70) == 0x30 && drive is not null && FileEntryName(item, type) is { } name)
             {
                 parts.Add(name);
+            }
+            else if (type == 0x74 && drive is not null && DelegateEntryName(item) is { } delegated)
+            {
+                parts.Add(delegated);
             }
             else
             {
@@ -244,6 +261,34 @@ public static class ShellLinkParser
         }
 
         if (item.Length >= 4 && LongName(item, end) is { } longName)
+        {
+            return longName;
+        }
+
+        return IsFileName(shortName) ? shortName : null;
+    }
+
+    /// <summary>
+    /// A delegate item (type 0x74, signature <c>CFSF</c>: the shell writes these for folders like AppData under a profile root): an
+    /// embedded file entry, two GUIDs, then the usual 0xBEEF0004 block with the long name. Null if it isn't one.
+    /// </summary>
+    private static string? DelegateEntryName(ReadOnlySpan<byte> item)
+    {
+        const int innerAt = 10; // size(2) type(1) unknown(1) size(2) "CFSF"(4)
+        if (item.Length < innerAt + 16 || !item.Slice(6, 4).SequenceEqual("CFSF"u8))
+        {
+            return null;
+        }
+
+        int innerSize = U16(item, innerAt);
+        if (innerSize < 16 || !Fits(item, innerAt, innerSize) || (item[innerAt + 2] & 0x70) != 0x30)
+        {
+            return null;
+        }
+
+        var inner = item.Slice(innerAt, innerSize);
+        string shortName = (inner[2] & 0x04) != 0 ? NullTerminatedUtf16(inner[14..], out _) : NullTerminatedAscii(inner[14..]);
+        if (LongName(item, Math.Min(innerAt + innerSize + 32, item.Length)) is { } longName)
         {
             return longName;
         }
@@ -395,24 +440,46 @@ public static class ShellLinkParser
 /// <param name="Network">The target is on a network share (never resolved by the engine).</param>
 /// <param name="Mismatch">The environment block, ID list, LinkInfo and network share name different files.</param>
 /// <param name="Others">The other files named (section C review H4): any of them may be what the shell ends up opening, so all are scanned.</param>
-public sealed record ShellLinkTarget(string? Path, bool Network, bool Mismatch, IReadOnlyList<string> Others)
+/// <param name="UnreadableSource">
+/// Section C follow-up review H-C: the ID list names a target the engine can't read (a root other than My Computer: a known folder,
+/// a network place, a shell namespace). The shell opens the ID list's target, so what runs is unknown whatever the other sources say.
+/// </param>
+public sealed record ShellLinkTarget(string? Path, bool Network, bool Mismatch, IReadOnlyList<string> Others, bool UnreadableSource = false)
 {
     /// <summary>
     /// Order: the environment block (the shell rebuilds the target from it when HasExpString says it counts), the ID list
     /// (what the shell opens), LinkInfo, the network share, then the relative path against <paramref name="linkFolder"/>
-    /// (only when nothing else names a target: a moved shortcut's relative path is stale, which is no mismatch).
+    /// (only when nothing else names a target: a moved shortcut's relative path is stale, which is no mismatch). An ID list
+    /// the parser can't read (<see cref="ShellLinkInfo.IdListUnsupported"/>) is a source of its own: with another source naming
+    /// a file it is a <see cref="Mismatch"/>, and <see cref="UnreadableSource"/> says the shell's own target is unknown.
     /// </summary>
     public static ShellLinkTarget Select(ShellLinkInfo info, EnvironmentBlock environment, string linkFolder)
     {
         ArgumentNullException.ThrowIfNull(info);
         ArgumentNullException.ThrowIfNull(environment);
         string? expanded = info.EnvironmentTarget is { Length: > 0 } env ? environment.Expand(env, out _) : null;
-        var named = new[] { expanded, info.IdListPath, info.LinkInfoPath, info.LinkInfoNetworkShare }.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!).ToList();
+        bool unsupported = info.IdListUnsupported;
+        bool unreadable = unsupported;
+        string? idList = info.IdListPath;
+        if (idList is not null && idList.StartsWith(ShellLinkParser.UsersFilesVariable, StringComparison.Ordinal))
+        {
+            // A profile-rooted ID list: the profile of whoever the Startup folder belongs to. For all users it is each user's own
+            // profile, so it is unknown (unreadable, but no sign of tampering: no mismatch).
+            idList = environment.Expand(idList, out bool unknown) is { } profile && !unknown ? profile : null;
+            unreadable |= idList is null;
+        }
+
+        var named = new[] { expanded, idList, info.LinkInfoPath, info.LinkInfoNetworkShare }.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!).ToList();
         var distinct = named.DistinctBy(c => FoldedKey(c, environment), StringComparer.Ordinal).ToArray();
         if (distinct.Length > 0)
         {
             string chosen = distinct[0];
-            return new ShellLinkTarget(chosen, chosen.StartsWith(@"\\", StringComparison.Ordinal), distinct.Length > 1, distinct[1..]);
+            return new ShellLinkTarget(chosen, chosen.StartsWith(@"\\", StringComparison.Ordinal), distinct.Length > 1 || unsupported, distinct[1..], unreadable);
+        }
+
+        if (unreadable)
+        {
+            return new ShellLinkTarget(null, false, false, [], true); // only the ID list names a target, and it can't be read
         }
 
         if (info.RelativePath is { Length: > 0 } relative && !relative.StartsWith(@"\\", StringComparison.Ordinal))

@@ -12,7 +12,16 @@ internal sealed class ShellLinkBuilder
     private static readonly Guid LinkClsid = new("00021401-0000-0000-C000-000000000046");
     private static readonly Guid MyComputer = new("20D04FE0-3AEA-1069-A2D8-08002B30309D");
 
+    /// <summary>The user's profile folder (FOLDERID_UsersFiles): with this root, <see cref="IdListPath"/> is relative to the profile.</summary>
+    public static readonly Guid UsersFiles = new("59031A47-3F72-44A7-89C5-5595FE6B30EE");
+
+    /// <summary>A root the parser can't read (the Network folder).</summary>
+    public static readonly Guid NetworkFolder = new("F02C1A0D-BE21-4350-88B0-7367FC96EF3C");
+
     public string? IdListPath { get; init; }
+
+    /// <summary>The ID list's root item (default My Computer); another one (a known folder, a network place) is a root the engine can't read.</summary>
+    public Guid? IdListRoot { get; init; }
 
     public string? LocalBasePath { get; init; }
 
@@ -79,23 +88,28 @@ internal sealed class ShellLinkBuilder
 
     private static byte[] StringData(string value) => [.. BitConverter.GetBytes((ushort)value.Length), .. Encoding.Unicode.GetBytes(value)];
 
-    private static byte[] IdList(string path)
+    private byte[] IdList(string path)
     {
         var items = new List<byte>();
         var root = new byte[20];
         BitConverter.GetBytes((ushort)20).CopyTo(root, 0);
         root[2] = 0x1F;
         root[3] = 0x50;
-        MyComputer.ToByteArray().CopyTo(root, 4);
+        (IdListRoot ?? MyComputer).ToByteArray().CopyTo(root, 4);
         items.AddRange(root);
 
-        var drive = new byte[25];
-        BitConverter.GetBytes((ushort)25).CopyTo(drive, 0);
-        drive[2] = 0x2F;
-        Encoding.ASCII.GetBytes(path[..3]).CopyTo(drive, 3);
-        items.AddRange(drive);
+        // A profile-rooted list (the user's profile folder as root) has no drive item: the path is relative to the profile.
+        bool profile = IdListRoot == UsersFiles;
+        if (!profile)
+        {
+            var drive = new byte[25];
+            BitConverter.GetBytes((ushort)25).CopyTo(drive, 0);
+            drive[2] = 0x2F;
+            Encoding.ASCII.GetBytes(path[..3]).CopyTo(drive, 3);
+            items.AddRange(drive);
+        }
 
-        var names = path[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        var names = (profile ? path : path[3..]).Split('\\', StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; i < names.Length; i++)
         {
             items.AddRange(FileEntry(names[i], directory: i < names.Length - 1));

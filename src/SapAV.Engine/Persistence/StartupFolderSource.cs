@@ -216,6 +216,12 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             resolved = resolved.WithAdditional(target.Others.Select(One)); // section C review H4: any of them may be what runs
         }
 
+        if (target.UnreadableSource)
+        {
+            // Follow-up review H-C: the shell opens the ID list's target, which the engine can't name, so the entry stays Unverified.
+            resolved = resolved.WithAdditional([ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable, arguments: arguments)]);
+        }
+
         return (command, extra.Length > 0 ? resolved.WithFlags(extra) : resolved);
     }
 }

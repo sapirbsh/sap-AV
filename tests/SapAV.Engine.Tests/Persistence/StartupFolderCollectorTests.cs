@@ -85,6 +85,25 @@ public sealed class StartupFolderCollectorTests : IDisposable
     }
 
     [Fact]
+    public void AShortcutWhoseIdListCantBeRead_IsAMismatch_AndNeverClean()
+    {
+        // Follow-up review H-C: a non-My-Computer ID list root plus LinkInfo naming notepad: the shell runs the ID list's target.
+        Write("odd.lnk", new ShellLinkBuilder
+        {
+            IdListPath = @"C:\Users\alice\evil.exe", IdListRoot = ShellLinkBuilder.NetworkFolder, LocalBasePath = @"C:\Windows\notepad.exe",
+        }.Build());
+
+        var entry = Collect().Single("odd.lnk");
+        var judgement = new PersistenceJudge(new PersistenceJudgeOptions { SystemRoot = @"C:\Windows" }).Judge(entry, null, null);
+
+        Assert.Equal(@"C:\Windows\notepad.exe", entry.Resolution.TargetPath);
+        Assert.Contains(ResolutionFlag.ShortcutTargetMismatch, entry.Resolution.Flags);
+        Assert.Contains(entry.Resolution.Additional, a => a.UnresolvedReason == TargetUnresolvedReason.ShortcutUnreadable);
+        Assert.NotEqual(PersistenceOutcome.Clean, judgement.Outcome);
+        Assert.True(judgement.IsUnverified);
+    }
+
+    [Fact]
     public void ARealShortcutWrittenByTheShell_IsParsed()
     {
         var target = Path.Combine(_folder.Path, "real target.txt");
@@ -97,7 +116,9 @@ public sealed class StartupFolderCollectorTests : IDisposable
         link.Arguments = "--flag";
         link.Save();
 
-        var entry = Collect().Single("real.lnk");
+        // A per-user Startup folder: a target inside the profile gets a profile-rooted ID list, which needs the owner's profile.
+        _root.AddUser(Sid, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), loaded: true);
+        var entry = Collect(Sid).Single("real.lnk");
 
         Assert.Equal(target, entry.Resolution.TargetPath, ignoreCase: true);
         Assert.Equal("--flag", entry.Resolution.Arguments);
