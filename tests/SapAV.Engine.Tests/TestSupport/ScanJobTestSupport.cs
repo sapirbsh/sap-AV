@@ -132,11 +132,14 @@ internal sealed class ScanJobHarness : IDisposable
     /// <summary>The scan cache the service uses (C5; null = none).</summary>
     public SapAV.Engine.Scanning.Cache.ScanCache? Cache { get; set; }
 
+    /// <summary>Whether walked folders lie in a Cloud Files sync root (null = the real API).</summary>
+    public SapAV.Core.Hashing.ISyncRootProbe? SyncRoots { get; set; }
+
     private ScanJobService? _service;
 
     public ScanJobService Service => _service ??= new ScanJobService(
         Options, Broker, Exclusions ?? ExclusionSet.Always(new FolderSet(Excluded)), Handler, Preflight, Time, NullLogger.Instance, ReparseTag,
-        RemoteProbe, Cache);
+        RemoteProbe, Cache, syncRoots: SyncRoots);
 
     public string Write(string relative, string content = "plain test content")
     {

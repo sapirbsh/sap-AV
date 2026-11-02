@@ -40,28 +40,18 @@ internal sealed class DriveWalkCheck(IVolumeSource volumes, FullScanOptions opti
         context.ExpectBytes(drives.Sum(d => d.UsedBytes ?? 0));
         var roots = drives.Select(d => d.Root).ToArray();
         var skippedFiles = new HashSet<string>(roots.SelectMany(r => options.SkippedRootFiles.Select(f => Plain(Path.Join(r, f)))), StringComparer.OrdinalIgnoreCase);
-        long placeholders = 0;
         var filter = new ScanWalkFilter
         {
             MaxDepth = options.MaxDepth,
             MaxEntries = options.MaxEntries,
             SkipFolder = QuickScanFileRules.SkipPredicate(roots.SelectMany(r => options.SkippedRootFolders.Select(f => Path.Join(r, f))), []),
             SkipFile = path => skippedFiles.Contains(Plain(path)),
-            IncludeFile = e =>
-            {
-                if (!e.IsPlaceholder)
-                {
-                    return true;
-                }
-
-                placeholders++;
-                return false;
-            },
         };
 
         context.QueueTree(roots, filter);
         context.Note($"{drives.Count} drive(s) ({string.Join(", ", roots)}): {filter.EntriesSeen} entries listed; {filter.FilesSkipped} system paging files, "
-            + $"{placeholders + filter.FoldersOffline} cloud placeholders (offline, not downloaded) and {filter.FoldersSkipped} system folders skipped.");
+            + $"{filter.FoldersOffline + filter.FilesOffline} cloud placeholders (in a sync root, not downloaded) and {filter.FoldersSkipped} system folders skipped.");
+        PlaceholderReport.Note(context, filter);
         if (filter.LimitReached)
         {
             context.MarkIncomplete($"Stopped after {options.MaxEntries} directory entries (the Full Scan entry limit).");

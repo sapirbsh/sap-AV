@@ -43,7 +43,8 @@ internal readonly record struct ScanTreeEntry(
 /// that handle (review B H2) and a parent renamed or replaced after the listing can't redirect the open.
 /// Runs on the job's enumerator thread; nothing here reads file content.
 /// </summary>
-internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remote = null)
+internal sealed class ScanTreeWalker(
+    ExclusionSet excluded, Func<string, uint?>? reparseTag = null, IRemoteFileProbe? remote = null, ISyncRootProbe? syncRoots = null)
 {
     /// <summary>Test convenience: <paramref name="excluded"/> always excluded (nothing verified).</summary>
     public ScanTreeWalker(FolderSet excluded, Func<string, uint?>? reparseTag = null)
@@ -107,13 +108,13 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         WalkTree(root, handle, emit, cancellationToken, access, allowRemote, filter);
     }
 
-    private sealed class Frame(string path, SharedFolder folder, List<string> subdirectories) : IDisposable
+    private sealed class Frame(string path, SharedFolder folder, List<SafeTreeEntry> subdirectories) : IDisposable
     {
         public string Path { get; } = path;
 
         public SafeFileHandle Handle => folder.Handle;
 
-        public List<string> Subdirectories { get; } = subdirectories;
+        public List<SafeTreeEntry> Subdirectories { get; } = subdirectories;
 
         public int Next { get; set; }
 
@@ -148,7 +149,8 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
                     continue;
                 }
 
-                string name = top.Subdirectories[top.Next++];
+                var listed = top.Subdirectories[top.Next++];
+                string name = listed.Name;
                 string path = SafeTree.Child(top.Path, name);
                 if (filter is not null && stack.Count > filter.MaxDepth)
                 {
@@ -162,14 +164,20 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
                     continue;
                 }
 
-                var child = SafeTree.OpenChild(top.Handle, name, SafeTree.DirectoryAccess, SafeTree.ShareAll, Quarantine.Native.QuarantineNative.FileDirectoryFile,
-                    out var failure, out _);
+                var child = SafeTree.OpenChild(top.Handle, name, SafeTree.DirectoryAccess, SafeTree.ShareAll,
+                    Quarantine.Native.QuarantineNative.FileDirectoryFile, out var failure, out _);
                 if (child is null)
                 {
                     // Redirected: it became a junction / symlink since the listing (or a reparse was refused): never followed.
                     emit(failure == SafeTreeFailure.Redirected
                         ? new(ExactPath.ForOpening(path), ScanTreeEntryKind.SkippedLink)
                         : new(ExactPath.ForOpening(path), ScanTreeEntryKind.Unreadable, Detail: failure.ToString()));
+                    continue;
+                }
+
+                if (SkipsPlaceholder(listed, child, filter))
+                {
+                    child.Dispose();
                     continue;
                 }
 
@@ -248,13 +256,15 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
             filter.EntriesSeen += entries.Count;
         }
 
-        var subdirectories = new List<string>();
+        var subdirectories = new List<SafeTreeEntry>();
         var folder = new SharedFolder(handle);
+        // Asked at most once per folder. Null only under the test seam with no probe given, so the seam stands in for a sync root.
+        ISyncRootProbe? folderSyncRoot = syncRoots is null && FilePlaceholder.TestSeamActive ? null : new OnceSyncRootProbe(syncRoots ?? CloudSyncRootProbe.Instance);
         try
         {
             foreach (var entry in entries)
             {
-                Classify(directory, folder, entry, subdirectories, emit, filter);
+                Classify(directory, folder, entry, subdirectories, emit, filter, folderSyncRoot);
             }
         }
         catch
@@ -267,7 +277,8 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
     }
 
     private void Classify(
-        string directory, SharedFolder folder, SafeTreeEntry entry, List<string> subdirectories, Action<ScanTreeEntry> emit, ScanWalkFilter? filter)
+        string directory, SharedFolder folder, SafeTreeEntry entry, List<SafeTreeEntry> subdirectories, Action<ScanTreeEntry> emit, ScanWalkFilter? filter,
+        ISyncRootProbe? folderSyncRoot)
     {
         string path = SafeTree.Child(directory, entry.Name); // extended form: exact names
         string shown = ExactPath.ForOpening(path);
@@ -281,19 +292,18 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
         }
         else if (entry.IsDirectory)
         {
-            if (filter is { SkipPlaceholderFolders: true } && entry.IsPlaceholder)
-            {
-                filter.FoldersOffline++; // B3 M2: never make SYSTEM ask a sync provider to populate a folder
-                return;
-            }
-
             if (filter?.SkipFolder is { } skip && skip(path))
             {
                 filter.FoldersSkipped++;
                 return;
             }
 
-            subdirectories.Add(entry.Name);
+            subdirectories.Add(entry); // a placeholder look is checked on its own handle once opened (SkipsPlaceholder)
+        }
+        else if (filter is { SkipPlaceholderFolders: true } && entry.IsPlaceholder
+            && Counted(FilePlaceholder.Classify(folder.Handle, entry.Attributes, entry.ReparseTag, folderSyncRoot), filter, folderEntry: false))
+        {
+            // Follow-up review H-D: only in a registered sync root (or when that can't be told); a user-set look is scanned.
         }
         else if (filter?.SkipFile is { } skipFile && skipFile(path))
         {
@@ -317,6 +327,50 @@ internal sealed class ScanTreeWalker(ExclusionSet excluded, Func<string, uint?>?
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Follow-up review H-D: a subfolder that looks like a placeholder is skipped (never listed, so SYSTEM never makes a sync
+    /// provider populate it) only when the Cloud Files API confirms a sync root on its own handle, or can't tell. Outside every
+    /// sync root the look is user-set and nothing could recall, so it is walked (opened with no recall).
+    /// </summary>
+    private bool SkipsPlaceholder(SafeTreeEntry listed, SafeFileHandle child, ScanWalkFilter? filter) =>
+        filter is { SkipPlaceholderFolders: true } && listed.IsPlaceholder
+        && Counted(FilePlaceholder.Classify(child, listed.Attributes, listed.ReparseTag, syncRoots), filter, folderEntry: true);
+
+    /// <summary>Counts a placeholder look; true if it is skipped (in a sync root, or unconfirmed).</summary>
+    private static bool Counted(PlaceholderKind kind, ScanWalkFilter filter, bool folderEntry)
+    {
+        switch (kind)
+        {
+            case PlaceholderKind.InSyncRoot:
+                if (folderEntry)
+                {
+                    filter.FoldersOffline++;
+                }
+                else
+                {
+                    filter.FilesOffline++;
+                }
+
+                return true;
+            case PlaceholderKind.Unconfirmed:
+                filter.PlaceholdersUnconfirmed++;
+                return true;
+            case PlaceholderKind.OutsideSyncRoot:
+                filter.PlaceholdersOutsideSyncRoot++;
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>One folder's sync-root answer, asked once for all its placeholder-looking files (same folder handle).</summary>
+    private sealed class OnceSyncRootProbe(ISyncRootProbe inner) : ISyncRootProbe
+    {
+        private SyncRootStatus? _status;
+
+        public SyncRootStatus Check(SafeFileHandle handle) => _status ??= inner.Check(handle);
     }
 
     /// <summary>A reparse point that is a name surrogate, or whose tag is unknown (test seam: <c>reparseTag</c> by path).</summary>
@@ -365,8 +419,11 @@ internal sealed class ScanWalkFilter
 
     /// <summary>
     /// C6 / review B3 M2: don't descend into cloud-files placeholder folders whose content isn't local (RECALL_ON_OPEN /
-    /// RECALL_ON_DATA_ACCESS / Offline with a cloud tag; plain Offline is walked): listing one as SYSTEM would ask the user's sync provider to populate it. Counted
-    /// in <see cref="FoldersOffline"/>. Default on.
+    /// RECALL_ON_DATA_ACCESS / Offline with a cloud tag; plain Offline is walked): listing one as SYSTEM would ask the user's sync
+    /// provider to populate it. Such files aren't emitted either. Follow-up review H-D: only when a registered sync root is
+    /// confirmed (<see cref="FoldersOffline"/>, <see cref="FilesOffline"/>) or can't be ruled out (<see cref="PlaceholdersUnconfirmed"/>,
+    /// the phase is then incomplete); outside every sync root they are walked and scanned (<see cref="PlaceholdersOutsideSyncRoot"/>).
+    /// Default on.
     /// </summary>
     public bool SkipPlaceholderFolders { get; init; } = true;
 
@@ -387,7 +444,20 @@ internal sealed class ScanWalkFilter
 
     public long FoldersTooDeep { get; set; }
 
+    /// <summary>Placeholder folders in a confirmed sync root, not listed.</summary>
     public long FoldersOffline { get; set; }
+
+    /// <summary>Placeholder files in a confirmed sync root, not emitted.</summary>
+    public long FilesOffline { get; set; }
+
+    /// <summary>Placeholder-looking folders and files skipped because no sync root could be confirmed or ruled out: not covered.</summary>
+    public long PlaceholdersUnconfirmed { get; set; }
+
+    /// <summary>Placeholder-looking folders and files outside every sync root (a user-set look): walked and scanned.</summary>
+    public long PlaceholdersOutsideSyncRoot { get; set; }
+
+    /// <summary>Every placeholder skipped (confirmed or not).</summary>
+    public long PlaceholdersSkipped => FoldersOffline + FilesOffline + PlaceholdersUnconfirmed;
 
     public long EntriesSeen { get; set; }
 

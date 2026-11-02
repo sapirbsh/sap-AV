@@ -127,7 +127,8 @@ internal static class SecureFile
                 return false;
             }
 
-            if (!allowOffline && Sha256Hasher.IsOfflineOrPlaceholder(attributes, NativeFile.ReparseTagOf(handle, attributes)))
+            // Follow-up review H-D: only a confirmed placeholder (in a registered sync root) is skipped; a user-set look is read (no recall).
+            if (!allowOffline && FilePlaceholder.IsConfirmedPlaceholder(handle, attributes, NativeFile.ReparseTagOf(handle, attributes)))
             {
                 failure = new(HashFailureReason.Offline, "File is a cloud placeholder; not read to avoid a download.",
                     RandomAccess.GetLength(handle), attributes, File.GetLastWriteTimeUtc(handle));

@@ -58,6 +58,12 @@ public enum Requires
 
     /// <summary>The temp volume has an active change journal (the scan cache keeps nothing without one).</summary>
     UsnJournal,
+
+    /// <summary>
+    /// The Cloud Files API (cldapi.dll) answers for the temp folder, and says no sync root contains it (follow-up review H-D).
+    /// Missing on some Server SKUs, and a %TEMP% inside a synced folder doesn't qualify.
+    /// </summary>
+    CloudFilesApi,
 }
 
 internal static class TestRequirements
@@ -82,6 +88,7 @@ internal static class TestRequirements
         [Requires.EicarFileOnDisk] = new(ProbeEicarOnDisk),
         [Requires.AdminShare] = new(ProbeAdminShare),
         [Requires.UsnJournal] = new(ProbeUsnJournal),
+        [Requires.CloudFilesApi] = new(ProbeCloudFilesApi),
         [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),
@@ -92,6 +99,24 @@ internal static class TestRequirements
     {
         var full = Path.GetFullPath(localPath);
         return $@"\\localhost\{full[0]}$\{full[3..]}";
+    }
+
+    private static string? ProbeCloudFilesApi()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "sapav-cf-probe-" + Guid.NewGuid().ToString("N") + ".bin");
+        SapAV.Core.Hashing.SyncRootStatus status;
+        try
+        {
+            File.WriteAllBytes(path, [1]);
+            using var file = File.OpenHandle(path);
+            status = SapAV.Core.Hashing.CloudSyncRootProbe.Instance.Check(file);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+
+        return status == SapAV.Core.Hashing.SyncRootStatus.NotInSyncRoot ? null : $"the Cloud Files API says {status} for %TEMP%";
     }
 
     private static string? ProbeUsnJournal()

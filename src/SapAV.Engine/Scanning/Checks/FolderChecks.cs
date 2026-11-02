@@ -37,24 +37,6 @@ internal sealed class QuickScanFileRules
 
     public DateTimeOffset Cutoff(TimeProvider time) => time.GetUtcNow() - TimeSpan.FromDays(Options.RecentDays);
 
-    /// <summary>Cloud placeholders the folder phases left alone (counted by <see cref="CountPlaceholder"/>).</summary>
-    public long Placeholders { get; private set; }
-
-    /// <summary>
-    /// Review C4 L7: true (and counted) for a cloud placeholder whose data isn't local (<see cref="SafeTreeEntry.IsPlaceholder"/>).
-    /// The opener would refuse it anyway (no recall), but queuing it would still cost an open and a slot in the phase's time.
-    /// </summary>
-    public bool CountPlaceholder(SafeTreeEntry entry)
-    {
-        if (!entry.IsPlaceholder)
-        {
-            return false;
-        }
-
-        Placeholders++;
-        return true;
-    }
-
     /// <summary>
     /// Queue rank: a file with a Mark-of-the-Web (a <c>Zone.Identifier</c> stream; <paramref name="probeMotw"/>) first,
     /// then by class. Only the stream's existence is checked (an attributes-only open relative to the listed folder's
@@ -102,6 +84,28 @@ internal sealed class QuickScanFileRules
         profiles.SelectMany(profile => Options.SkippedProfileFolders.Select(relative => Path.Join(profile, relative)));
 
     private static string Plain(string path) => ExactPath.StripPrefix(path).TrimEnd('\\');
+}
+
+/// <summary>
+/// Follow-up review H-D: what a walk phase says about placeholders. A placeholder look outside every sync root is user-set
+/// (walked and scanned, noted); one skipped without a confirmed sync root makes the phase Incomplete.
+/// </summary>
+internal static class PlaceholderReport
+{
+    public static void Note(IScanCheckContext context, long outsideSyncRoot, long unconfirmed)
+    {
+        if (outsideSyncRoot > 0)
+        {
+            context.Note($"{outsideSyncRoot} folder(s) or file(s) marked as cloud placeholders outside any sync root were walked and scanned (the mark is user-set).");
+        }
+
+        if (unconfirmed > 0)
+        {
+            context.MarkIncomplete($"{unconfirmed} cloud placeholder(s) were skipped without a confirmed sync root; their content wasn't scanned.");
+        }
+    }
+
+    public static void Note(IScanCheckContext context, ScanWalkFilter filter) => Note(context, filter.PlaceholdersOutsideSyncRoot, filter.PlaceholdersUnconfirmed);
 }
 
 /// <summary>
@@ -155,7 +159,7 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
         var groups = Groups(set).Select(g => Distinct(g)).ToArray();
         int rootsLeft = groups.Sum(g => g.Count);
 
-        long filtered = 0, tooDeep = 0, skipped = 0, placeholders = 0;
+        long filtered = 0, tooDeep = 0, skipped = 0, placeholders = 0, outside = 0, unconfirmed = 0;
         int walked = 0;
         for (int g = 0; g < groups.Length; g++)
         {
@@ -169,7 +173,7 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
             var filter = new ScanWalkFilter
             {
                 MaxDepth = rules.Options.MaxDepth,
-                IncludeFile = e => !rules.CountPlaceholder(e) && e.Length <= rules.Options.MaxFileSizeBytes
+                IncludeFile = e => e.Length <= rules.Options.MaxFileSizeBytes
                     && (rules.IsRisky(e.Name) || QuickScanFileRules.IsRecent(e, cutoff)),
                 SkipFolder = QuickScanFileRules.SkipPredicate(completed, patterns),
             };
@@ -180,13 +184,16 @@ internal sealed class RiskyFolderCheck(IProfileFolderSource folders, QuickScanFi
             filtered += filter.FilesFiltered;
             tooDeep += filter.FoldersTooDeep;
             skipped += filter.FoldersSkipped;
+            placeholders += filter.FoldersOffline + filter.FilesOffline;
+            outside += filter.PlaceholdersOutsideSyncRoot;
+            unconfirmed += filter.PlaceholdersUnconfirmed;
         }
 
-        placeholders = rules.Placeholders;
         ledger?.AddCompleted(completed);
         context.Note($"{walked} folders in {set.Users.Count} profiles ({completed.Count} walked to the end); {filtered} other files left to Full Scan "
             + $"({placeholders} cloud placeholders not downloaded), {skipped} cache folders skipped, {tooDeep} folders deeper than "
             + $"{rules.Options.MaxDepth} levels not walked.");
+        PlaceholderReport.Note(context, outside, unconfirmed);
     }
 
     /// <summary>The three groups in queue order: downloads / desktops, temp folders, AppData.</summary>
@@ -227,12 +234,13 @@ internal sealed class RecentFilesCheck(IProfileFolderSource folders, QuickScanFi
         var filter = new ScanWalkFilter
         {
             MaxDepth = rules.Options.MaxDepth,
-            IncludeFile = e => !rules.CountPlaceholder(e) && e.Length <= rules.Options.MaxFileSizeBytes && QuickScanFileRules.IsRecent(e, cutoff),
+            IncludeFile = e => e.Length <= rules.Options.MaxFileSizeBytes && QuickScanFileRules.IsRecent(e, cutoff),
             SkipFolder = QuickScanFileRules.SkipPredicate(ledger?.Completed ?? [], patterns.ToArray()),
         };
 
         context.QueueTree(roots, filter, e => rules.Rank(e, probeMotw: false));
         context.Note($"{roots.Count} roots (profiles and ProgramData), files since {cutoff:yyyy-MM-dd HH:mm} UTC; {filter.FilesFiltered} older or larger files skipped, "
             + $"{filter.FoldersSkipped} folders skipped (walked by the high-risk phase, or caches), {filter.FoldersTooDeep} folders deeper than {rules.Options.MaxDepth} levels not walked.");
+        PlaceholderReport.Note(context, filter);
     }
 }
