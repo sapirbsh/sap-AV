@@ -104,14 +104,40 @@ public class CommandLineResolverTests
     }
 
     [Fact]
-    public void UnquotedFirstTokenWithExtension_IsDecisive_WithoutProbing()
+    public void UnquotedFirstTokenWithExtension_IsDecisive_WhenItExists_WithOneProbe()
     {
+        _probe.Add(@"C:\Windows\system32\svchost.exe");
+
         var result = Resolver.Resolve(@"C:\Windows\system32\svchost.exe -k netsvcs -p", Machine);
 
         Assert.Equal(@"C:\Windows\system32\svchost.exe", result.TargetPath);
         Assert.Equal("-k netsvcs -p", result.Arguments);
-        Assert.Empty(result.Flags);
-        Assert.Equal(0, _probe.Calls);
+        Assert.Equal([ResolutionFlag.LaterCandidates], result.Flags); // a scan that finds it missing proves nothing
+        Assert.Equal(1, _probe.Calls); // the longer candidates aren't probed
+    }
+
+    [Fact]
+    public void AMissingFirstTokenWithExtension_GoesOnToTheLongerCandidates_LikeCreateProcess()
+    {
+        // Follow-up review H-B: "app.data" looked final, but CreateProcess runs "app.data dir\evil.exe" when it is missing.
+        _probe.Add(@"C:\Users\me\app.data dir\evil.exe");
+
+        var result = Resolver.Resolve(@"C:\Users\me\app.data dir\evil.exe /x", Machine);
+        var nothing = Resolver.Resolve(@"C:\Users\me\gone.data dir\evil.exe", Machine);
+
+        Assert.Equal(@"C:\Users\me\app.data dir\evil.exe", result.TargetPath);
+        Assert.Equal("/x", result.Arguments);
+        Assert.Contains(ResolutionFlag.UnquotedPathWithSpaces, result.Flags);
+        Assert.Contains(ResolutionFlag.TargetNotFound, nothing.Flags); // every candidate probed: now it is confirmed
+    }
+
+    [Theory]
+    [InlineData(@"cmd /c C:\Users\me\ev^il.exe", @"C:\Users\me\evil.exe")] // follow-up review H-B: cmd drops the caret
+    [InlineData(@"cmd /c ^""C:\Users\me\e^v^il.exe^""", @"C:\Users\me\evil.exe")]
+    [InlineData(@"cmd /c ""C:\Users\me\ev^il.exe""", @"C:\Users\me\ev^il.exe")] // inside quotes it is literal
+    public void Cmd_CaretEscapes_AreRemovedOutsideQuotes(string commandLine, string expected)
+    {
+        Assert.Equal(expected, Resolver.Resolve(commandLine, Machine).TargetPath);
     }
 
     [Fact]

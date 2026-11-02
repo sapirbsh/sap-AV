@@ -64,4 +64,11 @@ public enum ResolutionFlag
 
     /// <summary>PowerShell runs a Base64-encoded command (<c>-EncodedCommand</c> and its prefixes).</summary>
     EncodedCommand,
+
+    /// <summary>
+    /// The target was picked from a search that had more candidates after it (a longer unquoted path, a later search folder):
+    /// if it turns out missing when scanned, CreateProcess / LoadLibrary would go on to those, so "not found" then isn't
+    /// confirmed missing (section C follow-up review H-B).
+    /// </summary>
+    LaterCandidates,
 }

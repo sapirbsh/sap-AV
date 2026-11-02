@@ -12,9 +12,11 @@ namespace SapAV.Core.Persistence;
 /// engine's own). An undefined name stays as written and sets <see cref="ResolutionFlag.UnknownEnvironmentVariable"/>.</item>
 /// <item>The program is found as CreateProcess does with no application name: a quoted first token is the path; an unquoted
 /// one is tried at each space in turn ("C:\Program.exe", "C:\Program Files\My.exe", ...), <c>.exe</c> appended to a name
-/// without an extension. Candidates are probed (first one that exists wins) unless the first token is already a fully
-/// qualified path with an extension. When the program's own path has a space, <see cref="ResolutionFlag.UnquotedPathWithSpaces"/>;
-/// when more than one candidate exists, <see cref="ResolutionFlag.UnquotedPathAmbiguous"/>.</item>
+/// without an extension. Candidates are probed (first one that exists wins); a first token with an extension is taken
+/// unless it is confirmed missing, and then the longer candidates are probed as CreateProcess does. When the program's own
+/// path has a space, <see cref="ResolutionFlag.UnquotedPathWithSpaces"/>; when more than one candidate exists,
+/// <see cref="ResolutionFlag.UnquotedPathAmbiguous"/>; when a picked program or library had candidates after it,
+/// <see cref="ResolutionFlag.LaterCandidates"/> (a scan that finds it missing is then no proof that nothing runs).</item>
 /// <item>A bare name is searched in <see cref="EnvironmentBlock.SearchDirectories"/> (System32, Windows, PATH; the
 /// application and current folders of the launching process are not known and not searched). A relative path with a
 /// folder, a drive-relative or rooted path is <see cref="TargetUnresolvedReason.NotFullyQualified"/>; UNC is
@@ -23,7 +25,7 @@ namespace SapAV.Core.Persistence;
 /// <c>rundll32 &lt;dll&gt;,&lt;entry&gt;</c>, <c>regsvr32 [/s /u /n /i:x] &lt;dll&gt;</c> (a URL in <c>/i:</c> is
 /// <see cref="ResolutionFlag.RemotePayload"/>), <c>cmd /c|/k|/r &lt;command&gt;</c> (switches read as cmd reads them, attached
 /// forms like <c>/d/c</c> and <c>/cX</c> included, see <see cref="CmdSwitches"/>; anything else before the command is
-/// <see cref="TargetUnresolvedReason.HostArgumentsNotUnderstood"/>; the command is resolved again; <c>start</c> and
+/// <see cref="TargetUnresolvedReason.HostArgumentsNotUnderstood"/>; the command is resolved again with cmd's <c>^</c> escapes removed; <c>start</c> and
 /// <c>call</c> skipped; other built-ins are <see cref="ResolutionFlag.InlineCommand"/>; every command of a <c>&amp;</c> / <c>|</c> chain is resolved),
 /// <c>powershell|pwsh -File &lt;script&gt;</c> (<c>-Command</c>, <c>-EncodedCommand</c> and their prefixes are inline),
 /// <c>wscript|cscript &lt;script&gt;</c>, <c>mshta &lt;hta|url|javascript:&gt;</c>. A host elsewhere (a copied
@@ -190,15 +192,41 @@ public sealed class CommandLineResolver(IPathProbe probe)
         }
 
         var candidates = Candidates(text);
-        if (candidates.Count == 1 || IsDecisive(candidates[0].Text))
+        if (candidates.Count == 1)
         {
-            var first = candidates[0];
-            var file = ResolveFile(first.Text, FileRole.Program, state);
-            string args = text[first.End..].Trim();
+            var only = candidates[0];
+            var file = ResolveFile(only.Text, FileRole.Program, state);
+            string args = text[only.End..].Trim();
             return file.Path is { } plain ? Unwrap(plain, args, state, depth) : state.Unresolved(file.Reason!.Value, null, args);
         }
 
+        if (IsDecisive(candidates[0].Text) && ResolveDecisive(text, candidates[0], state, depth) is { } decided)
+        {
+            return decided;
+        }
+
         return ResolveUnquoted(text, candidates, state, depth);
+    }
+
+    /// <summary>
+    /// A first token with an extension, with more text after it: it runs if it exists, or can't be ruled out. Follow-up review H-B:
+    /// when it is confirmed missing, CreateProcess goes on to the longer candidates (<c>C:\a\app.data dir\evil.exe</c>), so null
+    /// sends the caller to <see cref="ResolveUnquoted"/>.
+    /// </summary>
+    private ResolvedCommand? ResolveDecisive(string text, (string Text, int End) first, State state, int depth)
+    {
+        // Only a drive path goes on: a longer candidate of a bare name has a separator in it, so it is relative and unknown
+        // either way, and a UNC path is never probed.
+        bool drive = IsDriveQualified(first.Text);
+        var file = ResolveFile(first.Text, FileRole.Program, state, probeQualified: drive, quiet: drive);
+        string args = text[first.End..].Trim();
+        if (file.Path is { } path)
+        {
+            state.Further = true;
+            return Unwrap(path, args, state, depth);
+        }
+
+        return drive && file.Reason is TargetUnresolvedReason.NotFoundOnSearchPath ? null : state.Unresolved(file.Reason!.Value, null, args);
     }
 
     /// <summary>An unquoted command line with spaces and no decisive first token: probe candidates as CreateProcess would.</summary>
@@ -239,6 +267,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
         if (found.Count > 0)
         {
+            state.Further |= chosen < candidates.Count - 1;
             return Unwrap(found[0].Path, text[candidates[chosen].End..].Trim(), state, depth);
         }
 
@@ -346,16 +375,18 @@ public sealed class CommandLineResolver(IPathProbe probe)
         }
 
         var name = WithDefaultExtension(token, role);
-        foreach (var folder in state.Environment.SearchDirectories)
+        var folders = state.Environment.SearchDirectories;
+        for (int i = 0; i < folders.Count; i++)
         {
             if (state.ProbesLeft <= 0)
             {
                 return (null, TargetUnresolvedReason.SearchLimitReached);
             }
 
-            if (PersistenceText.NormalizeLocalPath(Path.Join(folder, name)) is { } candidate && state.Probe(_probe, candidate))
+            if (PersistenceText.NormalizeLocalPath(Path.Join(folders[i], name)) is { } candidate && state.Probe(_probe, candidate))
             {
                 state.Flags.Add(ResolutionFlag.ResolvedFromSearchPath);
+                state.Further |= i < folders.Count - 1;
                 return (candidate, null);
             }
         }
@@ -410,6 +441,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
         }
 
         state.Flags.Add(ResolutionFlag.ResolvedFromWorkingDirectory);
+        state.Further = true; // the search path comes after the working directory
         result = (candidate, null);
         return true;
     }
@@ -422,6 +454,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
         {
             return state.Resolved(program, args);
         }
+
+        state.Further = false; // how the host was found says nothing about how its payload is found
 
         if (depth >= MaxDepth)
         {
@@ -662,6 +696,9 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
     private ResolvedCommand CmdInner(string host, string inner, State state, int depth)
     {
+        // Follow-up review H-B: cmd drops its ^ escapes before it runs anything ("ev^il.exe" runs evil.exe).
+        inner = CmdUnescape(inner);
+
         // "call" prefixes are stripped in a capped loop, never by recursion: a Run value is attacker-chosen, and an
         // uncatchable stack overflow here would take the SYSTEM engine down (section C review H1).
         var tokens = Tokenize(inner);
@@ -952,6 +989,39 @@ public sealed class CommandLineResolver(IPathProbe probe)
         return tokens;
     }
 
+    /// <summary>cmd's escape removal: outside quotes, <c>^x</c> is <c>x</c> and a trailing <c>^</c> is dropped; inside quotes <c>^</c> is literal.</summary>
+    internal static string CmdUnescape(string text)
+    {
+        if (!text.Contains('^'))
+        {
+            return text;
+        }
+
+        var result = new System.Text.StringBuilder(text.Length);
+        bool quoted = false;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c == '"')
+            {
+                quoted = !quoted;
+            }
+            else if (c == '^' && !quoted)
+            {
+                if (++i >= text.Length)
+                {
+                    break;
+                }
+
+                c = text[i];
+            }
+
+            result.Append(c);
+        }
+
+        return result.ToString();
+    }
+
     private static int FirstUnquoted(string text, params char[] stops)
     {
         bool quoted = false;
@@ -1088,8 +1158,18 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return expanded;
         }
 
-        public ResolvedCommand Resolved(string path, string args, string? host = null) =>
-            ResolvedCommand.Resolved(path, args, host, Flags);
+        /// <summary>The program / library just picked had later candidates (<see cref="ResolutionFlag.LaterCandidates"/> on the result).</summary>
+        public bool Further { get; set; }
+
+        public ResolvedCommand Resolved(string path, string args, string? host = null)
+        {
+            if (Further)
+            {
+                Flags.Add(ResolutionFlag.LaterCandidates);
+            }
+
+            return ResolvedCommand.Resolved(path, args, host, Flags);
+        }
 
         public ResolvedCommand Unresolved(TargetUnresolvedReason reason, string? host = null, string args = "")
         {

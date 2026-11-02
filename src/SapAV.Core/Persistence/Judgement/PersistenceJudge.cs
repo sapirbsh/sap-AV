@@ -228,11 +228,33 @@ public sealed class PersistenceRuleContext
     /// </summary>
     public bool IsMachineWide => Entry.IsMachineScope;
 
-    /// <summary>The target doesn't exist: flagged by the resolver, not found on the search path, or the scan found nothing.</summary>
-    public bool TargetMissing =>
-        Entry.Resolution.HasFlag(ResolutionFlag.TargetNotFound)
-        || Entry.Resolution.UnresolvedReason == TargetUnresolvedReason.NotFoundOnSearchPath
-        || Target?.Hash.FailureReason == HashFailureReason.NotFound;
+    /// <summary>
+    /// The target is confirmed not to exist (section C follow-up review H-B): every candidate the resolver had was probed and
+    /// missing, a bare name wasn't on a search order that is fully known for this kind, or the scan found nothing where the
+    /// resolver had no later candidate. Anything less is Unverified, not missing.
+    /// </summary>
+    public bool TargetMissing
+    {
+        get
+        {
+            var resolution = Entry.Resolution;
+            if (resolution.UnresolvedReason == TargetUnresolvedReason.NotFoundOnSearchPath)
+            {
+                return SearchOrderKnown(Entry.Kind);
+            }
+
+            return resolution.HasFlag(ResolutionFlag.TargetNotFound)
+                || (Target?.Hash.FailureReason == HashFailureReason.NotFound && !resolution.HasFlag(ResolutionFlag.LaterCandidates));
+        }
+    }
+
+    /// <summary>
+    /// L1: whether the folders a bare name is looked for in are all known. Services and Winlogon start from System32 (application
+    /// and current folder), and tasks from their working directory or System32; Run / RunOnce values, Startup items and IFEO
+    /// debuggers start from a launcher whose folder, current folder and App Paths the engine doesn't search.
+    /// </summary>
+    private static bool SearchOrderKnown(PersistenceKind kind) =>
+        kind is PersistenceKind.Service or PersistenceKind.ScheduledTask or PersistenceKind.WinlogonShell or PersistenceKind.WinlogonUserinit;
 
     /// <summary>
     /// The target is Microsoft-signed (embedded or catalog), lies under the Windows folder (not its Temp), its folder is not

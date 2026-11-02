@@ -180,9 +180,47 @@ public class UnverifiedOutcomeTests
     public void ConfirmedMissing_AndAnEmptyCommand_AreNotUnverified()
     {
         Assert.Equal(PersistenceOutcome.Clean, Run(Entry(Evil), NotFound(Evil)).Outcome);
-        Assert.Equal(PersistenceOutcome.Clean, Run(Entry(null, unresolved: TargetUnresolvedReason.NotFoundOnSearchPath)).Outcome);
+        Assert.Equal(PersistenceOutcome.Clean, Run(Entry(null, PersistenceKind.Service, unresolved: TargetUnresolvedReason.NotFoundOnSearchPath)).Outcome);
         Assert.Equal(PersistenceOutcome.Clean, Run(Entry(null, unresolved: TargetUnresolvedReason.EmptyCommand)).Outcome);
         Assert.Equal(PersistenceOutcome.Clean, Run(Entry(Evil), Report(Evil, signature: VendorSigned())).Outcome);
+    }
+
+    [Fact]
+    public void AScanThatFindsThePickedCandidateMissing_IsUnverified_WhenLaterCandidatesExist()
+    {
+        // Follow-up review H-B: the resolver stopped at evil.exe; if it is gone at scan time, "evil.exe --x" etc. would run.
+        var resolved = Resolve(@"C:\Users\u\evil.exe --x y");
+        Assert.Contains(ResolutionFlag.LaterCandidates, resolved.Flags);
+
+        var judgement = Judge.Judge(RunEntry(resolved), NotFound(Evil), null, new FakeAcl());
+
+        Assert.Equal(PersistenceOutcome.Unverified, judgement.Outcome);
+        Assert.False(judgement.Has(PersistenceRuleIds.MissingTarget));
+    }
+
+    [Fact]
+    public void ACaretEscapedTarget_IsTheFileCmdRuns_AndItsDetectionIsCarried()
+    {
+        var resolved = Resolve(@"cmd /c C:\Users\u\ev^il.exe");
+
+        var judgement = Judge.Judge(RunEntry(resolved), Report(Evil, Verdict.Malicious), Report(Cmd, signature: MicrosoftSigned()), new FakeAcl());
+
+        Assert.Equal(Evil, resolved.TargetPath);
+        Assert.Equal(Verdict.Malicious, judgement.Verdict);
+    }
+
+    [Theory]
+    [InlineData(PersistenceKind.RunKey, PersistenceOutcome.Unverified)] // L1: the launcher's folder, current folder and App Paths aren't searched
+    [InlineData(PersistenceKind.StartupFolder, PersistenceOutcome.Unverified)]
+    [InlineData(PersistenceKind.Service, PersistenceOutcome.Clean)] // System32 is the whole search order: confirmed missing
+    public void ABareNameNotOnTheSearchPath_IsMissingOnlyWhenTheSearchOrderIsKnown(PersistenceKind kind, PersistenceOutcome expected)
+    {
+        var resolved = Resolve("nosuch.exe /run");
+        var entry = new PersistenceEntry(kind, null, kind == PersistenceKind.Service ? @"HKLM\SYSTEM\CurrentControlSet\Services\X" : MachineRun, "App",
+            "nosuch.exe /run", resolved, enabled: true, kind == PersistenceKind.Service ? ServiceStartType.Automatic : null);
+
+        Assert.Equal(TargetUnresolvedReason.NotFoundOnSearchPath, resolved.UnresolvedReason);
+        Assert.Equal(expected, Judge.Judge(entry, null, null, new FakeAcl()).Outcome);
     }
 
     [Fact]
