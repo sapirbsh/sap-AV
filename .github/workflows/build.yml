@@ -54,17 +54,30 @@ jobs:
       - name: Report elevated collection timings
         if: always()
         shell: pwsh
+        continue-on-error: true
         run: |
-          foreach ($trx in Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue) {
-            [xml]$doc = Get-Content $trx.FullName -Raw
-            $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
-            foreach ($r in (Select-Xml -Xml $doc -XPath "//t:UnitTestResult[contains(@testName,'RealMachine_CollectsWithinBudget')]" -Namespace $ns)) {
-              $out = "$($r.Node.Output.StdOut)" -replace "`r?`n", ' '
-              if ($out.Length -gt 900) { $out = $out.Substring(0, 900) }
-              $out = $out -replace '%', '%25'
-              Write-Output "::notice title=Elevated collection timings::$out"
+          $ErrorActionPreference = 'Continue'
+          $found = 0
+          try {
+            foreach ($trx in @(Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue)) {
+              [xml]$doc = Get-Content -LiteralPath $trx.FullName -Raw
+              $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+              $ns.AddNamespace('t', 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010')
+              foreach ($node in @($doc.SelectNodes("//t:UnitTestResult[contains(@testName,'RealMachine_CollectsWithinBudget')]", $ns))) {
+                $stdout = $node.SelectSingleNode('t:Output/t:StdOut', $ns)
+                $out = if ($stdout) { $stdout.InnerText } else { '(no output captured)' }
+                $out = ($out -replace "`r?`n", ' ') -replace '%', '%25'
+                if ($out.Length -gt 900) { $out = $out.Substring(0, 900) }
+                Write-Output "::notice title=Elevated collection timings::$out"
+                $found++
+              }
             }
+            if ($found -eq 0) { Write-Output "::notice title=Elevated collection timings::test result not found in TRX" }
+          } catch {
+            $msg = "$_" -replace '%', '%25' -replace "`r?`n", ' '
+            Write-Output "::notice title=Elevated collection timings::script error: $msg"
           }
+          exit 0
 
       - name: Upload test results
         if: always()
