@@ -8,14 +8,14 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 |---|---|
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
-| C — Scan modes | **In progress:** C1–C6 built; follow-up review found 4 more High, being fixed |
+| C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
 | D — Real-time + VirusTotal | Not started |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after the section C fixes): Core 1324 passed + 1 skipped, Engine 572 passed + 10 skipped. Two load-sensitive tests are being fixed.
-Build: 0 warnings (Debug and Release). CI on windows-latest: green up to section B (check the run for `92ce762`).
+Tests (after section C): Core 1351 passed + 1 skipped, Engine 590 passed + 10 skipped. Simulated clean machine: 0 failed.
+Build: 0 warnings (Debug and Release). CI on windows-latest: green (`1fc1d95`).
 
 ## Section A — Detection engine (done)
 
@@ -97,127 +97,72 @@ machine; 0 build warnings.
 - Admin-configured `ScanJobs:ExcludedFolders` are honoured without the ownership check (an admin setting).
 - A non-elevated dev console run sees its own bin folder as unverified, so it scans it and raises health alert 9008.
 
-## Current status (2026-11-01)
+## Section C — Scan modes (done)
 
-**Section B is done.** Section C (scan modes) is in progress.
+| Step | What | Status |
+|---|---|---|
+| C1 | Custom Scan, access-first reporting, per-user quarantine/alert budgets | **Done** (`77be4e0`…`83b78d7`; review H1 fixed `7a63104`) |
+| C2 | Read-only autostart collectors (Run/RunOnce, Winlogon, IFEO, services, Startup shortcuts, scheduled tasks) | **Done** (`ee7e59b`…`b5846c9`) |
+| C3 | Autostart judgement (point rules, MITRE, alerts 2001/2002) | **Done** (`f92aa33`, `f335c8e`) |
+| C4 | Quick Scan (pluggable checks: processes, autostarts, risky folders, last 7 days) | **Done** (`0e57d9c`…`c8ecff3`; review clean) |
+| C5 | SQLite scan cache keyed by file identity | **Done** (`f5a0e88`, `8b8024e`) |
+| C6 | Full Scan over all fixed drives | **Done** (`1eed55a`, `28c2263`) |
 
-**C1 (Custom Scan) is built and pushed** (`77be4e0`, `6506d1a`, `9403690`, `83b78d7`):
-- results carry what the results screen needs (verdict, reasons, MITRE, signature, download source, hash, action);
-- network files are refused after open unless an admin allows them;
-- standard users learn nothing about files they can't read;
-- per-user quarantine quota and rate limit, and separate alert/auto-quarantine budgets so user scans can't starve
-  engine alerts;
-- quarantine items are visible only to users who could read the original file;
-- a restored file is owned by the requesting user again.
+**What was built**
+- **Custom / Quick / Full Scan** as admin- or user-requested jobs through the pipe. Quick Scan runs four phases in one
+  3-minute job (running programs, autostart entries, high-risk folders of every profile, files changed in the last 7 days).
+  Full Scan covers every fixed drive with no time limit. Each file is scanned once per job.
+- **Autostart collection and judgement:** read-only, as SYSTEM. Shortcut and task-XML parsing run **only in the sandboxed
+  worker**. Command lines are resolved the way CreateProcess and cmd.exe do (switch forms, `^` escapes, `&` chains,
+  unquoted paths). An entry whose real payload wasn't scanned is **Unverified, never Clean**; expected cases (e.g. inline
+  commands) are counted, while coverage gaps mark the phase Incomplete.
+- **Scan cache:** SQLite in the protected engine folder, HMAC-signed rows, valid only with a change journal (NTFS/ReFS),
+  matching file ID, path, size, times and USN, the same rules and engine version, and at most 14 days old. Blocklist
+  updates re-check cached hashes without re-reading. Repeat scans were 15.6× faster on a test tree.
+- **Evasion fixes:** `attrib +O` and user-made "cloud placeholder" folders no longer hide files (a folder is skipped only
+  inside a sync root Windows confirms); user folder settings can't steer or starve the folder phases.
 
-Tests: Core 1179 + 1 skipped, Engine 399 + 8 skipped. C1's review came back **NOT CLEAN** (1 High): restoring always made the requester the owner, so an admin restoring a
-Program Files or System32 file would let non-elevated malware in their session replace it. **Fixed** (`7a63104`, `e72bd52`): restore gives the file back to its recorded original owner; standard users see only
-"Microsoft" as a signer and only the download host; the restore privilege refuses an already-impersonating thread.
-Medium/Low findings are in ROADMAP.md. **C1 is done** (tests: Core 1179 + 1 skipped, Engine 413 + 8 skipped).
+**How it was reviewed**
+- Immediate reviews of C1 and C4; a section tester pass (`9eae100`); a section reviewer pass (5 High: crashes from a Run
+  value and from a task file, `attrib +O`, false Clean on autostart entries, stale cache without a journal) and a
+  follow-up review (4 more High: cmd switch forms, false "missing" targets, shortcut ID lists, user-made placeholders).
+  All fixed (`edeeb2f`…`b27eb60`). A real bug found by a flaky test was fixed too: a job out of its time budget could end
+  Completed instead of TimedOut (`ae0c245`).
+- Medium/Low findings are recorded in `ROADMAP.md` under C/D/E steps (e.g. the user-writable Tasks folder flooding
+  collection, launcher-argument tricks for E4, cache hardening for D1).
 
-**C2 is done** (`ee7e59b`, `d5c080b`, `e3d2bf7`, `b5846c9`): read-only collectors for Run/RunOnce, Winlogon, IFEO,
-services, startup-folder shortcuts (own bounded parser, nothing resolved through the shell) and scheduled tasks (XML
-with external entities refused); command lines are resolved to the real target, with unquoted paths and interpreter
-hosts flagged and the user's own environment variables used. Nothing is executed or opened. 847 entries in 428 ms on
-this PC. Tests: Core 1221 + 1 skipped, Engine 438 + 8 skipped.
+**Decisions the builders made (open to change):** autostart collection budget 60 s (and at most ~25% of a Quick Scan's
+remaining time); a cloud reparse tag alone counts as a hydrated file and gets scanned; the debug in-process mode doesn't
+collect tasks and shortcuts; a 5 s parse timeout.
 
-**C3 is done** (`f92aa33`, `f335c8e`): each autostart entry is judged from its target's scan result (Malicious
-carries over) plus point-based rules: a machine-wide autostart whose target users can modify (checked by the folder
-ACL), targets in Temp/Downloads, IFEO debugger hijacks (strongest on accessibility programs like sethc), Winlogon
-changes, unquoted paths users can exploit, remote payloads, COM hijacks. 60 points = Suspicious. Microsoft-signed system
-entries stay silent. New alerts 2001/2002 and 7 new MITRE IDs. Tests: Core 1272 + 1 skipped, Engine 460 + 8 skipped.
+**Tests after section C:** Core 1351 passed + 1 skipped, Engine 590 passed + 10 skipped; 0 failures on the simulated
+clean machine; three combined runs in a row green; 0 build warnings.
 
-**C4 is built** (`0e57d9c`, `7c2ff7c`, `309a8fc`, `c8ecff3`): Quick Scan runs four pluggable phases in one job: running
-programs, autostart entries (C2 + C3), high-risk folders of every profile, and files changed in the last 7 days. Each
-file is scanned once, the budget is 3 minutes, and phases that run out of time are reported as incomplete. Quick Scan
-through the pipe is admin-only. On this dev PC: programs 1.6 s, autostarts 19 s, then the two folder phases were cut
-short by the 3-minute budget (about 100 files/s on a large AppData), so the folder phases need tuning.
-Tests: Core 1272 + 1 skipped, Engine 486 + 9 skipped.
+**Open items carried forward**
+- **Elevated collection timings (from CI, `1fc1d95`):** 34.2 s for 927 entries, of which **scheduled tasks 32.6 s**
+  (212 task files, 28.8 s in sandbox parsing, about 136 ms per file, one sandbox request per file). Registry and services
+  take milliseconds. **Being fixed now** by batching the parse requests.
+- **Quick Scan folder phases** were cut short by the 3-minute budget on this dev PC (large AppData); tune with the cache.
+- **Autostart judging is an arms race** (every launcher has its own argument tricks). The rule kept: if sap-AV can't see
+  the real payload, the entry is Unverified, never Clean. Remaining launcher tricks are listed under E4.
 
-C4's review came back **CLEAN**. Its two Mediums (user-controlled folder settings could steer or starve the folder
-phase; phase 4 skipped folders phase 3 never finished) are being fixed in the C5/C6 batch.
+## Current status (2026-11-02)
 
-**C5 + C6 are built** (`8545d4f`, `f5a0e88`, `8b8024e`, `1eed55a`, `28c2263`):
-- **Scan cache (C5):** SQLite in the protected engine folder, keyed by the file's unique ID plus exact path, size, times
-  and USN, and valid only under the same rules and engine version. Every hit is checked against the current blocklist
-  (no re-read). Rows are HMAC-signed. Only engine/admin scans use it. A repeat scan of a test tree was 15.6x faster.
-- **Full Scan (C6):** all fixed drives (by volume, VHDs included), every file, plus running programs and autostarts.
-  No time limit, bounded memory, depth and entry safeguards, cloud placeholders skipped. Admin-only through the pipe.
-  A capped real run: 245 s cold, 3.8 s repeat (cache).
-- C4's two Mediums are fixed (user folder settings validated, defaults always scanned, fair time per folder; phase 4
-  covers folders phase 3 didn't finish). This also fixed a dedupe bug that dropped files between phases.
-Tests: Core 1272 + 1 skipped, Engine 521 + 10 skipped.
-
-The **section C tester pass** is done (`9eae100`), with no production bugs: cross-step tests through the real pipe, cache
-and quarantine; a guard that fails if tests touch the real `%ProgramData%\sap-AV`; two flaky tests made deterministic.
-Tests: Core 1273 + 1 skipped, Engine 526 + 10 skipped.
-
-**CI:** green on all of section C (`f34a71c`, windows-latest, elevated).
-
-**Open finding, to fix in the section C round:** on the elevated CI machine the autostart collection sometimes hits its
-whole time budget (10 s before, 30 s now; run `624e52b` failed on it, the next run on the same code passed). On this PC,
-non-elevated, it takes 0.4 s. An elevated or SYSTEM run reads every scheduled task, so the real engine may be slow here
-or get cut short. Find which source is slow and fix it.
-
-The **section C reviewer pass** came back **NOT CLEAN**: 5 High, no Critical.
-- **H1:** a standard user can crash the SYSTEM engine with one Run value (a long `cmd /c call call …` overflows the stack).
-- **H2:** a crafted file in `System32\Tasks` crashes the engine the same way. Decision: shortcut and task-XML parsing move
-  into the sandboxed worker, with no exception to the B5 rule.
-- **H3:** `attrib +O` hides a file or whole folder from Quick and Full Scan.
-- **H4:** an autostart entry was judged Clean when its real program was never scanned (network paths, `&` chains, a
-  mismatched shortcut). A new "Unverified" outcome fixes this.
-- **H5:** on a volume without a change journal, a user could keep a cached Clean after changing the file.
-
-**The fix round is built and pushed** (`edeeb2f`…`f73c749`): all five High findings, plus M3, M4, M5, M7 and M8.
-Shortcut and task-XML parsing now run only in the sandboxed worker. Plain Offline files are scanned. An autostart entry
-whose program wasn't scanned is reported as **Unverified**, never Clean. The cache requires a change journal, and verdicts
-expire after 14 days. Microsoft-signed files are now cached too. Tests: Core 1324 + 1 skipped, Engine 572 + 10 skipped.
-
-**Decisions the builder made (open to change):**
-- Collection budget raised again, from 30 s to 60 s.
-- A cloud reparse tag alone counts as a hydrated file and gets scanned; otherwise every hydrated OneDrive file would be
-  hidden.
-- The debug in-process mode no longer collects tasks and shortcuts.
-
-**Still open in section C:**
-- **Slow collection:** the cause is unconfirmed (probably opening every task file under real-time AV on a cold disk). CI now
-  publishes the elevated timings as a public notice (`a710828`), so the next CI run should show the real numbers.
-- ~~Two load-sensitive tests~~: **fixed.** `RealMachine_CollectsWithinBudget…` tripped the 5 s per-user budget under load
-  (`8cfafe1`). `TimeBudget_EachFolderPhaseGetsItsShare…` exposed a **real bug**: a job out of its whole budget could end
-  Completed instead of TimedOut, depending on thread timing (fixed in `ScanJob.Checks.cs`). Six full runs in a row passed.
-- **Possible noise:** "Incomplete" now fires on any Unverified entry, so most real scans may say Incomplete. The review
-  is checking this.
-
-The **follow-up review** confirmed that the worker move (H2), the cache fix (H5) and the stack-overflow fix (H1) hold, but
-found **4 more High**, three of them new ways an unscanned payload still comes out Clean:
-- **H-A:** `cmd.exe /d/c evil.exe` (and `/cevil.exe`, or more than 64 switches) was read as "just cmd.exe" → Clean.
-- **H-B:** a payload judged "missing" when it isn't: an unquoted path with a dotted folder, or `ev^il.exe` (cmd removes
-  the `^`).
-- **H-C:** a shortcut whose real target sits in an ID list the parser doesn't support → only the decoy target is scanned.
-- **H-D:** any standard user can mark a folder as a cloud placeholder (no OneDrive needed), and Quick and Full Scan then
-  skip it silently.
-
-**Now:** fixing these four, plus two items pulled forward: Unverified entries that are expected (like OneDrive's own
-inline Run commands) won't make every scan say "Incomplete", and autostart collection gets at most ~25% of Quick Scan's
-time, with a short parse timeout. The other Medium/Low findings are in ROADMAP.md.
-
-**Note:** making autostart judging airtight is an arms race (every launcher has its own argument tricks). The rule kept
-here is the one that matters: if sap-AV can't see the real payload, the entry is **Unverified, never Clean**. Remaining
-launcher tricks are listed under E4.
+**Section C is done**, apart from one performance fix in progress (batching task parsing, see above). **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
+Block & remove).
 
 **Open for the user**
-- **Please remove `C:\ProgramData\sap-AV` (elevated):** a C5 test run on 2026-10-29 accidentally created the real engine
-  data folder, owned by your user account. The code is fixed, so tests no longer touch it. Left in place, the real engine
-  would refuse it as "untrusted owner" and turn off quarantine and the sandbox. In an **elevated** PowerShell:
+- **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
+  data folder, owned by your user account. The code is fixed and a test guard now prevents it. Left in place, the real
+  engine would refuse it as "untrusted owner" and turn off quarantine and the sandbox. In an **elevated** PowerShell:
   `Get-ChildItem -Force C:\ProgramData\sap-AV` (should be empty), then `Remove-Item C:\ProgramData\sap-AV`.
-- ~~Elevated Event Log test~~: **passed 2/2 on 2026-10-28** (run by the user, elevated): the real Event Log service
-  honours the `sap-AV` CustomSD, a filtered admin token is refused, and the positive control works.
-- ~~CI for `92ce762`~~: **green**, so the elevated ProtectedPrefix pipe tests pass on windows-latest.
-- ~~CI red from `e72bd52`~~: **fixed, CI green again at `1abd55c`** (build #57). Both failures were test assumptions on
-  the elevated runner (an elevated admin's new files are owned by Administrators; collecting every scheduled task took
-  10.1 s against a 10 s budget, now 30 s). CI now posts failed tests as public annotations (`fb65ca9`).
+- **Optional, elevated:** remove the leftover test folder
+  `C:\Users\user\AppData\Local\Temp\claude\c--Projects-sap-AV\643feb91-23ce-4618-9c16-35ba94238a87\scratchpad\cf`
+  (a cloud-tag experiment; it can't be opened or deleted without elevation).
+- ~~Elevated Event Log test~~: passed 2/2 on 2026-10-28.
 
 ## What's left
 
-- **C:** the section reviewer pass (running) and its fix round. C1–C6 and the tester pass are done.
-- Then D → E → F → G, ending with the Phase 1 security review (G5).
+- **D:** real-time file monitoring (D1), VirusTotal (D2, D3), real-time persistence monitoring (D4), Block & remove (D5),
+  then the section D tester + reviewer pass.
+- Then E → F → G, ending with the Phase 1 security review (G5).
