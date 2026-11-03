@@ -9,13 +9,13 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1 done + immediate review fixed; next D2) |
+| D — Real-time + VirusTotal | In progress (D1 done + immediate review fixed, D2 done; D3 being built) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after D1): Core 1354 passed + 1 skipped, Engine 642 passed + 13 skipped. Simulated clean machine: 0 failed.
-Build: 0 warnings (Debug and Release). CI on windows-latest: green (`32ce339`).
+Tests (after D2): Core 1420 passed + 1 skipped, Engine 642 passed + 13 skipped. Simulated clean machine: 0 failed.
+Build: 0 warnings (Debug and Release). CI on windows-latest: green (`9628568`).
 
 ## Section A — Detection engine (done)
 
@@ -184,7 +184,25 @@ Two flaky tests fixed:
 - Defender's ML detection removed a test file (`MZ` + `.pdf.exe` + an internet zone);
 - a Full Scan pause test had a timing race.
 
-**Next:** D2 (VirusTotal client, cache, rate limiter), D3 (VT wiring + `%ProgramData%\sap-AV` ACL), D4 (real-time
+D1 after the push:
+- **CI failure, fixed:** one real-time test assumed new files are owned by the user. On the elevated CI runner they're
+  owned by Administrators, so the code correctly used the engine's own budget (`9628568`).
+- **CI annotations:** the "Annotate failed tests" step had crashed. It's now robust and also reports test-host crash
+  messages (`d20eedb`).
+
+**D2 (VirusTotal client) is done** (`d279fb7`…`cfc581f`), in SapAV.Core, not wired yet:
+- **Client:** hash-only `GET /api/v3/files/{sha256}` to www.virustotal.com, no redirects. Strict, size-capped
+  response parsing; status mapping (404 unknown, 401/403 bad key, 429 quota back-off, 5xx transient).
+- **Rate limiter:** 4 per minute, 500 per UTC day, persisted across restarts.
+- **Cache:** SQLite with HMAC rows; 7 days for flagged results, 1 day for clean or unknown.
+- **API key:** stored with machine DPAPI; it never appears in logs, ToString or JSON.
+- **Tests:** 34 test methods (66 cases), all with a fake HTTP handler and a fake clock.
+- **Package:** no new one needed.
+
+Elevated collection timings on CI now vary between 3.5 s and 9 s per run (24.9 s once, on a slow runner). They used to
+be 34 s.
+
+**Next:** D3 (VT wiring + `%ProgramData%\sap-AV` ACL, being built now, then an immediate review), D4 (real-time
 persistence monitoring), D5 (Block & remove), then the section D tester + reviewer pass.
 
 **Open for the user**
@@ -199,6 +217,6 @@ persistence monitoring), D5 (Block & remove), then the section D tester + review
 
 ## What's left
 
-- **D:** VirusTotal (D2, D3), real-time persistence monitoring (D4), Block & remove (D5), then the section D tester +
-  reviewer pass. (D1 done.)
+- **D:** VirusTotal wiring (D3), real-time persistence monitoring (D4), Block & remove (D5), then the section D
+  tester + reviewer pass. (D1 and D2 done.)
 - Then E → F → G, ending with the Phase 1 security review (G5).

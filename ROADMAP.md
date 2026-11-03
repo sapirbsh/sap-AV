@@ -633,6 +633,20 @@ Deferred:
   the user" allowlist.
 - **F:** real-time status and per-file results on the pipe.
 
+**Notes from D2 (VirusTotal client, cache, limiter, key store; built `d279fb7`…`cfc581f`).**
+- **What was decided:**
+  - **Package:** no new one. Machine DPAPI is called through `CryptProtectData` directly, like the quarantine key.
+  - **SQLite:** `Microsoft.Data.Sqlite` is referenced by Core as a private asset, so the scan worker ships without
+    SQLite.
+  - **Cache TTLs:** 7 days when any engine flagged the file; 1 day for clean or unknown (404) results. Only Found and
+    NotFound are cached.
+- **Known limits, for the section D review:**
+  - Two lookups of the same uncached hash at the same time both send a request (no coalescing).
+  - A budget slot counts even when the request then fails.
+  - `vt-usage.json` has no MAC. Tampering only resets the local counter; the server quota still applies.
+  - The key string can't be wiped from memory.
+  - The cache MAC key file has no trusted-owner check of its own; it relies on the D3 folder ACL.
+
 **D1 immediate review (no Critical).** Fixed in the D1 fix round:
 - H1: oplock holders stalled the real-time threads.
 - H2: no per-root queue quota or fairness.
