@@ -15,7 +15,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
 Tests (after section C): Core 1354 passed + 1 skipped, Engine 600 passed + 12 skipped. Simulated clean machine: 0 failed.
-Build: 0 warnings (Debug and Release). CI on windows-latest: green (`1fc1d95`).
+Build: 0 warnings (Debug and Release). CI on windows-latest: green (`32ce339`).
 
 ## Section A — Detection engine (done)
 
@@ -146,14 +146,18 @@ clean machine; three combined runs in a row green; 0 build warnings.
   files go in one request, served by one dedicated I/O thread per worker. Local results for 200 files: idle 79 ms →
   30 ms; busy CPU 3.5 s → 0.3 s; starved thread pool 15.8 s → 44 ms. Immediate review: no Critical. H1 (solo retries
   ignored the collection budgets) and M1 (one thread per exchange) are fixed. M2/M3/L3/L4 are listed in ROADMAP
-  under section C.
+  under section C. **Elevated CI after the fix (`32ce339`): 9.4 s total** (was 34.2 s), scheduled tasks 7.8 s for 212
+  files (6.9 s parsing, about 32 ms per file, was 136 ms), Startup folders 1.5 s (mostly the first worker start). Still
+  above the 5 s goal on the CI runner; look at it again with the D4 real-time persistence work (only changed tasks
+  need parsing there).
 - **Quick Scan folder phases** were cut short by the 3-minute budget on this dev PC (large AppData); tune with the cache.
 - **Autostart judging is an arms race** (every launcher has its own argument tricks). The rule kept: if sap-AV can't see
   the real payload, the entry is Unverified, never Clean. Remaining launcher tricks are listed under E4.
 
 ## Current status (2026-11-03)
 
-**Section C is done**, including the task-parsing performance fix (see above). **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
+**Section C is done**, including the task-parsing performance fix (see above). **D1 (real-time file monitoring) is
+being built now.** **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
 Block & remove).
 
 **Open for the user**
