@@ -305,7 +305,7 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
 
             if (errorCode == 0 && numBytes > 0)
             {
-                changes = Parse(_buffer.AsSpan(0, (int)Math.Min(numBytes, (uint)_buffer.Length)), _extended);
+                changes = TryParse(_buffer.AsSpan(0, (int)Math.Min(numBytes, (uint)_buffer.Length)), _extended);
             }
         }
 
@@ -344,6 +344,19 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
     /// Parses FILE_NOTIFY_EXTENDED_INFORMATION (or FILE_NOTIFY_INFORMATION) records, bounds-checked: a record that doesn't
     /// fit ends the parse. Only Added / Modified / RenamedTo / stream changes are kept.
     /// </summary>
+    /// <summary>Review D1 L1: <see cref="Parse"/> on the I/O thread, guarded: a parse failure is treated as lost events (a rescan), never a crash.</summary>
+    private static List<FileChange>? TryParse(ReadOnlySpan<byte> data, bool extended)
+    {
+        try
+        {
+            return Parse(data, extended);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IndexOutOfRangeException or OverflowException)
+        {
+            return null;
+        }
+    }
+
     internal static List<FileChange> Parse(ReadOnlySpan<byte> data, bool extended)
     {
         // Extended: NextEntryOffset 0, Action 4, times 8-39, AllocatedLength 40, FileSize 48, FileAttributes 56,
@@ -351,13 +364,13 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
         int header = extended ? 84 : 12;
         var changes = new List<FileChange>();
         int offset = 0;
-        while (offset >= 0 && offset + header <= data.Length)
+        while (offset >= 0 && (long)offset + header <= data.Length)
         {
             var record = data[offset..];
             int next = BitConverter.ToInt32(record);
             int action = BitConverter.ToInt32(record[4..]);
             int nameBytes = BitConverter.ToInt32(record[(header - 4)..]);
-            if (nameBytes < 0 || (nameBytes & 1) != 0 || header + nameBytes > record.Length)
+            if (nameBytes < 0 || (nameBytes & 1) != 0 || (long)header + nameBytes > record.Length) // review D1 L1: no int overflow
             {
                 break;
             }
@@ -372,6 +385,11 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
             }
 
             if (next <= 0)
+            {
+                break;
+            }
+
+            if ((long)offset + next > data.Length)
             {
                 break;
             }

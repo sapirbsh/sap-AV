@@ -30,7 +30,8 @@ internal enum ProbeOutcome
 }
 
 /// <param name="Length">The file size from the probe's handle (Unlocked only).</param>
-internal readonly record struct ProbeResult(ProbeOutcome Outcome, long Length = 0, int Win32Error = 0);
+/// <param name="Owner">The file owner SID from the probe's handle (Unlocked only; null if it can't be read).</param>
+internal readonly record struct ProbeResult(ProbeOutcome Outcome, long Length = 0, int Win32Error = 0, string? Owner = null);
 
 /// <summary>
 /// "Wait until unlocked" (ROADMAP D1, carried over from the A2 review), <b>its own probe</b>, separate from the scan open.
@@ -44,11 +45,12 @@ internal readonly record struct ProbeResult(ProbeOutcome Outcome, long Length = 
 internal static class UnlockProbe
 {
     private const uint ShareNoWriters = N.ShareRead | N.ShareDelete;
+    private const int ErrorOperationAborted = 995;
 
     public static ProbeResult Probe(SafeFileHandle parent, string name)
     {
         ArgumentNullException.ThrowIfNull(parent);
-        using var handle = SafeTree.OpenChild(parent, name, N.GenericRead, ShareNoWriters, SafeTree.OpenNoRecall, out var failure, out int error);
+        using var handle = SafeTree.OpenChild(parent, name, N.GenericRead, ShareNoWriters, SafeTree.OpenNoRecall | N.FileCompleteIfOplocked, out var failure, out int error);
         if (handle is null)
         {
             return new(Classify(failure, error), Win32Error: error);
@@ -61,7 +63,7 @@ internal static class UnlockProbe
 
         try
         {
-            return new(ProbeOutcome.Unlocked, RandomAccess.GetLength(handle));
+            return new(ProbeOutcome.Unlocked, RandomAccess.GetLength(handle), Owner: OwnerOf(handle));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -69,10 +71,26 @@ internal static class UnlockProbe
         }
     }
 
+    /// <summary>The owner SID read from the open handle (READ_CONTROL is part of GENERIC_READ), or null.</summary>
+    private static string? OwnerOf(SafeFileHandle handle)
+    {
+        try
+        {
+            return N.TryGetSecurity(handle, N.OwnerSecurityInformation, out _) is { } descriptor
+                ? new System.Security.AccessControl.RawSecurityDescriptor(descriptor, 0).Owner?.Value
+                : null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The outcome for a failed open (pure; tested directly).</summary>
     internal static ProbeOutcome Classify(SafeTreeFailure failure, int win32Error) => win32Error switch
     {
         SafeScanOpen.ErrorVirusInfected or SafeScanOpen.ErrorVirusDeleted => ProbeOutcome.BlockedByAntivirus,
+        ErrorOperationAborted => ProbeOutcome.Locked, // the watchdog cancelled an open stuck behind an oplock break (review D1 H1)
         _ => failure switch
         {
             SafeTreeFailure.Locked => ProbeOutcome.Locked,

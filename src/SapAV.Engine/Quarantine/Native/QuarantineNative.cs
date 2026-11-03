@@ -36,6 +36,12 @@ internal static unsafe class QuarantineNative
     public const uint FileSynchronousIoNonAlert = 0x00000020;
     public const uint FileNonDirectoryFile = 0x00000040;
     public const uint FileOpenReparsePoint = 0x00200000;
+
+    /// <summary>FILE_COMPLETE_IF_OPLOCKED: never wait for an oplock break to be acknowledged (see <see cref="OpenRelative"/>).</summary>
+    public const uint FileCompleteIfOplocked = 0x00000100;
+
+    /// <summary>STATUS_OPLOCK_BREAK_IN_PROGRESS (a success status).</summary>
+    public const int StatusOplockBreakInProgress = 0x00000108;
     public const uint ObjCaseInsensitive = 0x00000040;
     public const uint ObjDontReparse = 0x00001000;
 
@@ -104,8 +110,19 @@ internal static unsafe class QuarantineNative
                     return null;
                 }
 
+                var opened = new SafeFileHandle(handle, ownsHandle: true);
+                if (status == StatusOplockBreakInProgress && (options & FileCompleteIfOplocked) != 0)
+                {
+                    // Review D1 H1: someone holds an oplock / lease that must be broken first. With FILE_COMPLETE_IF_OPLOCKED
+                    // the open didn't wait for the holder's acknowledgement (which may never come); it is reported as a
+                    // sharing violation, so callers treat it as "in use, try later".
+                    opened.Dispose();
+                    win32Error = ErrorSharingViolation;
+                    return null;
+                }
+
                 win32Error = 0;
-                return new SafeFileHandle(handle, ownsHandle: true);
+                return opened;
             }
         }
         finally

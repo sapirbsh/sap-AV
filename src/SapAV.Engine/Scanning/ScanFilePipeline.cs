@@ -28,9 +28,18 @@ internal sealed record ScanPipelineOutcome(ScanJobFileResult? Result, FileScanRe
 /// </summary>
 internal sealed record ScanBudget(ScanTrigger Trigger, System.Security.Principal.SecurityIdentifier? Requester = null, bool IsStandardUser = false)
 {
-    public global::SapAV.Engine.Alerts.AlertBudget Alerts => Requester is null
-        ? global::SapAV.Engine.Alerts.AlertBudget.ForEngine(Trigger)
-        : global::SapAV.Engine.Alerts.AlertBudget.ForRequester(Requester);
+    public global::SapAV.Engine.Alerts.AlertBudget Alerts => Requester is not null
+        ? global::SapAV.Engine.Alerts.AlertBudget.ForRequester(Requester)
+        : Owner is null
+            ? global::SapAV.Engine.Alerts.AlertBudget.ForEngine(Trigger)
+            : new global::SapAV.Engine.Alerts.AlertBudget($"engine:{Trigger}:{Owner}", false);
+
+    /// <summary>
+    /// Review D1 M2 (real-time): whose files these are (the watched folder's user, or a machine-wide folder's file owner),
+    /// so one user's files can't use up the real-time alert and auto-quarantine windows for everyone. Null = the engine's
+    /// own budget for the trigger, which no user's files count against.
+    /// </summary>
+    public string? Owner { get; init; }
 
     /// <summary>The per-user quarantine quota applies (standard users only; administrators and the engine use the global quota).</summary>
     public Quarantine.QuarantineRequester? Quota => IsStandardUser && Requester is not null ? new(Requester) : null;
@@ -95,7 +104,7 @@ internal sealed class ScanFilePipeline(
     public async Task<ScanPipelineOutcome> ProcessDetailedAsync(
         string path, ScanTrigger trigger, Action<long> bytesScanned, CancellationToken jobToken, IScanAccessCheck? access = null,
         SharedFolder? folder = null, string? name = null, ScanPriority priority = ScanPriority.Normal, bool allowRemote = false, ScanBudget? budget = null,
-        ScanDedupe? dedupe = null)
+        ScanDedupe? dedupe = null, bool completeIfOplocked = false)
     {
         string step = "open";
         try
@@ -107,7 +116,7 @@ internal sealed class ScanFilePipeline(
             // without following links, relative to the folder handle the walker listed when there is one (review B4 M2).
             // C1 / B4 L3: the requester's read access is checked inside the open, before anything else about the file
             // (exclusion, different file, lock, size, remote) can show in the result.
-            using var opened = SafeScanOpen.Open(item, notes, time, out var failure, out var skip, new ScanOpenChecks(access, allowRemote, remote),
+            using var opened = SafeScanOpen.Open(item, notes, time, out var failure, out var skip, new ScanOpenChecks(access, allowRemote, remote, completeIfOplocked),
                 folder, name);
             if (skip == ScanSkipReason.NoAccess)
             {

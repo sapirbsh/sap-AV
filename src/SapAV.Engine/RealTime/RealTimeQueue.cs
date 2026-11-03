@@ -3,7 +3,7 @@ namespace SapAV.Engine.RealTime;
 /// <summary>Where a waiting file is.</summary>
 internal enum PendingState
 {
-    /// <summary>Waiting for quiet (debounce) or for a writer to close it (retry).</summary>
+    /// <summary>Waiting for quiet (debounce), its minimum re-scan interval, or a writer to close it (retry).</summary>
     Settling,
 
     /// <summary>Due; being ranked or waiting for a scan thread.</summary>
@@ -27,12 +27,15 @@ internal sealed class PendingFile(WatchedRoot root, string relative, string key,
 
     public DateTimeOffset Due { get; internal set; }
 
+    /// <summary>Review D1 H2: not looked at before this (the file's minimum re-scan interval).</summary>
+    internal DateTimeOffset NotBefore { get; set; }
+
     public PendingState State { get; internal set; }
 
     /// <summary>A Mark-of-the-Web stream event was seen for it.</summary>
     public bool MotwHint { get; internal set; }
 
-    /// <summary>Lower runs first (Mark-of-the-Web, then executables, archives, Office files, the rest).</summary>
+    /// <summary>Lower runs first within its root (Mark-of-the-Web, then executables, archives, Office files, the rest).</summary>
     public int Rank { get; internal set; }
 
     /// <summary>When the first "a writer has it open" was seen; null while none was.</summary>
@@ -57,27 +60,41 @@ internal enum OfferResult
     /// <summary>Merged into the entry already waiting (or being scanned) for that file.</summary>
     Coalesced,
 
-    /// <summary>The queue is at its cap (files or path characters): the caller switches the folder to "rescan later".</summary>
+    /// <summary>The queue, or this folder's share of it, is at its cap: the caller switches that folder to "rescan later".</summary>
     Dropped,
+
+    /// <summary>The name is longer than <see cref="RealTimeOptions.MaxQueuedNameLength"/>: the caller rescans the folder later instead.</summary>
+    TooLong,
 }
 
 /// <summary>
-/// The real-time queue (D1): <b>bounded</b> (at most <see cref="RealTimeOptions.MaxPendingFiles"/> files and
-/// <see cref="RealTimeOptions.MaxPendingPathChars"/> path characters, so an event storm can't grow memory), <b>coalescing</b>
-/// (one entry per file however many events arrive; an event during the scan marks it to be looked at once more afterwards),
-/// <b>debounced</b> (a file is due <see cref="RealTimeOptions.SettleDelay"/> after its last event, at most
-/// <see cref="RealTimeOptions.MaxSettleDelay"/> after its first) and <b>prioritised</b> (due files are ranked by the caller:
-/// Mark-of-the-Web first; FIFO within a rank). Pure state, thread-safe, driven by the caller's clock: no threads or I/O here.
-/// Every waiting file has at most one entry in the due-time heap, so repeated events can't grow it either.
+/// The real-time queue (D1): <b>bounded</b> globally (<see cref="RealTimeOptions.MaxPendingFiles"/> files,
+/// <see cref="RealTimeOptions.MaxPendingPathChars"/> path characters) and <b>per watched folder</b> (review D1 H2: an eighth of
+/// each by default, so one folder's storm, e.g. a user's churning TEMP, puts only that folder into "rescan later");
+/// <b>coalescing</b> (one entry per file however many events arrive; an event during the scan marks it to be looked at once
+/// more afterwards); <b>debounced</b> (due <see cref="RealTimeOptions.SettleDelay"/> after its last event, at most
+/// <see cref="RealTimeOptions.MaxSettleDelay"/> after its first) with a <b>minimum re-scan interval</b> per file (a file
+/// rewritten every half second is scanned at most every <see cref="RealTimeOptions.MinRescanInterval"/>); and <b>fair</b>:
+/// due files are ranked within their folder (Mark-of-the-Web first, FIFO within a rank) and the folders take turns, so no
+/// folder's files, however highly ranked, can starve another's. Pure state, thread-safe, driven by the caller's clock: no
+/// threads or I/O here. Every waiting file has at most one entry in the due-time heap, so repeated events can't grow it.
 /// </summary>
 internal sealed class RealTimeQueue(RealTimeOptions options)
 {
+    /// <summary>Most recently scanned files remembered for the minimum re-scan interval.</summary>
+    internal const int MaxRecentScans = 8192;
+
     private readonly object _gate = new();
     private readonly Dictionary<string, PendingFile> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly PriorityQueue<(PendingFile File, long Sequence), (long Due, long Sequence)> _settling = new();
-    private readonly PriorityQueue<PendingFile, (int Rank, long Sequence)> _ready = new();
+    private readonly Dictionary<int, PriorityQueue<PendingFile, (int Rank, long Sequence)>> _ready = [];
+    private readonly Queue<int> _turns = new();
+    private readonly Dictionary<int, (int Files, long Chars)> _perRoot = [];
+    private readonly Dictionary<string, DateTimeOffset> _recent = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Queue<string> _recentOrder = new();
     private long _sequence;
     private long _chars;
+    private int _readyCount;
 
     /// <summary>Files waiting in any state (scanned ones included until they complete).</summary>
     public int Count
@@ -97,7 +114,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         {
             lock (_gate)
             {
-                return _ready.Count;
+                return _readyCount;
             }
         }
     }
@@ -114,20 +131,45 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         }
     }
 
-    /// <summary>At or below a quarter of the file cap: rescans may add files again.</summary>
+    /// <summary>Files waiting for one root.</summary>
+    public int CountFor(WatchedRoot root)
+    {
+        lock (_gate)
+        {
+            return _perRoot.TryGetValue(root.Id, out var used) ? used.Files : 0;
+        }
+    }
+
+    /// <summary>Review D1 M1: both caps at or below a quarter: rescans may add files again.</summary>
     public bool HasRoom
     {
         get
         {
             lock (_gate)
             {
-                return _items.Count <= options.MaxPendingFiles / 4;
+                return _items.Count <= options.MaxPendingFiles / 4 && _chars <= options.MaxPendingPathChars / 4;
             }
         }
     }
 
-    public OfferResult Offer(WatchedRoot root, string relative, bool motwHint, DateTimeOffset now)
+    /// <summary>Room for one more file of <paramref name="root"/> with a name of <paramref name="length"/> characters (global and the root's share).</summary>
+    public bool HasRoomFor(WatchedRoot root, int length)
     {
+        lock (_gate)
+        {
+            return FitsLocked(root.Id, length + KeyOverhead);
+        }
+    }
+
+    private const int KeyOverhead = 12; // the root id and the separator in the key
+
+    public OfferResult Offer(WatchedRoot root, string relative, bool motwHint, DateTimeOffset now, bool allowLong = false)
+    {
+        if (!allowLong && relative.Length > options.MaxQueuedNameLength)
+        {
+            return OfferResult.TooLong;
+        }
+
         string key = root.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + relative;
         lock (_gate)
         {
@@ -137,8 +179,9 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
                 switch (file.State)
                 {
                     case PendingState.Settling when file.LockWaitStart is null:
-                        // Debounce: later, never past the cap; the heap entry moves when it surfaces (TakeDue).
-                        var due = Min(now + options.SettleDelay, file.FirstSeen + options.MaxSettleDelay);
+                        // Debounce: later, never past the cap (but never before the minimum re-scan interval); the heap entry
+                        // moves when it surfaces (TakeDue).
+                        var due = Max(Min(now + options.SettleDelay, file.FirstSeen + options.MaxSettleDelay), file.NotBefore);
                         file.Due = due > file.Due ? due : file.Due;
                         break;
                     case PendingState.InProgress:
@@ -149,14 +192,15 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
                 return OfferResult.Coalesced;
             }
 
-            if (_items.Count >= options.MaxPendingFiles || _chars + key.Length > options.MaxPendingPathChars)
+            if (!FitsLocked(root.Id, key.Length))
             {
                 return OfferResult.Dropped;
             }
 
-            file = new PendingFile(root, relative, key, now) { MotwHint = motwHint, Due = now + options.SettleDelay };
+            var notBefore = _recent.TryGetValue(key, out var scanned) ? scanned + options.MinRescanInterval : DateTimeOffset.MinValue;
+            file = new PendingFile(root, relative, key, now) { MotwHint = motwHint, NotBefore = notBefore, Due = Max(now + options.SettleDelay, notBefore) };
             _items.Add(key, file);
-            _chars += key.Length;
+            Charge(root.Id, 1, key.Length);
             PushSettlingLocked(file);
             return OfferResult.Queued;
         }
@@ -200,7 +244,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         return false;
     }
 
-    /// <summary>Ranks a due file and makes it available to the scan threads.</summary>
+    /// <summary>Ranks a due file and makes it available to the scan threads (in its root's turn).</summary>
     public void MakeReady(PendingFile file, int rank)
     {
         lock (_gate)
@@ -212,25 +256,50 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
 
             file.Rank = rank;
             file.Sequence = ++_sequence;
-            _ready.Enqueue(file, (rank, file.Sequence));
+            if (!_ready.TryGetValue(file.Root.Id, out var heap))
+            {
+                _ready[file.Root.Id] = heap = new();
+                _turns.Enqueue(file.Root.Id);
+            }
+
+            heap.Enqueue(file, (rank, file.Sequence));
+            _readyCount++;
         }
     }
 
-    /// <summary>The best ready file (lowest rank, then first ranked), now InProgress.</summary>
+    /// <summary>The next root's best ready file (lowest rank, then first ranked), now InProgress. Roots take turns.</summary>
     public bool TryTakeReady(out PendingFile file)
     {
         lock (_gate)
         {
-            while (_ready.TryDequeue(out var candidate, out _))
+            while (_turns.TryDequeue(out int rootId))
             {
-                if (candidate.Removed)
+                var heap = _ready[rootId];
+                PendingFile? taken = null;
+                while (taken is null && heap.TryDequeue(out var candidate, out _))
                 {
-                    continue;
+                    _readyCount--;
+                    if (!candidate.Removed)
+                    {
+                        taken = candidate;
+                    }
                 }
 
-                candidate.State = PendingState.InProgress;
-                file = candidate;
-                return true;
+                if (heap.Count > 0)
+                {
+                    _turns.Enqueue(rootId); // back of the line
+                }
+                else
+                {
+                    _ready.Remove(rootId);
+                }
+
+                if (taken is not null)
+                {
+                    taken.State = PendingState.InProgress;
+                    file = taken;
+                    return true;
+                }
             }
         }
 
@@ -255,15 +324,23 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         }
     }
 
-    /// <summary>Done with the file. If an event arrived meanwhile, it waits again (from now); otherwise it leaves the queue.</summary>
+    /// <summary>
+    /// Done with the file (scanned at <paramref name="now"/>, which starts its minimum re-scan interval). If an event arrived
+    /// meanwhile, it waits again; otherwise it leaves the queue.
+    /// </summary>
     /// <returns>True if it is waiting again.</returns>
-    public bool Complete(PendingFile file, DateTimeOffset now)
+    public bool Complete(PendingFile file, DateTimeOffset now, bool scanned = true)
     {
         lock (_gate)
         {
             if (file.Removed)
             {
                 return false;
+            }
+
+            if (scanned)
+            {
+                RememberLocked(file.Key, now);
             }
 
             if (file.Again)
@@ -273,7 +350,8 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
                 file.FirstSeen = now;
                 file.LockWaitStart = null;
                 file.LockAttempts = 0;
-                file.Due = now + options.SettleDelay;
+                file.NotBefore = scanned ? now + options.MinRescanInterval : file.NotBefore;
+                file.Due = Max(now + options.SettleDelay, file.NotBefore);
                 PushSettlingLocked(file);
                 return true;
             }
@@ -294,6 +372,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
                 RemoveLocked(file);
             }
 
+            _perRoot.Remove(root.Id);
             return gone.Length;
         }
     }
@@ -307,6 +386,48 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         }
     }
 
+    /// <summary>The root's share: an eighth of each cap (at least 4 files and 4,096 characters).</summary>
+    internal (int Files, long Chars) RootShare =>
+        (Math.Max(4, options.MaxPendingFiles / options.FolderShareDivisor), Math.Max(4096, options.MaxPendingPathChars / options.FolderShareDivisor));
+
+    private bool FitsLocked(int rootId, long chars)
+    {
+        var share = RootShare;
+        var used = _perRoot.GetValueOrDefault(rootId);
+        return _items.Count < options.MaxPendingFiles && _chars + chars <= options.MaxPendingPathChars
+            && used.Files < share.Files && used.Chars + chars <= share.Chars;
+    }
+
+    private void Charge(int rootId, int files, long chars)
+    {
+        var used = _perRoot.GetValueOrDefault(rootId);
+        used = (used.Files + files, used.Chars + chars);
+        if (used.Files <= 0)
+        {
+            _perRoot.Remove(rootId);
+        }
+        else
+        {
+            _perRoot[rootId] = used;
+        }
+
+        _chars += chars;
+    }
+
+    private void RememberLocked(string key, DateTimeOffset at)
+    {
+        if (!_recent.ContainsKey(key))
+        {
+            _recentOrder.Enqueue(key);
+            while (_recentOrder.Count > MaxRecentScans)
+            {
+                _recent.Remove(_recentOrder.Dequeue());
+            }
+        }
+
+        _recent[key] = at;
+    }
+
     private void PushSettlingLocked(PendingFile file)
     {
         file.Sequence = ++_sequence;
@@ -318,9 +439,11 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         file.Removed = true;
         if (_items.Remove(file.Key))
         {
-            _chars -= file.Key.Length;
+            Charge(file.Root.Id, -1, -file.Key.Length);
         }
     }
 
     private static DateTimeOffset Min(DateTimeOffset a, DateTimeOffset b) => a <= b ? a : b;
+
+    private static DateTimeOffset Max(DateTimeOffset a, DateTimeOffset b) => a >= b ? a : b;
 }

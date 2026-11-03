@@ -9,6 +9,40 @@ using SapAV.Engine.Tests.TestSupport;
 
 namespace SapAV.Engine.Tests.RealTime;
 
+/// <summary>
+/// Review D1 H1: holds a batch oplock on a file and never acknowledges its break (like a hostile or hung oplock holder).
+/// Any other open of the file that waits for the acknowledgement would hang until this is disposed.
+/// </summary>
+internal sealed class BatchOplock : IDisposable
+{
+    private const uint FsctlRequestBatchOplock = 0x00090008;
+    private readonly Microsoft.Win32.SafeHandles.SafeFileHandle _handle;
+
+    public BatchOplock(string path)
+    {
+        _handle = CreateFileW(path, 0x80000000 /* GENERIC_READ */, 0x7, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0x40000000 /* OVERLAPPED */, IntPtr.Zero);
+        Assert.False(_handle.IsInvalid, $"open for the oplock failed ({System.Runtime.InteropServices.Marshal.GetLastPInvokeError()})");
+        // Left to the process on purpose: the kernel completes this OVERLAPPED when the handle closes (32 bytes, test only).
+        IntPtr overlapped = System.Runtime.InteropServices.Marshal.AllocHGlobal(64);
+        System.Runtime.InteropServices.Marshal.Copy(new byte[64], 0, overlapped, 64);
+        bool granted = DeviceIoControl(_handle, FsctlRequestBatchOplock, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, overlapped);
+        int error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+        Assert.True(!granted && error == 997, $"the batch oplock was not granted (Win32 error {error})"); // ERROR_IO_PENDING = held
+    }
+
+    public void Dispose() => _handle.Dispose();
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
+        string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        Microsoft.Win32.SafeHandles.SafeFileHandle device, uint code, IntPtr inBuffer, uint inSize, IntPtr outBuffer, uint outSize, out uint returned,
+        IntPtr overlapped);
+}
+
 /// <summary>Real time moved by a fixed offset (the clock still runs).</summary>
 internal sealed class ShiftedTime(TimeSpan offset) : TimeProvider
 {

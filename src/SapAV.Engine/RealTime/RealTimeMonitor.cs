@@ -28,7 +28,7 @@ namespace SapAV.Engine.RealTime;
 /// <para><b>Background.</b> The scheduler, the scan threads and the rescan thread are dedicated threads in background mode
 /// (<see cref="BackgroundThread"/>: low CPU, I/O and memory priority). Watcher completions only parse and enqueue.</para>
 /// <para><b>Budgets.</b> Alerts, auto-quarantines and the quarantine quota count against the engine's own real-time budget
-/// (<c>engine:RealTime</c>, <see cref="ScanBudget"/>), never a user's: a user's own scans can't use up real-time slots, and a
+/// (<c>engine:RealTime:&lt;owner SID&gt;</c> per watched-folder user or file owner, review D1 M2; <see cref="BudgetFor"/>), never a requester's: a user's own scans can't use up real-time slots, and a
 /// file a user drops needs no per-user quota check (review C1 L6). The auto-quarantine window is still a rate limit: in a
 /// burst of more than its size, later Malicious files need the user's confirmation (review B3 / D1 L2, by design).</para>
 /// </remarks>
@@ -48,8 +48,17 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     private readonly ScanTreeWalker _walker;
     private readonly RealTimeQueue _queue;
     private readonly QuickScanFileRules _rules = new(new QuickScanOptions());
-    private readonly ScanBudget _budget = new(ScanTrigger.RealTime);
     private readonly Counters _counters = new();
+    private readonly int _scanThreads;
+
+    /// <summary>Review D1 M2: owners with their own real-time budget; past <see cref="MaxOwnerBudgets"/> they share one.</summary>
+    private readonly HashSet<string> _owners = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Review D1 H1: one watchdog per scan thread.</summary>
+    private readonly List<ScanThreadWatch> _scanWatches = [];
+
+    /// <summary>Review D1 M1: raised whenever a file leaves the queue (rescan back-pressure waits on it).</summary>
+    private readonly AutoResetEvent _spaceFreed = new(false);
 
     private readonly Lock _rootsLock = new();
     private readonly Dictionary<string, WatchedRoot> _roots = new(StringComparer.OrdinalIgnoreCase);
@@ -71,7 +80,8 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
 
     public RealTimeMonitor(
         RealTimeOptions options, IWatchedFolderSource folders, ScanFilePipeline pipeline, ExclusionSet excluded, TimeProvider time, ILogger logger,
-        IDirectoryWatchFactory? watches = null, IRemoteFileProbe? remote = null, ISyncRootProbe? syncRoots = null, Func<string, int>? driveType = null)
+        IDirectoryWatchFactory? watches = null, IRemoteFileProbe? remote = null, ISyncRootProbe? syncRoots = null, Func<string, int>? driveType = null,
+        int? workerCount = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -86,6 +96,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         _driveType = driveType ?? Pipe.Native.PipeNative.DriveType;
         _walker = new ScanTreeWalker(excluded, remote: _remote, syncRoots: syncRoots);
         _queue = new RealTimeQueue(options);
+        _scanThreads = workerCount is { } workers ? options.EffectiveScanThreads(workers) : options.ScanThreads;
     }
 
     /// <summary>Raised for every file handled (on a scan thread; handlers must be quick and must not throw).</summary>
@@ -148,7 +159,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         Revalidate();
         ScheduleRevalidation(_options.RevalidateInterval);
         _threads.Add(BackgroundThread.Start("sap-AV real-time scheduler", () => Guarded(SchedulerLoop)));
-        for (int i = 0; i < _options.ScanThreads; i++)
+        for (int i = 0; i < _scanThreads; i++)
         {
             _threads.Add(BackgroundThread.Start($"sap-AV real-time scan #{i}", () => Guarded(ScanLoop)));
         }
@@ -366,6 +377,10 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
             {
                 offered++;
             }
+            else
+            {
+                capped = true; // a name that can never fit in this folder's share of the queue
+            }
         }, _stop.Token, filter: filter);
 
         if (capped || filter.LimitReached)
@@ -380,12 +395,23 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         }
     }
 
-    /// <summary>Offers one file from a rescan, waiting while the queue is full (the rescan thread is the producer).</summary>
+    /// <summary>
+    /// Offers one file from a rescan (long names allowed: here they cost only their folder's share), waiting while the queue
+    /// or the folder's share is full (the rescan thread is the producer). Review D1 M1: the wait is on the "space freed" signal
+    /// the scan threads raise, and both caps (files and path characters) count, so a full character budget can't make it spin.
+    /// </summary>
+    /// <returns>False when the name could never fit (it is longer than the folder's whole share).</returns>
     private bool OfferWithBackPressure(WatchedRoot root, string relative)
     {
+        if (relative.Length + 16 > _queue.RootShare.Chars)
+        {
+            return false;
+        }
+
+        var waits = new WaitHandle[] { _spaceFreed, _stop.Token.WaitHandle };
         while (!_stop.IsCancellationRequested)
         {
-            var result = _queue.Offer(root, relative, false, _time.GetUtcNow());
+            var result = _queue.Offer(root, relative, false, _time.GetUtcNow(), allowLong: true);
             if (result != OfferResult.Dropped)
             {
                 if (result == OfferResult.Queued)
@@ -396,9 +422,10 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
                 return true;
             }
 
-            while (!_queue.HasRoom && !_stop.IsCancellationRequested)
+            // Until this folder's share (and the whole queue) can take it again, with some slack so it doesn't refill one by one.
+            while (!(_queue.HasRoomFor(root, relative.Length) && _queue.CountFor(root) <= _queue.RootShare.Files / 2) && !_stop.IsCancellationRequested)
             {
-                _stop.Token.WaitHandle.WaitOne(50);
+                WaitHandle.WaitAny(waits, TimeSpan.FromSeconds(1));
             }
         }
 
@@ -471,16 +498,56 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         {
             _rescanSignal.Set();
         }
+
+        CheckScanWatches();
     }
 
     private void ScanLoop()
     {
-        while (!_stop.IsCancellationRequested)
+        using var watch = ScanThreadWatch.ForCurrentThread();
+        lock (_scanWatches)
         {
-            _readySignal.Wait(_stop.Token);
-            if (_queue.TryTakeReady(out var file))
+            _scanWatches.Add(watch);
+        }
+
+        try
+        {
+            while (!_stop.IsCancellationRequested)
             {
-                Handle(file);
+                _readySignal.Wait(_stop.Token);
+                if (_queue.TryTakeReady(out var file))
+                {
+                    Handle(file, watch);
+                }
+            }
+        }
+        finally
+        {
+            lock (_scanWatches)
+            {
+                _scanWatches.Remove(watch);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Review D1 H1: a scan thread past its stage deadline (an open stuck behind an oplock break that is never acknowledged,
+    /// a quarantine reopen, anything synchronous) gets <c>CancelSynchronousIo</c>, again every second until it moves on.
+    /// </summary>
+    private void CheckScanWatches()
+    {
+        ScanThreadWatch[] watches;
+        lock (_scanWatches)
+        {
+            watches = [.. _scanWatches];
+        }
+
+        foreach (var watch in watches)
+        {
+            if (watch.CancelIfOverdue(Environment.TickCount64) is { } stuck)
+            {
+                Interlocked.Increment(ref _counters.Cancelled);
+                _logger.LogWarning("Real-time: a scan thread was stuck on {Path} ({Stage}); its synchronous I/O was cancelled.", stuck.Path, stuck.Stage);
             }
         }
     }
@@ -532,12 +599,12 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     }
 
     /// <summary>Handles one file on a scan thread (never throws except for shutdown).</summary>
-    private void Handle(PendingFile file)
+    private void Handle(PendingFile file, ScanThreadWatch watch)
     {
         Step step;
         try
         {
-            step = Process(file);
+            step = Process(file, watch);
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
         {
@@ -558,19 +625,33 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
             return;
         }
 
-        if (_queue.Complete(file, now))
+        if (_queue.Complete(file, now, scanned: step.Result!.Outcome == RealTimeOutcome.Scanned))
         {
             _wake.Set();
         }
 
-        Publish(step.Result!);
+        _spaceFreed.Set();
+        Publish(step.Result);
     }
 
-    private Step Process(PendingFile file)
+    private Step Process(PendingFile file, ScanThreadWatch watch)
+    {
+        try
+        {
+            return ProcessWatched(file, watch);
+        }
+        finally
+        {
+            watch.Disarm();
+        }
+    }
+
+    private Step ProcessWatched(PendingFile file, ScanThreadWatch watch)
     {
         var root = file.Root;
         string shown = Shown(root.PathOf(file.Relative));
         var (folder, name) = RelativeOpen.Split(file.Relative);
+        watch.Arm(shown, "open", _options.StuckOpenTimeout);
         SafeFileHandle? parent = null;
         var failure = SafeTreeFailure.NotFound; // the root stopped being watched meanwhile
         int error = 0;
@@ -600,7 +681,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         var shared = new SharedFolder(parent);
         try
         {
-            return ProbeAndScan(file, shown, shared, name);
+            return ProbeAndScan(file, shown, shared, name, watch);
         }
         finally
         {
@@ -608,7 +689,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         }
     }
 
-    private Step ProbeAndScan(PendingFile file, string shown, SharedFolder parent, string name)
+    private Step ProbeAndScan(PendingFile file, string shown, SharedFolder parent, string name, ScanThreadWatch watch)
     {
         var probe = UnlockProbe.Probe(parent.Handle, name);
         bool expired = false;
@@ -645,8 +726,10 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
                 return Step.Done(new(shown, RealTimeOutcome.Error, Detail: $"It could not be opened safely ({probe.Outcome}, Win32 error {probe.Win32Error})."));
         }
 
+        var budget = BudgetFor(file.Root, probe.Owner);
+        watch.Arm(shown, "scan", StuckScanTimeout); // the worker has its own timeout; this catches a stuck quarantine reopen
         var outcome = _pipeline.ProcessDetailedAsync(shown, ScanTrigger.RealTime, _ => { }, _stop.Token, folder: parent, name: name,
-            priority: ScanPriority.High, budget: _budget).GetAwaiter().GetResult();
+            priority: ScanPriority.High, budget: budget, completeIfOplocked: true).GetAwaiter().GetResult();
         if (outcome.Result is not { } result)
         {
             return Step.Done(new(shown, RealTimeOutcome.Excluded));
@@ -666,6 +749,44 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
             default:
                 return Step.Done(new(shown, RealTimeOutcome.Scanned, result) { LockWaitExpired = expired });
         }
+    }
+
+    /// <summary>Distinct owners with their own real-time budget (review D1 M2); further owners share one.</summary>
+    internal const int MaxOwnerBudgets = 64;
+
+    /// <summary>Review D1 H1: the pipeline call (worker scan, alert, quarantine) is overdue after this.</summary>
+    private static readonly TimeSpan StuckScanTimeout = TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// Review D1 M2: the real-time budget for a file: the watched folder's user (<c>engine:RealTime:&lt;SID&gt;</c>), or for a
+    /// machine-wide folder the file's owner. Files owned by SYSTEM, Administrators or TrustedInstaller (which no standard user
+    /// can create) and files whose owner is unknown use the engine's own <c>engine:RealTime</c> budget, which therefore stays
+    /// reserved for the engine: one user's synthetic detections can't use up another user's or the engine's quarantine slots.
+    /// </summary>
+    internal ScanBudget BudgetFor(WatchedRoot root, string? fileOwner)
+    {
+        string? owner = root.Folder.Sid ?? fileOwner;
+        if (owner is null || owner is "S-1-5-18" or "S-1-5-32-544" || owner == AutoQuarantinePolicy.TrustedInstaller.Value)
+        {
+            return new ScanBudget(ScanTrigger.RealTime);
+        }
+
+        lock (_owners)
+        {
+            if (!_owners.Contains(owner))
+            {
+                if (_owners.Count >= MaxOwnerBudgets)
+                {
+                    owner = "*";
+                }
+                else
+                {
+                    _owners.Add(owner);
+                }
+            }
+        }
+
+        return new ScanBudget(ScanTrigger.RealTime) { Owner = owner };
     }
 
     /// <summary>The next wait while a writer has the file, or null when <see cref="RealTimeOptions.MaxLockWait"/> has run out.</summary>
@@ -712,7 +833,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     internal static bool HasMarkOfTheWeb(SafeFileHandle parent, string name)
     {
         using var stream = SafeTree.OpenChild(parent, name + ":Zone.Identifier", N.FileReadAttributes, SafeTree.ShareAll,
-            N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out _, out _);
+            N.FileNonDirectoryFile | SafeTree.OpenNoRecall | N.FileCompleteIfOplocked, out _, out _);
         return stream is not null;
     }
 
@@ -956,6 +1077,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
             _storming.Remove(root.Id);
         }
 
+        _spaceFreed.Set();
         root.Dispose();
         _logger.LogWarning("Real-time: stopped watching {Folder}: {Why} ({Dropped} waiting file(s) dropped).", Shown(key), why, dropped);
     }
@@ -1007,11 +1129,12 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         _wake.Dispose();
         _rescanSignal.Dispose();
         _readySignal.Dispose();
+        _spaceFreed.Dispose();
     }
 
     private sealed class Counters
     {
-        public long Events, Coalesced, Dropped, Overflows, Rescans, RescansIncomplete, Scanned, Flagged, Quarantined, LockRetries, LockWaitsExpired,
+        public long Events, Coalesced, Dropped, Overflows, Rescans, RescansIncomplete, Scanned, Flagged, Quarantined, LockRetries, LockWaitsExpired, Cancelled,
             Blocked, Gone, Links, TooLarge, Errors;
     }
 }

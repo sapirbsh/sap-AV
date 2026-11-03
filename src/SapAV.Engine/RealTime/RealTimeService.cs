@@ -50,7 +50,16 @@ internal sealed class RealTimeService(IServiceProvider services, IOptions<RealTi
         var jobs = services.GetRequiredService<ScanJobService>();
         var loggers = services.GetRequiredService<ILoggerFactory>();
         var folders = new ProfileWatchedFolders(new RegistryProfileFolders(new WindowsRegistryView()), options);
-        return new RealTimeMonitor(options, folders, jobs.Pipeline, jobs.Excluded, services.GetRequiredService<TimeProvider>(),
-            loggers.CreateLogger("SapAV.Engine.RealTime"));
+        var logger = loggers.CreateLogger("SapAV.Engine.RealTime");
+        int workers = services.GetRequiredService<IOptions<Sandbox.SandboxOptions>>().Value.WorkerCount;
+        if (options.EffectiveScanThreads(workers) < options.ScanThreads)
+        {
+            // Review D1 M3: real-time scans at High priority; one worker always stays free for user and administrator jobs.
+            logger.LogWarning("RealTime:ScanThreads = {Threads} is more than the {Workers} scan worker(s) allow; {Used} thread(s) are used.",
+                options.ScanThreads, workers, options.EffectiveScanThreads(workers));
+        }
+
+        return new RealTimeMonitor(options, folders, jobs.Pipeline, jobs.Excluded, services.GetRequiredService<TimeProvider>(), logger,
+            workerCount: workers);
     }
 }

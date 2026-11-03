@@ -10,7 +10,8 @@ namespace SapAV.Engine.Scanning;
 /// <param name="Access">The requester's access (standard-user jobs), checked <b>first</b>; null = no check.</param>
 /// <param name="AllowRemote">A2 W-A: accept a file on a remote file system (administrator opt-in; default off).</param>
 /// <param name="Remote">Classifies the opened handle (fake in tests).</param>
-internal sealed record ScanOpenChecks(IScanAccessCheck? Access = null, bool AllowRemote = false, IRemoteFileProbe? Remote = null)
+/// <param name="CompleteIfOplocked">Review D1 H1 (real-time): never wait for an oplock break; a file whose oplock must be broken is Locked.</param>
+internal sealed record ScanOpenChecks(IScanAccessCheck? Access = null, bool AllowRemote = false, IRemoteFileProbe? Remote = null, bool CompleteIfOplocked = false)
 {
     public static ScanOpenChecks None { get; } = new();
 
@@ -61,7 +62,7 @@ internal static class SafeScanOpen
             throw new ArgumentException("A folder-relative open needs the file name.", nameof(name));
         }
 
-        uint options = N.FileNonDirectoryFile | SafeTree.OpenNoRecall;
+        uint options = N.FileNonDirectoryFile | SafeTree.OpenNoRecall | (checks.CompleteIfOplocked ? N.FileCompleteIfOplocked : 0);
         var handle = OpenOnce(item, folder, name, ShareNoWriters, options, checks.AllowRemote, out var failure, out int error);
         long? usn = null;
         if (handle is null && failure == SafeTreeFailure.Locked)

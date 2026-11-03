@@ -23,8 +23,30 @@ public sealed class RealTimeOptions
     /// <summary>Bigger files are not scanned in real time (reported TooLarge); the scan worker never sees them.</summary>
     public long MaxFileSizeBytes { get; set; } = Core.Hashing.Sha256Hasher.DefaultMaxSizeBytes;
 
-    /// <summary>Dedicated background-mode scan threads (1-4). Each waits for one sandboxed worker at a time.</summary>
-    public int ScanThreads { get; set; } = 2;
+    /// <summary>
+    /// Dedicated background-mode scan threads (1-4). Each waits for one sandboxed worker at a time, at High priority, so
+    /// (review D1 M3) at most WorkerCount − 1 are used when there is more than one worker (<see cref="EffectiveScanThreads"/>):
+    /// one worker always stays free for user and administrator jobs.
+    /// </summary>
+    public int ScanThreads { get; set; } = 1;
+
+    /// <summary>
+    /// Review D1 H2: each watched folder may hold at most 1/<c>FolderShareDivisor</c> of <see cref="MaxPendingFiles"/> and of
+    /// <see cref="MaxPendingPathChars"/>; past that, only that folder goes into "rescan later".
+    /// </summary>
+    public int FolderShareDivisor { get; set; } = 8;
+
+    /// <summary>Review D1 H2: an event name longer than this isn't queued; its folder is rescanned later instead.</summary>
+    public int MaxQueuedNameLength { get; set; } = 2048;
+
+    /// <summary>Review D1 H2: a file is scanned again at most this often, however often it is rewritten.</summary>
+    public TimeSpan MinRescanInterval { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>Review D1 H1: a real-time thread stuck in an open longer than this gets its synchronous I/O cancelled.</summary>
+    public TimeSpan StuckOpenTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>The scan threads actually used with <paramref name="workerCount"/> sandboxed workers (review D1 M3).</summary>
+    internal int EffectiveScanThreads(int workerCount) => workerCount > 1 ? Math.Min(ScanThreads, workerCount - 1) : 1;
 
     /// <summary>
     /// Most files waiting at once (settling, ready or waiting for a writer). Past it, events are dropped and the folder is
@@ -97,6 +119,10 @@ public sealed class RealTimeOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPendingFiles, 4, nameof(MaxPendingFiles));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxPendingFiles, 1_000_000, nameof(MaxPendingFiles));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPendingPathChars, 1024, nameof(MaxPendingPathChars));
+        ArgumentOutOfRangeException.ThrowIfLessThan(FolderShareDivisor, 1, nameof(FolderShareDivisor));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(FolderShareDivisor, 1024, nameof(FolderShareDivisor));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxQueuedNameLength, 64, nameof(MaxQueuedNameLength));
+        ArgumentOutOfRangeException.ThrowIfNegative(MinRescanInterval.Ticks, nameof(MinRescanInterval));
         ArgumentOutOfRangeException.ThrowIfNegative(SettleDelay.Ticks, nameof(SettleDelay));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxSettleDelay, SettleDelay, nameof(MaxSettleDelay));
         ArgumentOutOfRangeException.ThrowIfLessThan(LockRetryInitial, TimeSpan.FromMilliseconds(1), nameof(LockRetryInitial));

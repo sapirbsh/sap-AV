@@ -36,7 +36,9 @@ public sealed class RealTimeMonitorTests : IDisposable
         Assert.All(_rt.Broker.BackgroundModeSeen, Assert.True);
         var (report, budget) = Assert.Single(handler.Seen);
         Assert.Equal(ScanTrigger.RealTime, report.Result.Item.Trigger);
-        Assert.Equal("engine:RealTime", budget!.Alerts.Key); // never a user's budget
+        // Review D1 M2: the engine's real-time budget, per owner (a machine-wide folder here: the file's owner), never a requester's.
+        Assert.Equal("engine:RealTime:" + QuarantineTestContext.CurrentUser.Value, budget!.Alerts.Key);
+        Assert.False(budget.Alerts.Requested);
         Assert.Null(budget.Quota); // no per-user quota check for files a user drops (review C1 L6)
     }
 

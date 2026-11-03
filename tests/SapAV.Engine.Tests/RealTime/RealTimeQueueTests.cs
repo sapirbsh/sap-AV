@@ -31,6 +31,7 @@ public sealed class RealTimeQueueTests : IDisposable
         MaxPendingPathChars = maxChars,
         SettleDelay = TimeSpan.FromMilliseconds(500),
         MaxSettleDelay = TimeSpan.FromSeconds(3),
+        MinRescanInterval = TimeSpan.FromSeconds(2),
     };
 
     [Fact]
@@ -57,7 +58,8 @@ public sealed class RealTimeQueueTests : IDisposable
         Assert.Equal(OfferResult.Coalesced, queue.Offer(_root, "setup.exe", false, _time.Now));
         Assert.True(queue.Complete(scanning, _time.Now));
         Assert.False(queue.TryTakeDue(_time.Now, out _));
-        Assert.True(queue.TryTakeDue(_time.Now + TimeSpan.FromMilliseconds(500), out _));
+        Assert.False(queue.TryTakeDue(_time.Now + TimeSpan.FromMilliseconds(500), out _)); // settled, but scanned too recently (review D1 H2)
+        Assert.True(queue.TryTakeDue(_time.Now + TimeSpan.FromSeconds(2), out _));
     }
 
     [Fact]
