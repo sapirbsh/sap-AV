@@ -56,8 +56,17 @@ public static class EngineHost
 
         // Scanning (B5): files are parsed only in sandboxed worker processes; the broker opens them and passes
         // read-only handles. Sandbox:Mode = InProcess is for console debugging only: a warning, and refused as a service.
+        // D3 (A2 M5): as a service / SYSTEM / elevated, rules and blocklist load only from the protected %ProgramData%\sap-AV
+        // folders (or a configured admin-only folder); the shipped files are only their seed. A non-elevated debug run keeps
+        // loading the shipped files directly (it has the user's own rights only).
+        bool protectedMode = EngineAccount.IsProtected();
         builder.Services.Configure<SandboxOptions>(builder.Configuration.GetSection(SandboxOptions.SectionName));
-        builder.Services.AddSingleton<IScanRulesSource>(sp => new DirectoryScanRulesSource(sp.GetRequiredService<IOptions<SandboxOptions>>().Value));
+        builder.Services.PostConfigure<SandboxOptions>(options => ProtectedRulesSource.Apply(options, protectedMode));
+        builder.Services.AddSingleton<IScanRulesSource>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<SandboxOptions>>().Value;
+            return protectedMode ? ProtectedRulesSource.Create(options) : new DirectoryScanRulesSource(options);
+        });
         builder.Services.AddSingleton<IScanBroker>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<SandboxOptions>>().Value;

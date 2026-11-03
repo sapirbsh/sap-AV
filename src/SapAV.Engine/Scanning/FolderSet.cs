@@ -76,6 +76,15 @@ public static class EngineDataFolders
     /// <summary><c>%ProgramData%\sap-AV\Cache</c> (the scan cache database, C5).</summary>
     public static string Cache => Path.Combine(ProgramDataRoot, "Cache");
 
+    /// <summary><c>%ProgramData%\sap-AV\VirusTotal</c> (D3: API key, result cache, usage counter, settings).</summary>
+    public static string VirusTotal => Path.Combine(ProgramDataRoot, "VirusTotal");
+
+    /// <summary><c>%ProgramData%\sap-AV\Rules</c> (D3: the YARA rules the engine loads when it runs as SYSTEM or elevated).</summary>
+    public static string Rules => Path.Combine(ProgramDataRoot, "Rules");
+
+    /// <summary><c>%ProgramData%\sap-AV\Blocklist</c> (D3: the SHA-256 blocklist the engine loads when it runs as SYSTEM or elevated).</summary>
+    public static string Blocklist => Path.Combine(ProgramDataRoot, "Blocklist");
+
     /// <summary>The default engine folders besides the configured store, worker, rules and blocklist folders.</summary>
-    public static IEnumerable<string> Defaults() => [Sandbox, Cache, AppContext.BaseDirectory];
+    public static IEnumerable<string> Defaults() => [Sandbox, Cache, VirusTotal, AppContext.BaseDirectory];
 }

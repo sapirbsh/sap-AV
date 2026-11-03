@@ -14,43 +14,55 @@ public interface IScanRulesSource
 /// <summary>
 /// Reads <see cref="SandboxOptions.RulesDirectory"/> (<c>*.yar</c>, same files as <see cref="YaraRuleSet.LoadDirectory"/>)
 /// and <see cref="SandboxOptions.BlocklistPath"/> as raw bytes, with the usual size caps. A missing directory or file is
-/// an empty package plus a read error, so the engine still starts and warns (B3 M5). The files are opened by path, which
-/// is acceptable only once D3 keeps them in the ACL-protected <c>%ProgramData%\sap-AV</c> folder.
+/// an empty package plus a read error, so the engine still starts and warns (B3 M5). The files are opened by path with no
+/// location check: the engine uses this directly only in a non-elevated debug run (it then has the user's rights only);
+/// as SYSTEM or elevated it goes through <see cref="ProtectedRulesSource"/> (D3).
 /// </summary>
 public sealed class DirectoryScanRulesSource(SandboxOptions options) : IScanRulesSource
 {
     public async Task<WorkerLoadRules> LoadAsync(CancellationToken cancellationToken = default)
     {
         var readErrors = new List<string>();
-        IReadOnlyList<YaraRuleFile> files = [];
-        string directory = options.ResolvedRulesDirectory;
+        var files = ReadRules(options.ResolvedRulesDirectory, readErrors, cancellationToken);
+        var blocklist = await ReadBlocklistAsync(options.ResolvedBlocklistPath, readErrors, cancellationToken).ConfigureAwait(false);
+        return Package(files, blocklist, readErrors);
+    }
+
+    internal static WorkerLoadRules Package(IReadOnlyList<YaraRuleFile> files, byte[] blocklist, List<string> readErrors) => new()
+    {
+        RuleFiles = files.Select(f => new WorkerRuleFile { Name = f.Name, Content = f.Content }).ToArray(),
+        ReadErrors = readErrors.Take(WorkerLimits.MaxRuleErrors).ToArray(),
+        Blocklist = blocklist,
+    };
+
+    /// <summary>The <c>*.yar</c> files of <paramref name="directory"/>; problems go to <paramref name="readErrors"/>.</summary>
+    internal static IReadOnlyList<YaraRuleFile> ReadRules(string directory, List<string> readErrors, CancellationToken cancellationToken)
+    {
         try
         {
-            files = YaraRuleSet.ReadDirectoryFiles(directory, out var errors, cancellationToken);
+            var files = YaraRuleSet.ReadDirectoryFiles(directory, out var errors, cancellationToken);
             readErrors.AddRange(errors.Select(e => e.ToString()));
+            return files;
         }
         catch (DirectoryNotFoundException)
         {
             readErrors.Add($"The rules directory {directory} doesn't exist.");
+            return [];
         }
+    }
 
-        byte[] blocklist = [];
-        string blocklistPath = options.ResolvedBlocklistPath;
+    /// <summary>The blocklist file's bytes (capped), or empty with a read error.</summary>
+    internal static async Task<byte[]> ReadBlocklistAsync(string path, List<string> readErrors, CancellationToken cancellationToken)
+    {
         try
         {
-            blocklist = await ReadCappedAsync(blocklistPath, HashBlocklist.DefaultMaxSizeBytes, cancellationToken).ConfigureAwait(false);
+            return await ReadCappedAsync(path, HashBlocklist.DefaultMaxSizeBytes, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            readErrors.Add($"The blocklist {blocklistPath} could not be read: {ex.Message}");
+            readErrors.Add($"The blocklist {path} could not be read: {ex.Message}");
+            return [];
         }
-
-        return new WorkerLoadRules
-        {
-            RuleFiles = files.Select(f => new WorkerRuleFile { Name = f.Name, Content = f.Content }).ToArray(),
-            ReadErrors = readErrors.Take(WorkerLimits.MaxRuleErrors).ToArray(),
-            Blocklist = blocklist,
-        };
     }
 
     private static async Task<byte[]> ReadCappedAsync(string path, long maxBytes, CancellationToken cancellationToken)

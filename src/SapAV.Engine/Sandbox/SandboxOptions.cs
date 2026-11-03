@@ -65,10 +65,16 @@ public sealed class SandboxOptions
     /// </summary>
     public string? AppContainerName { get; set; }
 
-    /// <summary>YARA rules directory; default <c>data\rules</c> next to the engine (D3 moves it to the protected ProgramData folder).</summary>
+    /// <summary>
+    /// YARA rules directory. Default: <c>%ProgramData%\sap-AV\Rules</c> as a service / SYSTEM / elevated, <c>data\rules</c> next to
+    /// the engine in a non-elevated debug run (D3, <see cref="ProtectedRulesSource"/>). A configured folder must be admin-only.
+    /// </summary>
     public string? RulesDirectory { get; set; }
 
-    /// <summary>Blocklist file; default <c>data\hashes\blocklist.txt</c> next to the engine.</summary>
+    /// <summary>
+    /// Blocklist file. Default: <c>%ProgramData%\sap-AV\Blocklist\blocklist.txt</c> as a service / SYSTEM / elevated,
+    /// <c>data\hashes\blocklist.txt</c> next to the engine in a non-elevated debug run (D3).
+    /// </summary>
     public string? BlocklistPath { get; set; }
 
     // ---- Internal (never bound from configuration) ----

@@ -42,7 +42,7 @@
   </Target>
 
   <ItemGroup>
-    <!-- Default rule package for console runs (D3 moves it to the protected %ProgramData%\sap-AV folder). -->
+    <!-- Shipped rule package: loaded directly only by a non-elevated console run; otherwise the seed of %ProgramData%\sap-AV\Rules + \Blocklist (D3). -->
     <None Include="..\..\data\rules\**\*.yar" Link="data\rules\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\data\hashes\blocklist.txt" Link="data\hashes\blocklist.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
