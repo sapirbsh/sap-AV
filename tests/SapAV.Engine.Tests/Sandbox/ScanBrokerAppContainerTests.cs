@@ -160,4 +160,43 @@ public sealed class ScanBrokerAppContainerTests(AppContainerFixture fixture) : I
         Assert.Equal(1, broker.Status.WorkerRestarts);
         Assert.True(broker.Slots[0].Worker!.QueryToken().IsAppContainer);
     }
+
+    /// <summary>D3: the engine-side lookup runs after the worker's verdict; its detection and note reach the report, signed files never get it.</summary>
+    [RequiresFact(Requires.AppContainer)]
+    public async Task TheOnlineLookup_RunsInTheEngineAfterTheWorker_AddsItsDetectionAndNote_AndNeverSeesASignedFile()
+    {
+        var online = new RecordingOnline();
+        var broker = new SandboxedScanBroker(fixture.Container.Options(), new FakeRulesSource(), NullLogger.Instance, online: online);
+        _owned.Add(broker);
+        var path = Path.Combine(_dir, "tool.exe");
+        File.WriteAllText(path, "nothing local engines flag");
+
+        var report = await broker.ScanAsync(new ScanItem(path, ScanTrigger.RealTime));
+        var signed = await broker.ScanAsync(new ScanItem(Path.Combine(Environment.SystemDirectory, "cmd.exe"), ScanTrigger.RealTime));
+
+        Assert.Equal(Verdict.Suspicious, report.Result.Verdict);
+        Assert.Contains(report.Result.Detections, d => d.Source == DetectionSource.VirusTotal);
+        Assert.Contains(report.Notes, n => n.Message == RecordingOnline.NoteText);
+        Assert.Equal(Verdict.Clean, signed.Result.Verdict);
+        Assert.Equal([path], online.Paths);
+    }
+
+    private sealed class RecordingOnline : IOnlineHashLookup
+    {
+        public const string NoteText = "VirusTotal: 3/70 engines flagged the file (live).";
+
+        public List<string> Paths { get; } = [];
+
+        public Task<OnlineLookupOutcome> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default)
+        {
+            lock (Paths)
+            {
+                Paths.Add(request.Item.Path);
+            }
+
+            return Task.FromResult(new OnlineLookupOutcome(
+                new Detection(Verdict.Suspicious, "VirusTotal: 3 engines.", Core.Mitre.MitreTechniqueIds.MaliciousFile, DetectionSource.VirusTotal),
+                new ScanNote(ScanNoteLevel.Information, NoteText)));
+        }
+    }
 }

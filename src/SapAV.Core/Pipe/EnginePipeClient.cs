@@ -212,6 +212,22 @@ public sealed class EnginePipeClient : IAsyncDisposable
     public Task<QuarantineFromResultReply> QuarantineResultAsync(Guid jobId, int resultId, CancellationToken cancellationToken = default) =>
         SendAsync<QuarantineFromResultReply>(PipeRequestKind.QuarantineFromResult, new QuarantineFromResultRequest(jobId, resultId), cancellationToken);
 
+    /// <summary>D3: VirusTotal status and today's usage (never the key).</summary>
+    public Task<VirusTotalStatusInfo> GetVirusTotalStatusAsync(CancellationToken cancellationToken = default) =>
+        SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalGetStatus, null, cancellationToken);
+
+    /// <summary>D3: stores the API key in the engine (administrators only). The engine never sends it back.</summary>
+    public Task<VirusTotalStatusInfo> SetVirusTotalKeyAsync(string apiKey, CancellationToken cancellationToken = default) =>
+        SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalSetKey, new VirusTotalSetKeyRequest(apiKey), cancellationToken);
+
+    /// <summary>D3: removes the stored API key (administrators only).</summary>
+    public Task<VirusTotalStatusInfo> ClearVirusTotalKeyAsync(CancellationToken cancellationToken = default) =>
+        SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalClearKey, null, cancellationToken);
+
+    /// <summary>D3: turns the VirusTotal hash lookup on or off (administrators only).</summary>
+    public Task<VirusTotalStatusInfo> SetVirusTotalEnabledAsync(bool enabled, CancellationToken cancellationToken = default) =>
+        SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalSetEnabled, new VirusTotalSetEnabledRequest(enabled), cancellationToken);
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

@@ -45,10 +45,12 @@ internal sealed class PipeRequestHandler : IDisposable
     private readonly ITimer _prune;
     private readonly Scanning.Checks.QuickScanFactory? _quickScan;
     private readonly Scanning.Checks.FullScanFactory? _fullScan;
+    private readonly VirusTotal.IVirusTotalService? _virusTotal;
 
     public PipeRequestHandler(
         IScanJobService jobs, IQuarantineService? quarantine, PipeServerOptions options, TimeProvider time, ILogger logger,
-        Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null)
+        Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null,
+        VirusTotal.IVirusTotalService? virusTotal = null)
     {
         _jobs = jobs ?? throw new ArgumentNullException(nameof(jobs));
         _quarantine = quarantine;
@@ -60,6 +62,7 @@ internal sealed class PipeRequestHandler : IDisposable
         _driveType = driveType ?? PipeNative.DriveType;
         _quickScan = quickScan;
         _fullScan = fullScan;
+        _virusTotal = virusTotal;
 
         // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
         _prune = time.CreateTimer(_ => PruneSafely(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
@@ -112,6 +115,10 @@ internal sealed class PipeRequestHandler : IDisposable
                 PipeRequestKind.QuickScanCreate => NoBody(request) ?? QuickScanCreate(session),
                 PipeRequestKind.ScanGetFindings => GetFindings(session, PipeJson.Body<ScanFindingsRequest>(request.Body)),
                 PipeRequestKind.FullScanCreate => NoBody(request) ?? FullScanCreate(session),
+                PipeRequestKind.VirusTotalGetStatus => NoBody(request) ?? VirusTotalStatus(),
+                PipeRequestKind.VirusTotalSetKey => VirusTotalSetKey(session, request),
+                PipeRequestKind.VirusTotalClearKey => VirusTotalAdmin(session) ?? NoBody(request) ?? VirusTotalChanged(session, "cleared the API key", _virusTotal!.ClearKey()),
+                PipeRequestKind.VirusTotalSetEnabled => VirusTotalSetEnabled(session, request),
                 _ => PipeReply.Fail(PipeStatus.BadRequest, "Unknown request."),
             };
         }
@@ -166,7 +173,61 @@ internal sealed class PipeRequestHandler : IDisposable
     {
         var visible = _registry.Visible(session.Identity);
         return PipeReply.Ok(new EngineStatusReply(EngineInfo.Version, _quarantine?.IsAvailable ?? false, visible.Count,
-            visible.Count(j => j.State is ScanJobState.Running or ScanJobState.Pausing or ScanJobState.Paused)));
+            visible.Count(j => j.State is ScanJobState.Running or ScanJobState.Pausing or ScanJobState.Paused), _virusTotal?.GetStatus()));
+    }
+
+    // ---- VirusTotal (D3) ----
+    // Status for everyone (never the key: VirusTotalStatusInfo has no field for it). Changes are administrator-only, checked
+    // before the body is even read, so a standard user can't set, replace or clear the key, or turn lookups on or off.
+
+    private PipeReply VirusTotalStatus() => _virusTotal is null
+        ? PipeReply.Fail(PipeStatus.Unavailable, "VirusTotal is not available in this engine.")
+        : PipeReply.Ok(_virusTotal.GetStatus());
+
+    private PipeReply? VirusTotalAdmin(PipeSession session)
+    {
+        if (!session.Identity.IsAdmin)
+        {
+            return PipeReply.Fail(PipeStatus.AccessDenied, "Only an administrator may change the VirusTotal settings or API key.");
+        }
+
+        return _virusTotal is null ? PipeReply.Fail(PipeStatus.Unavailable, "VirusTotal is not available in this engine.") : null;
+    }
+
+    private PipeReply VirusTotalSetKey(PipeSession session, PipeRequest request)
+    {
+        if (VirusTotalAdmin(session) is { } refused)
+        {
+            return refused;
+        }
+
+        var body = PipeJson.Body<VirusTotalSetKeyRequest>(request.Body);
+        return VirusTotalChanged(session, "set the API key", _virusTotal!.SetKey(body.ApiKey));
+    }
+
+    private PipeReply VirusTotalSetEnabled(PipeSession session, PipeRequest request)
+    {
+        if (VirusTotalAdmin(session) is { } refused)
+        {
+            return refused;
+        }
+
+        var body = PipeJson.Body<VirusTotalSetEnabledRequest>(request.Body);
+        return VirusTotalChanged(session, body.Enabled ? "turned lookups on" : "turned lookups off", _virusTotal!.SetEnabled(body.Enabled));
+    }
+
+    private PipeReply VirusTotalChanged(PipeSession session, string what, VirusTotal.VirusTotalChange change)
+    {
+        _logger.LogInformation("Pipe: administrator {User} {What} for VirusTotal: {Result}.", session.Identity.User.Value, what, change);
+        return change switch
+        {
+            VirusTotal.VirusTotalChange.Done => PipeReply.Ok(_virusTotal!.GetStatus()),
+            VirusTotal.VirusTotalChange.InvalidFormat => PipeReply.Fail(PipeStatus.BadRequest,
+                $"That doesn't look like a VirusTotal API key ({Core.VirusTotal.VirusTotalApiKey.MinLength}-{Core.VirusTotal.VirusTotalApiKey.MaxLength} letters, digits, '-' or '_')."),
+            VirusTotal.VirusTotalChange.Unavailable => PipeReply.Fail(PipeStatus.Unavailable,
+                "VirusTotal is not available: " + (_virusTotal!.GetStatus().LastProblem ?? "unknown reason.")),
+            _ => PipeReply.Fail(PipeStatus.Failed, "The VirusTotal setting could not be saved; see the engine log."),
+        };
     }
 
     // ---- Scan jobs ----

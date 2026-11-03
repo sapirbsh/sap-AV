@@ -72,6 +72,21 @@ public enum PipeRequestKind
     /// only</b> (AccessDenied otherwise), like Quick Scan. Results through ScanGet / ScanGetFindings.
     /// </summary>
     FullScanCreate,
+
+    /// <summary>D3: no body; reply: <see cref="VirusTotalStatusInfo"/> (never the key). Any client.</summary>
+    VirusTotalGetStatus,
+
+    /// <summary>
+    /// D3: body <see cref="VirusTotalSetKeyRequest"/>; reply: <see cref="VirusTotalStatusInfo"/>. <b>Administrators only</b>
+    /// (AccessDenied otherwise; the body isn't even read). A malformed key is BadRequest. Also clears an earlier "key rejected".
+    /// </summary>
+    VirusTotalSetKey,
+
+    /// <summary>D3: no body; reply: <see cref="VirusTotalStatusInfo"/>. <b>Administrators only.</b> Removes the stored key.</summary>
+    VirusTotalClearKey,
+
+    /// <summary>D3: body <see cref="VirusTotalSetEnabledRequest"/>; reply: <see cref="VirusTotalStatusInfo"/>. <b>Administrators only.</b></summary>
+    VirusTotalSetEnabled,
 }
 
 /// <param name="Id">Client-chosen request ID (positive), echoed in <see cref="PipeFrame.ReplyTo"/>.</param>
@@ -253,7 +268,32 @@ public sealed record PipeLimits(int MaxRequestBytes, int MaxScanPaths, int MaxRe
 
 public sealed record HelloReply(int Version, string EngineVersion, ClientInfo Client, PipeLimits Limits);
 
-public sealed record EngineStatusReply(string EngineVersion, bool QuarantineAvailable, int VisibleJobs, int RunningJobs);
+/// <param name="VirusTotal">D3: the VirusTotal status (never the key); absent when the engine has no VirusTotal support.</param>
+public sealed record EngineStatusReply(string EngineVersion, bool QuarantineAvailable, int VisibleJobs, int RunningJobs,
+    VirusTotalStatusInfo? VirusTotal = null);
+
+/// <summary>
+/// D3: what the GUI may know about VirusTotal. <b>Never the key</b>: only whether one is set (ROADMAP feature 3, CLAUDE.md:
+/// the engine never sends the key back).
+/// </summary>
+/// <param name="Available">The engine can use VirusTotal (its protected data folder is usable). False in a non-elevated debug run.</param>
+/// <param name="Enabled">The user turned the lookup on (off by default).</param>
+/// <param name="HasKey">An API key is set (stored, or the development environment variable in a console run).</param>
+/// <param name="KeyFromEnvironment">The key in use comes from the development environment variable (console runs only).</param>
+/// <param name="KeyRejected">VirusTotal refused the current key; nothing is sent until a key is set again.</param>
+/// <param name="UsedToday">Requests sent today (UTC day), for the "today / 500" usage counter.</param>
+/// <param name="PerDay">The daily budget.</param>
+/// <param name="LastProblem">The last problem, engine text (never key material), or null.</param>
+public sealed record VirusTotalStatusInfo(
+    bool Available, bool Enabled, bool HasKey, bool KeyFromEnvironment, bool KeyRejected, int UsedToday, int PerDay, string? LastProblem);
+
+/// <summary>D3: sets the VirusTotal API key (administrators only). <see cref="ToString"/> never shows the key.</summary>
+public sealed record VirusTotalSetKeyRequest(string ApiKey)
+{
+    public override string ToString() => "VirusTotalSetKeyRequest { ApiKey = (hidden) }";
+}
+
+public sealed record VirusTotalSetEnabledRequest(bool Enabled);
 
 /// <param name="AllowRemote">
 /// Administrators only (a standard user asking for it is refused): also scan UNC paths and network drives. Off by default,

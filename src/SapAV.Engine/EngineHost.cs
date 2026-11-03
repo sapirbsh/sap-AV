@@ -67,6 +67,12 @@ public static class EngineHost
             var options = sp.GetRequiredService<IOptions<SandboxOptions>>().Value;
             return protectedMode ? ProtectedRulesSource.Create(options) : new DirectoryScanRulesSource(options);
         });
+        // VirusTotal (D3): hash-only lookups in the engine (the worker has no network), after the worker's local verdict. Off
+        // until an administrator turns it on and sets a key over the pipe; key, cache and counter live in the protected folder.
+        builder.Services.Configure<VirusTotal.VirusTotalOptions>(builder.Configuration.GetSection(VirusTotal.VirusTotalOptions.SectionName));
+        builder.Services.AddSingleton<VirusTotal.VirusTotalService>();
+        builder.Services.AddSingleton<VirusTotal.IVirusTotalService>(sp => sp.GetRequiredService<VirusTotal.VirusTotalService>());
+        builder.Services.AddSingleton<IOnlineHashLookup, VirusTotal.VirusTotalOnlineLookup>();
         builder.Services.AddSingleton<IScanBroker>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<SandboxOptions>>().Value;
