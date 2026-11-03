@@ -367,6 +367,49 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
     }
 
     [Fact]
+    public void TheDatabase_StaysUnderItsByteCap_PruningTheLeastRecentlyUsedRows_AndKeepsStoring()
+    {
+        // D1 (review C5 L1): disk use is bounded in bytes, not only in rows.
+        var time = new ManualTime();
+        using var temp = new TempDir();
+        string folder = ScanCacheFolder.Ensure(Path.Combine(temp.Path, "Cache"), CacheHarness.Policy, parentIsDataRoot: false);
+        var options = new ScanCacheOptions { MaxDatabaseBytes = 1024 * 1024 };
+        var report = new byte[16 * 1024];
+        using (var store = new ScanCacheStore(folder, CacheHarness.Key, options, time, NullLogger.Instance))
+        {
+            long now = time.Now.ToUnixTimeMilliseconds();
+            for (int i = 0; i < 150; i++)
+            {
+                store.Put(SampleRow(i) with { Report = report, LastUsed = now + i }); // 150 x 16 KiB: well over 1 MiB
+            }
+
+            Assert.InRange(store.Count(), 10, 149);
+            Assert.NotNull(store.Get(SampleRow(149).Stamp.Volume, SampleRow(149).Stamp.FileId)); // the newest is kept
+            Assert.Null(store.Get(SampleRow(0).Stamp.Volume, SampleRow(0).Stamp.FileId)); // the least recently used went first
+        }
+
+        SqliteConnection.ClearAllPools();
+        Assert.True(new FileInfo(Path.Combine(folder, ScanCacheStore.DatabaseName)).Length <= 1024 * 1024);
+    }
+
+    [RequiresFact(Requires.UsnJournal)]
+    public void AFileWithAPathOverTheLengthLimit_IsNotCached()
+    {
+        using var h = new CacheHarness();
+        bool Store(string name)
+        {
+            string path = h.Jobs.Write(name, "content");
+            var item = new ScanItem(path, ScanTrigger.CustomScan);
+            using var opened = SafeScanOpen.Open(item, [], TimeProvider.System, out _);
+            return h.Cache.TryStore(item, Stamp(path), FakeScanBroker.Judge(item, opened!, h.Jobs.Time) with { Yara = YaraScanResult.Scanned([], 7, FakeFingerprints.DefaultRules) });
+        }
+
+        Assert.True(Store("short-enough.exe"));
+        h.Options.MaxPathLength = 20; // shorter than any temp path
+        Assert.False(Store("long-path.exe"));
+    }
+
+    [Fact]
     public async Task ConcurrentReadersAndWriters_DontFail_AndEveryRowIsReadable()
     {
         using var h = new CacheHarness();

@@ -43,6 +43,7 @@ internal sealed class ScanCacheStore : IDisposable
     private const int PruneEvery = 1000;
     private const int SqliteCorrupt = 11;
     private const int SqliteNotADatabase = 26;
+    private const int SqliteFull = 13;
 
     private readonly string _path;
     private readonly byte[] _macKey;
@@ -167,7 +168,18 @@ internal sealed class ScanCacheStore : IDisposable
                 command.Parameters.AddWithValue("$scannedAt", row.ScannedAt);
                 command.Parameters.AddWithValue("$lastUsed", row.LastUsed);
                 command.Parameters.AddWithValue("$mac", Mac(row));
-                command.ExecuteNonQuery();
+                try
+                {
+                    command.ExecuteNonQuery();
+                }
+                catch (SqliteException ex) when ((ex.SqliteErrorCode & 0xFF) == SqliteFull)
+                {
+                    // D1 (review C5 L1): at the byte cap. The least recently used quarter goes (its pages are reused), then once more.
+                    int freed = DeleteLeastRecentlyUsedLocked(connection, Math.Max(1, CountCore(connection) / 4));
+                    _logger.LogInformation("Scan cache: the database reached its size cap; pruned {Rows} least recently used rows.", freed);
+                    command.ExecuteNonQuery();
+                }
+
                 prune = ++_putsSincePrune >= PruneEvery;
                 if (prune)
                 {
@@ -233,18 +245,10 @@ internal sealed class ScanCacheStore : IDisposable
             old.Parameters.AddWithValue("$cutoff", (_time.GetUtcNow() - _options.MaxAge).ToUnixTimeMilliseconds());
             int deleted = old.ExecuteNonQuery();
 
-            using var count = connection.CreateCommand();
-            count.CommandText = "SELECT COUNT(*) FROM entries";
-            long rows = (long)count.ExecuteScalar()!;
+            long rows = CountCore(connection);
             if (rows > _options.MaxEntries)
             {
-                using var lru = connection.CreateCommand();
-                lru.CommandText = """
-                    DELETE FROM entries WHERE (volume, file_id) IN
-                        (SELECT volume, file_id FROM entries ORDER BY last_used LIMIT $excess)
-                    """;
-                lru.Parameters.AddWithValue("$excess", rows - (long)(_options.MaxEntries * 0.9));
-                deleted += lru.ExecuteNonQuery();
+                deleted += DeleteLeastRecentlyUsedLocked(connection, rows - (long)(_options.MaxEntries * 0.9));
             }
 
             if (deleted > 0)
@@ -255,6 +259,25 @@ internal sealed class ScanCacheStore : IDisposable
             return deleted;
         }
     }, 0);
+
+    private static long CountCore(SqliteConnection connection)
+    {
+        using var count = connection.CreateCommand();
+        count.CommandText = "SELECT COUNT(*) FROM entries";
+        return (long)count.ExecuteScalar()!;
+    }
+
+    /// <summary>Deletes the <paramref name="rows"/> least recently used rows (caller holds the writer lock).</summary>
+    private static int DeleteLeastRecentlyUsedLocked(SqliteConnection connection, long rows)
+    {
+        using var lru = connection.CreateCommand();
+        lru.CommandText = """
+            DELETE FROM entries WHERE (volume, file_id) IN
+                (SELECT volume, file_id FROM entries ORDER BY last_used LIMIT $excess)
+            """;
+        lru.Parameters.AddWithValue("$excess", rows);
+        return lru.ExecuteNonQuery();
+    }
 
     /// <summary>Closes the pooled connections (the lock stays usable: a late call simply opens a new connection).</summary>
     public void Dispose() => SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
@@ -330,6 +353,7 @@ internal sealed class ScanCacheStore : IDisposable
     {
         using var command = connection.CreateCommand();
         command.CommandText = $"""
+            PRAGMA page_size = {ScanCacheOptions.PageSize};
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS entries (
                 volume INTEGER NOT NULL,
@@ -372,7 +396,8 @@ internal sealed class ScanCacheStore : IDisposable
         {
             connection.Open();
             using var pragmas = connection.CreateCommand();
-            pragmas.CommandText = $"PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = {(int)_options.BusyTimeout.TotalMilliseconds}; PRAGMA trusted_schema = OFF;";
+            pragmas.CommandText = $"PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = {(int)_options.BusyTimeout.TotalMilliseconds}; PRAGMA trusted_schema = OFF; "
+                + $"PRAGMA max_page_count = {_options.MaxPageCount};";
             pragmas.ExecuteNonQuery();
             return connection;
         }

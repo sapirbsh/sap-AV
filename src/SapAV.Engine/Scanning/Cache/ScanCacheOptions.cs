@@ -29,6 +29,21 @@ public sealed class ScanCacheOptions
     /// <summary>Largest stored report (the scan worker's wire form, notes stripped); bigger ones aren't cached.</summary>
     public int MaxReportBytes { get; set; } = 32 * 1024;
 
+    /// <summary>
+    /// D1 (review C5 L1): the database file's size cap (<c>PRAGMA max_page_count</c>), so its disk use is bounded in bytes, not
+    /// only in rows (real-time monitoring stores a row for every changed file). When full, the least recently used quarter is
+    /// pruned and the store retried once; freed pages are reused, so no VACUUM is needed to stay under the cap.
+    /// </summary>
+    public long MaxDatabaseBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>D1 (review C5 L1): files with a longer exact path aren't cached (a deep, long-named tree can't inflate rows).</summary>
+    public int MaxPathLength { get; set; } = 1024;
+
+    /// <summary>The page size the cap is counted in (SQLite's default, set when the database is created).</summary>
+    internal const int PageSize = 4096;
+
+    internal long MaxPageCount => Math.Max(1, MaxDatabaseBytes / PageSize);
+
     /// <summary>How long a database call waits for a lock held by another connection.</summary>
     public TimeSpan BusyTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
@@ -44,5 +59,9 @@ public sealed class ScanCacheOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxReportBytes, 1024, nameof(MaxReportBytes));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxReportBytes, 256 * 1024, nameof(MaxReportBytes));
         ArgumentOutOfRangeException.ThrowIfLessThan(BusyTimeout, TimeSpan.FromMilliseconds(100), nameof(BusyTimeout));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxDatabaseBytes, 1024L * 1024, nameof(MaxDatabaseBytes));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxDatabaseBytes, 64L * 1024 * 1024 * 1024, nameof(MaxDatabaseBytes));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxPathLength, 1, nameof(MaxPathLength));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxPathLength, short.MaxValue, nameof(MaxPathLength));
     }
 }

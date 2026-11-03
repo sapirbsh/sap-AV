@@ -277,6 +277,7 @@ internal sealed class ScanCache : IDisposable
     {
         var result = report.Result;
         if (stamp.Usn is null
+            || KeyPath(item.Path).Length > _options.MaxPathLength // D1 (review C5 L1): long paths don't inflate the database
             || _fingerprints.Current() is not { } context
             || result.Status != ScanStatus.Scanned
             || result.Verdict is not (Verdict.Clean or Verdict.Suspicious)
