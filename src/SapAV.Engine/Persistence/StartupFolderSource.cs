@@ -134,14 +134,15 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             }
 
             var links = ParseLinks(context, handle, display, chunk, sid, environment);
-            foreach (var item in chunk)
+            for (int k = 0; k < chunk.Length; k++)
             {
                 if (!context.CanContinue)
                 {
                     return;
                 }
 
-                if (links.TryGetValue(item.Name, out var link) && link.Failed)
+                var (item, link) = (chunk[k], links[k]);
+                if (link.Failed)
                 {
                     continue; // already reported
                 }
@@ -157,32 +158,38 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
     private readonly record struct LinkParse(PersistenceParseResult? Parsed, bool Failed);
 
     /// <summary>C2: opens the chunk's shortcuts and has the worker parse them in one request. Open problems are reported here.</summary>
-    private static Dictionary<string, LinkParse> ParseLinks(
+    private static LinkParse[] ParseLinks(
         PersistenceContext context, SafeFileHandle folder, string display, IReadOnlyList<SafeTreeEntry> chunk, string? sid, EnvironmentBlock environment)
     {
-        var links = new Dictionary<string, LinkParse>(StringComparer.OrdinalIgnoreCase);
-        var opened = new List<(SafeFileHandle File, string Name, string Path)>();
+        var links = new LinkParse[chunk.Count]; // by position in the chunk (review L2: names may differ only in case)
+        var opened = new List<(SafeFileHandle File, int At, string Path)>();
         try
         {
-            foreach (var item in chunk.Where(IsShortcut))
+            for (int k = 0; k < chunk.Count; k++)
             {
+                var item = chunk[k];
+                if (!IsShortcut(item))
+                {
+                    continue;
+                }
+
                 string itemPath = SafeTree.Child(display, item.Name);
                 try
                 {
                     if (SafeFolderReader.OpenForParsing(folder, item.Name, ShellLinkParser.MaxSize, out var failure, out var message) is { } file)
                     {
-                        opened.Add((file, item.Name, itemPath));
+                        opened.Add((file, k, itemPath));
                     }
                     else
                     {
                         context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, failure, message);
-                        links[item.Name] = new LinkParse(null, Failed: false);
+                        links[k] = new LinkParse(null, Failed: false);
                     }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
                 {
                     ItemUnreadable(context, sid, itemPath, ex); // section C review M3: one item's problem is that item's issue
-                    links[item.Name] = new LinkParse(null, Failed: true);
+                    links[k] = new LinkParse(null, Failed: true);
                 }
             }
 
@@ -190,7 +197,7 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
                 opened.Select(o => new PersistenceParseInput(o.File, WorkerParseKind.ShellLink, o.Path)).ToArray(), PersistenceKind.StartupFolder);
             for (int i = 0; i < opened.Count; i++)
             {
-                links[opened[i].Name] = new LinkParse(results[i], Failed: false);
+                links[opened[i].At] = new LinkParse(results[i], Failed: false);
             }
         }
         finally

@@ -26,6 +26,18 @@ internal sealed class FileFailureTracker(TimeProvider time)
         }
     }
 
+    /// <summary>All failures recorded so far (tests).</summary>
+    public int Total
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _entries.Values.Sum(e => e.Count);
+            }
+        }
+    }
+
     /// <summary>Records one more failure and returns the new count.</summary>
     public int Record(string key)
     {

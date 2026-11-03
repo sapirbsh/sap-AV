@@ -209,7 +209,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
 
         var broker = Broker();
 
-        var results = await broker.ParseBatchAsync(files.Inputs, CancellationToken.None);
+        var results = await broker.ParseBatchAsync(files.Inputs, null, CancellationToken.None);
 
         Assert.Equal(files.Inputs.Count, results.Count);
         for (int k = 0; k < results.Count; k++)
@@ -245,7 +245,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
 
         var broker = Broker(path => path.EndsWith("Bad", StringComparison.Ordinal) ? Enum.Parse<WorkerTestFault>(fault) : WorkerTestFault.None);
 
-        var results = await broker.ParseBatchAsync(files.Inputs, CancellationToken.None);
+        var results = await broker.ParseBatchAsync(files.Inputs, null, CancellationToken.None);
 
         Assert.Equal(PersistenceParseStatus.Malformed, results[1].Status);
         Assert.Contains(expected, results[1].Message);
@@ -256,6 +256,71 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         }
 
         Assert.True(broker.Status.WorkerRestarts >= 2); // the batch's worker and the one the file broke alone
+    }
+
+    [Fact]
+    public void ABatchOfHangingFiles_StopsAtTheBudget_AndBlamesNoFileItDidntRetry()
+    {
+        // Review H1: 32 hanging files used to cost the batch timeout plus a timeout, a restart and a backoff per solo retry.
+        for (int i = 0; i < WorkerLimits.MaxParseBatch; i++)
+        {
+            WriteTask($"Hang{i:D2}", GoodTask);
+        }
+
+        var broker = Broker(_ => WorkerTestFault.Hang, parseTimeout: TimeSpan.FromSeconds(1));
+        var limits = new PersistenceLimits { TimeBudget = TimeSpan.FromSeconds(1) };
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var result = new PersistenceCollector(_root.View, _probe, [new ScheduledTaskSource(_folder.Path)], limits, parser: broker).Collect();
+
+        // The budget runs out during the batch (3 x ParseTimeout); no solo retry starts after that.
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+        Assert.Contains(result.Issues, i => i.Reason == PersistenceIssueReason.TimeBudgetExceeded);
+        Assert.Empty(result.Entries);
+        Assert.Equal(0, broker.RecordedFailures);
+    }
+
+    [Fact]
+    public async Task TheSoloRetries_StopAfterTwoFailures_AndTheRestAreNotCollectedNorBlamed()
+    {
+        using var files = new OpenFiles(_folder.Path);
+        for (int i = 0; i < 6; i++)
+        {
+            WriteTask($"Hang{i}", GoodTask);
+            files.Add($"Hang{i}", WorkerParseKind.ScheduledTask);
+        }
+
+        var broker = Broker(_ => WorkerTestFault.Hang, parseTimeout: TimeSpan.FromSeconds(1));
+
+        var results = await broker.ParseBatchAsync(files.Inputs, null, CancellationToken.None);
+
+        Assert.All(results.Take(SandboxedScanBroker.MaxSoloFailuresPerBatch), r => Assert.Contains("TimedOut", r.Message));
+        Assert.All(results.Skip(SandboxedScanBroker.MaxSoloFailuresPerBatch), r =>
+        {
+            Assert.Equal(PersistenceParseStatus.NotCollected, r.Status);
+            Assert.False(r.IsOverBudget);
+        });
+        Assert.Equal(SandboxedScanBroker.MaxSoloFailuresPerBatch, broker.RecordedFailures);
+    }
+
+    [Fact]
+    public async Task Exchanges_RunOnTheWorkersOneIoThread_AndFailAfterDispose()
+    {
+        // Review M1: one long-lived thread per worker, not a new thread per request (and not a pool thread).
+        WriteTask("A", GoodTask);
+        using var files = new OpenFiles(_folder.Path).Add("A", WorkerParseKind.ScheduledTask);
+        var broker = Broker();
+        await broker.ParseBatchAsync(files.Inputs, null, CancellationToken.None);
+        var worker = broker.Slots[0].Worker!;
+
+        int first = await worker.RunOnIoThread(() => Environment.CurrentManagedThreadId);
+        int second = await worker.RunOnIoThread(() => Environment.CurrentManagedThreadId);
+        bool pool = await worker.RunOnIoThread(() => Thread.CurrentThread.IsThreadPoolThread);
+        worker.Dispose();
+
+        Assert.Equal(first, second);
+        Assert.False(pool);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => worker.RunOnIoThread(() => 0));
     }
 
     [Fact]
@@ -284,7 +349,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         public Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
             WireTestParser.Instance.ParseAsync(file, kind, displayPath, cancellationToken);
 
-        public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
+        public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, Func<bool>? canContinue, CancellationToken cancellationToken)
         {
             Sizes.Add(files.Count);
             var results = new List<PersistenceParseResult>();
@@ -303,7 +368,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         WriteTask("A", GoodTask);
         using var files = new OpenFiles(_folder.Path).Add("A", WorkerParseKind.ScheduledTask);
         var broker = Broker();
-        Assert.Equal(PersistenceParseStatus.Parsed, (await broker.ParseBatchAsync(files.Inputs, CancellationToken.None))[0].Status); // a running worker
+        Assert.Equal(PersistenceParseStatus.Parsed, (await broker.ParseBatchAsync(files.Inputs, null, CancellationToken.None))[0].Status); // a running worker
         var slot = broker.Slots[0];
         var worker = slot.Worker!;
         IntPtr remote = worker.DuplicateInto(files.Inputs[0].File, WorkerProcess.ReadOnlyFileAccess);

@@ -77,6 +77,9 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
     /// <summary>Test seam: a fault for the worker to inject while parsing this path (honored only with worker test hooks).</summary>
     internal Func<string, WorkerTestFault>? ParseFaultInjector { get; set; }
 
+    /// <summary>Test seam: failures recorded against files (scans and parses).</summary>
+    internal int RecordedFailures => _failures.Total;
+
     /// <summary>Test seam: the pool.</summary>
     internal IReadOnlyList<WorkerSlot> Slots => _slots;
 
@@ -187,7 +190,10 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
 
     /// <summary>One file: a batch of one (see <see cref="ParseBatchAsync"/>).</summary>
     public async Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
-        (await ParseBatchAsync([new PersistenceParseInput(file, kind, displayPath)], cancellationToken).ConfigureAwait(false))[0];
+        (await ParseBatchAsync([new PersistenceParseInput(file, kind, displayPath)], null, cancellationToken).ConfigureAwait(false))[0];
+
+    /// <summary>A batch whose request failed retries its files alone, but stops after this many of them failed too.</summary>
+    internal const int MaxSoloFailuresPerBatch = 2;
 
     /// <summary>
     /// Section C review H2 + C2: shortcuts and task definitions through the worker, up to <see cref="WorkerLimits.MaxParseBatch"/>
@@ -197,7 +203,13 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
     /// file version that fails alone <see cref="SandboxOptions.MaxFailuresPerFile"/> times isn't sent again. Only "no
     /// worker at all" is Unavailable (the files aren't to blame).
     /// </summary>
-    public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Review H1: <paramref name="canContinue"/> (the collection's budgets) is asked before every request, solo retries
+    /// included, and the solo pass of one batch stops after <see cref="MaxSoloFailuresPerBatch"/> failures. Files that aren't
+    /// sent for either reason are <see cref="PersistenceParseStatus.NotCollected"/>, never counted as failures.
+    /// </remarks>
+    public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(
+        IReadOnlyList<PersistenceParseInput> files, Func<bool>? canContinue, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(files);
         cancellationToken.ThrowIfCancellationRequested();
@@ -205,7 +217,12 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
         var send = new List<ParseItem>(files.Count);
         for (int i = 0; i < files.Count; i++)
         {
-            var input = files[i] ?? throw new ArgumentException("A null file.", nameof(files));
+            var input = files[i];
+            if (input?.File is null || input.DisplayPath is null)
+            {
+                throw new ArgumentException($"File {i} of the batch has no handle or no path.", nameof(files));
+            }
+
             string key = "parse:" + FailureKey(input.DisplayPath, input.File, FileIdentity.TryCapture(input.File));
             if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
             {
@@ -217,9 +234,10 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             }
         }
 
+        var gate = new BudgetGate(canContinue);
         foreach (var chunk in send.Chunk(WorkerLimits.MaxParseBatch))
         {
-            await ParseChunkAsync(chunk, results, cancellationToken).ConfigureAwait(false);
+            await ParseChunkAsync(chunk, results, gate, cancellationToken).ConfigureAwait(false);
         }
 
         return results!;
@@ -231,8 +249,34 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
     /// <summary>What one parse request came to: per-file results, or why the whole request failed.</summary>
     private sealed record BatchOutcome(IReadOnlyList<PersistenceParseResult>? Results, string? Unavailable, string? Refused, WorkerRequestException? Failure);
 
-    private async Task ParseChunkAsync(IReadOnlyList<ParseItem> chunk, PersistenceParseResult?[] results, CancellationToken cancellationToken)
+    /// <summary>The caller's budget check; once it said no, it stays no for this call.</summary>
+    private sealed class BudgetGate(Func<bool>? canContinue)
     {
+        private bool _closed;
+
+        public bool Open
+        {
+            get
+            {
+                if (!_closed && canContinue is not null && !canContinue())
+                {
+                    _closed = true;
+                }
+
+                return !_closed;
+            }
+        }
+    }
+
+    /// <returns>How many of the chunk's files were recorded as failures.</returns>
+    private async Task<int> ParseChunkAsync(IReadOnlyList<ParseItem> chunk, PersistenceParseResult?[] results, BudgetGate gate, CancellationToken cancellationToken)
+    {
+        if (!gate.Open)
+        {
+            NotCollected(chunk, 0, results, PersistenceParseResult.OverBudget);
+            return 0;
+        }
+
         var outcome = await SendBatchAsync(chunk, cancellationToken).ConfigureAwait(false);
         if (outcome.Results is { } parsed)
         {
@@ -241,43 +285,57 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
                 results[chunk[k].Index] = parsed[k];
             }
 
-            return;
+            return 0;
         }
 
         if (outcome.Unavailable is { } why)
         {
-            foreach (var item in chunk)
-            {
-                results[item.Index] = PersistenceParseResult.Unavailable(why);
-            }
-
-            return;
+            NotCollected(chunk, 0, results, PersistenceParseResult.Unavailable(why));
+            return 0;
         }
 
         if (chunk.Count == 1)
         {
             var item = chunk[0];
-            results[item.Index] = outcome.Failure is { } failure
-                ? ParseFailed(item.Key, item.Input.DisplayPath, failure.Kind.ToString(), failure.Message)
-                : PersistenceParseResult.Malformed($"The sandboxed parser refused the file: {outcome.Refused}");
-            return;
+            if (outcome.Failure is { } failure)
+            {
+                results[item.Index] = ParseFailed(item.Key, item.Input.DisplayPath, failure.Kind.ToString(), failure.Message);
+                return 1;
+            }
+
+            results[item.Index] = PersistenceParseResult.Malformed($"The sandboxed parser refused the file: {outcome.Refused}");
+            return 0;
         }
 
         // The batch can't say which file was to blame: each file again on its own, so only that one is a Malformed result.
         _logger.LogWarning("A batch of {Count} definition files failed in the sandboxed parser ({Why}); parsing them one at a time.",
             chunk.Count, outcome.Failure?.Message ?? outcome.Refused);
+        int failed = 0;
         for (int k = 0; k < chunk.Count; k++)
         {
-            await ParseChunkAsync([chunk[k]], results, cancellationToken).ConfigureAwait(false);
-            if (results[chunk[k].Index]!.Status == PersistenceParseStatus.Unavailable)
+            if (failed >= MaxSoloFailuresPerBatch)
             {
-                for (int rest = k + 1; rest < chunk.Count; rest++)
-                {
-                    results[chunk[rest].Index] = results[chunk[k].Index];
-                }
-
-                return;
+                NotCollected(chunk, k, results, PersistenceParseResult.NotCollected(
+                    $"Not parsed: {failed} other files of its batch broke the sandboxed parser, so the rest of the batch was skipped."));
+                break;
             }
+
+            failed += await ParseChunkAsync([chunk[k]], results, gate, cancellationToken).ConfigureAwait(false);
+            if (results[chunk[k].Index]!.Status is PersistenceParseStatus.Unavailable or PersistenceParseStatus.NotCollected)
+            {
+                NotCollected(chunk, k + 1, results, results[chunk[k].Index]!);
+                break;
+            }
+        }
+
+        return failed;
+    }
+
+    private static void NotCollected(IReadOnlyList<ParseItem> chunk, int from, PersistenceParseResult?[] results, PersistenceParseResult result)
+    {
+        for (int k = from; k < chunk.Count; k++)
+        {
+            results[chunk[k].Index] = result;
         }
     }
 

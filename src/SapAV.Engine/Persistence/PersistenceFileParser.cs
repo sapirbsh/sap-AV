@@ -15,14 +15,29 @@ internal enum PersistenceParseStatus
 
     /// <summary>The worker can't be reached at all (the file isn't to blame): nothing can be parsed for now.</summary>
     Unavailable,
+
+    /// <summary>
+    /// Review H1: not sent to the worker (the collection's budget ran out, or too many files of its batch broke the
+    /// parser). The file isn't blamed and nothing is recorded against it.
+    /// </summary>
+    NotCollected,
 }
 
 /// <param name="Message">Why, for anything but Parsed.</param>
 internal sealed record PersistenceParseResult(PersistenceParseStatus Status, TaskDefinitionInfo? Task, ShellLinkInfo? Link, string? Message)
 {
+    /// <summary>Not collected because the collection's budget said stop (that is reported once, by the budget check itself).</summary>
+    public static PersistenceParseResult OverBudget { get; } =
+        new(PersistenceParseStatus.NotCollected, null, null, "Not parsed: the collection's time budget ran out.") { IsOverBudget = true };
+
+    /// <summary>For <see cref="PersistenceParseStatus.NotCollected"/>: the budget was the reason (no issue of its own is needed).</summary>
+    public bool IsOverBudget { get; init; }
+
     public static PersistenceParseResult Malformed(string message) => new(PersistenceParseStatus.Malformed, null, null, message);
 
     public static PersistenceParseResult Unavailable(string message) => new(PersistenceParseStatus.Unavailable, null, null, message);
+
+    public static PersistenceParseResult NotCollected(string message) => new(PersistenceParseStatus.NotCollected, null, null, message);
 }
 
 /// <summary>
@@ -42,13 +57,22 @@ internal interface IPersistenceFileParser
     /// C2: several files at once, one result per file in order (the sandboxed broker sends them to the worker in batches).
     /// One file's failure is that file's Malformed result. By default each file goes through <see cref="ParseAsync"/>.
     /// </summary>
+    /// <param name="canContinue">The collection's budget check (review H1), asked before each request; once false, the remaining
+    /// files are <see cref="PersistenceParseResult.OverBudget"/>. Null = no budget.</param>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
+    async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(
+        IReadOnlyList<PersistenceParseInput> files, Func<bool>? canContinue, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(files);
         var results = new PersistenceParseResult[files.Count];
         for (int i = 0; i < files.Count; i++)
         {
+            if (canContinue is not null && !canContinue())
+            {
+                Array.Fill(results, PersistenceParseResult.OverBudget, i, files.Count - i);
+                break;
+            }
+
             try
             {
                 results[i] = await ParseAsync(files[i].File, files[i].Kind, files[i].DisplayPath, cancellationToken).ConfigureAwait(false);

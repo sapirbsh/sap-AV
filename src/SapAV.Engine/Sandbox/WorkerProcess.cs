@@ -171,6 +171,61 @@ internal sealed class WorkerProcess : IDisposable
         }
     }
 
+    private readonly System.Collections.Concurrent.BlockingCollection<Action> _io = new();
+    private Thread? _ioThread;
+
+    /// <summary>
+    /// Runs one blocking pipe exchange on this worker's own I/O thread (review M1: one long-lived thread per worker, not one
+    /// per request, and never a pool thread, so a busy pool can't delay a request past its timeout). The task completes on
+    /// that thread, and so do continuations awaiting it. After <see cref="Dispose"/> the task fails with ObjectDisposedException.
+    /// </summary>
+    public Task<T> RunOnIoThread<T>(Func<T> work)
+    {
+        var done = new TaskCompletionSource<T>();
+        void Run()
+        {
+            try
+            {
+                done.TrySetResult(work());
+            }
+            catch (Exception ex)
+            {
+                done.TrySetException(ex);
+            }
+        }
+
+        lock (_io)
+        {
+            if (_io.IsAddingCompleted)
+            {
+                done.TrySetException(new ObjectDisposedException(nameof(WorkerProcess)));
+                return done.Task;
+            }
+
+            _ioThread ??= StartIoThread();
+            _io.Add(Run);
+        }
+
+        return done.Task;
+    }
+
+    private Thread StartIoThread()
+    {
+        var thread = new Thread(() =>
+        {
+            foreach (var work in _io.GetConsumingEnumerable())
+            {
+                work(); // never throws: Run catches
+            }
+        })
+        {
+            IsBackground = true,
+            Name = $"sap-AV worker {ProcessId} I/O",
+        };
+        thread.Start();
+        return thread;
+    }
+
     /// <summary>Closes a handle value inside the worker (best effort; harmless if the worker already exited).</summary>
     public void CloseInWorker(IntPtr remote)
     {
@@ -280,6 +335,11 @@ internal sealed class WorkerProcess : IDisposable
         WaitForExit(TimeSpan.FromSeconds(5));
         _requests.Dispose();
         _responses.Dispose();
+        lock (_io)
+        {
+            _io.CompleteAdding(); // the I/O thread drains what is queued (it fails on the closed pipes) and ends; not joined here
+        }
+
         _job.Dispose(); // KILL_ON_JOB_CLOSE as well
         InitialThread?.Dispose();
         Process.Dispose();

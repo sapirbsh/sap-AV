@@ -212,7 +212,7 @@ internal sealed class PersistenceContext
         IReadOnlyList<PersistenceParseResult> results;
         try
         {
-            results = Parser.ParseBatchAsync(files, CancellationToken).GetAwaiter().GetResult();
+            results = Parser.ParseBatchAsync(files, () => CanContinue, CancellationToken).GetAwaiter().GetResult(); // review H1: budgets per request
             if (results.Count != files.Count)
             {
                 throw new InvalidOperationException($"The parser returned {results.Count} results for {files.Count} files.");
@@ -227,6 +227,15 @@ internal sealed class PersistenceContext
         {
             ParsedFiles += files.Count;
             ParseTime += Stopwatch.GetElapsedTime(started);
+        }
+
+        for (int i = 0; i < results.Count; i++)
+        {
+            if (results[i] is { Status: PersistenceParseStatus.NotCollected, IsOverBudget: false } skipped)
+            {
+                // The budget reports itself once (CanContinue); any other skip is this file's issue, not a failure of it.
+                AddIssue(entryKind, null, files[i].DisplayPath, PersistenceIssueReason.LimitReached, skipped.Message ?? "Not parsed.");
+            }
         }
 
         for (int i = 0; i < results.Count; i++)

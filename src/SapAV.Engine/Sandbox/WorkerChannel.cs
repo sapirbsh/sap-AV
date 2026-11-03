@@ -27,7 +27,7 @@ internal sealed class WorkerRequestException(WorkerFailureKind kind, string mess
 
 /// <summary>
 /// One request/response exchange with a <see cref="WorkerProcess"/>. The pipes are synchronous (anonymous pipes), so the
-/// exchange blocks a thread of its own (C2: not a pool thread, so a busy or starved thread pool can't delay a request
+/// exchange blocks the worker's own I/O thread (C2 + review M1: one per worker, not a pool thread, so a busy or starved thread pool can't delay a request
 /// past its timeout and get an innocent file blamed); on timeout or cancellation the worker is killed, which breaks the
 /// pipe and ends that thread. Every response is read with a size cap (<see cref="WorkerLimits.MaxResponseBytes"/> unless
 /// the request says otherwise) and parsed strictly.
@@ -41,11 +41,11 @@ internal static class WorkerChannel
         int maxResponseBytes = WorkerLimits.MaxResponseBytes)
     {
         byte[] payload = WorkerJson.Serialize(request, maxRequestBytes);
-        var exchange = Task.Factory.StartNew(() =>
+        var exchange = worker.RunOnIoThread(() =>
         {
             WorkerFraming.Write(worker.Requests, payload, maxRequestBytes);
             return WorkerFraming.Read(worker.Responses, maxResponseBytes);
-        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        });
 
         byte[]? frame;
         try
