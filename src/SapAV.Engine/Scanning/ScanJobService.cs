@@ -115,6 +115,12 @@ public sealed class ScanJobService : IScanJobService, IDisposable
     /// <summary>C5: the scan cache every job uses (engine / administrator perspective only), or null when it is off or unavailable.</summary>
     internal Cache.ScanCache? ResultCache => _cache.Value;
 
+    /// <summary>
+    /// D1: the per-file pipeline every job uses (hardened open, exclusions, cache, sandboxed scan, verdict handler). Real-time
+    /// monitoring scans through this same instance, so it shares the cache, the exclusions and the verdict handler's budgets.
+    /// </summary>
+    internal ScanFilePipeline Pipeline => _pipeline;
+
     /// <summary>Whether the cache was created yet (it is on the first scanned file).</summary>
     internal bool CacheCreated => _cache.IsValueCreated;
 

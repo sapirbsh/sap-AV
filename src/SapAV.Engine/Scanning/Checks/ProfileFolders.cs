@@ -14,6 +14,9 @@ internal enum UserFolderKind
     Temp,
     RoamingAppData,
     LocalAppData,
+
+    /// <summary>D1: Documents (watched in real time; Quick Scan doesn't walk it).</summary>
+    Documents,
 }
 
 /// <summary>A user-configured folder (User Shell Folders / Environment) that passed <see cref="UserFolderPolicy"/>.</summary>
@@ -29,6 +32,9 @@ internal sealed record UserFolders(string Sid, string Profile, string? Desktop, 
     /// <summary>User-configured folders accepted on top of the defaults (never instead of them).</summary>
     public IReadOnlyList<RedirectedFolder> Redirected { get; init; } = [];
 
+    /// <summary>D1: the default Documents folder under the profile (watched in real time; not part of Quick Scan).</summary>
+    public string? Documents { get; init; }
+
     /// <summary>The default folder of <paramref name="kind"/> plus any accepted redirections of it.</summary>
     public IEnumerable<string> Folders(UserFolderKind kind)
     {
@@ -38,6 +44,7 @@ internal sealed record UserFolders(string Sid, string Profile, string? Desktop, 
             UserFolderKind.Downloads => Downloads,
             UserFolderKind.Temp => Temp,
             UserFolderKind.RoamingAppData => RoamingAppData,
+            UserFolderKind.Documents => Documents,
             _ => LocalAppData,
         };
         if (fallback is not null)
@@ -55,7 +62,11 @@ internal sealed record UserFolders(string Sid, string Profile, string? Desktop, 
 /// <summary>Every profile's folders plus the machine-wide ones (C4 phases 3 and 4).</summary>
 /// <param name="Notes">Engine text: folders that were left out (network locations, unusable paths), for the phase summary.</param>
 internal sealed record ProfileFolderSet(
-    IReadOnlyList<UserFolders> Users, string? MachineTemp, string? PublicDesktop, string? PublicDownloads, string? ProgramData, IReadOnlyList<string> Notes);
+    IReadOnlyList<UserFolders> Users, string? MachineTemp, string? PublicDesktop, string? PublicDownloads, string? ProgramData, IReadOnlyList<string> Notes)
+{
+    /// <summary>D1: the whole Public profile (<c>%PUBLIC%</c>), watched in real time.</summary>
+    public string? Public { get; init; }
+}
 
 /// <summary>Resolves the folder set; fake it in tests.</summary>
 internal interface IProfileFolderSource
@@ -144,7 +155,10 @@ internal sealed class RegistryProfileFolders(IRegistryView registry, int maxProf
             }
 
             var defaults = new UserFolders(user.Sid, profile, Path.Join(profile, "Desktop"), Path.Join(profile, "Downloads"),
-                Path.Join(profile, @"AppData\Local\Temp"), Path.Join(profile, @"AppData\Roaming"), Path.Join(profile, @"AppData\Local"));
+                Path.Join(profile, @"AppData\Local\Temp"), Path.Join(profile, @"AppData\Roaming"), Path.Join(profile, @"AppData\Local"))
+            {
+                Documents = Path.Join(profile, "Documents"),
+            };
             if (!user.HiveLoaded)
             {
                 users.Add(defaults);
@@ -177,6 +191,7 @@ internal sealed class RegistryProfileFolders(IRegistryView registry, int maxProf
             Add(UserFolderKind.Temp, user.Environment.Get("TEMP"), "TEMP");
             Add(UserFolderKind.RoamingAppData, Expand(shell, "AppData", user.Environment), "AppData");
             Add(UserFolderKind.LocalAppData, Expand(shell, "Local AppData", user.Environment), "Local AppData");
+            Add(UserFolderKind.Documents, Expand(shell, "Personal", user.Environment), "Documents");
             users.Add(defaults with { Redirected = redirected });
         }
 
@@ -188,7 +203,10 @@ internal sealed class RegistryProfileFolders(IRegistryView registry, int maxProf
             publicFolder is null ? null : Local(Path.Join(publicFolder, "Desktop"), "The public Desktop", notes),
             publicFolder is null ? null : Local(Path.Join(publicFolder, "Downloads"), "The public Downloads", notes),
             Local(machine.Get("ProgramData"), "ProgramData", notes),
-            notes);
+            notes)
+        {
+            Public = publicFolder is null ? null : Local(publicFolder, "The Public profile", notes),
+        };
     }
 
     /// <summary>A local drive path in normalized form, or null (with a note for anything else but a missing value).</summary>

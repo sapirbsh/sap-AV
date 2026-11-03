@@ -38,6 +38,12 @@ internal static class SafeScanOpen
 {
     private const uint ShareNoWriters = N.ShareRead | N.ShareDelete;
 
+    /// <summary>ERROR_VIRUS_INFECTED.</summary>
+    internal const int ErrorVirusInfected = 225;
+
+    /// <summary>ERROR_VIRUS_DELETED.</summary>
+    internal const int ErrorVirusDeleted = 226;
+
     /// <param name="folder">The folder <paramref name="name"/> was listed in (the caller keeps its reference), or null to open by path.</param>
     public static OpenedScanFile? Open(
         ScanItem item, List<ScanNote> notes, TimeProvider time, out FileScanReport? failureReport, SharedFolder? folder = null, string? name = null) =>
@@ -85,9 +91,12 @@ internal static class SafeScanOpen
             }
 
             skipReason = failure == SafeTreeFailure.Remote ? ScanSkipReason.RemoteFile : null;
-            failureReport = Failed(item, notes, time, Reason(failure), failure == SafeTreeFailure.Remote
+            var reason = Reason(failure, error);
+            failureReport = Failed(item, notes, time, reason, failure == SafeTreeFailure.Remote
                 ? "The file is on a remote file system; remote files are not scanned."
-                : $"The file could not be opened safely ({failure}, Win32 error {error}).");
+                : reason == HashFailureReason.BlockedByAntivirus
+                    ? $"Another antivirus blocked opening the file (Win32 error {error})."
+                    : $"The file could not be opened safely ({failure}, Win32 error {error}).");
             return null;
         }
 
@@ -147,8 +156,13 @@ internal static class SafeScanOpen
             ? SafeTree.Open(item.Path, N.GenericRead, share, options, out failure, out error, allowRemote)
             : SafeTree.OpenChild(folder.Handle, name!, N.GenericRead, share, options, out failure, out error);
 
-    private static HashFailureReason Reason(SafeTreeFailure failure) => failure switch
+    /// <summary>
+    /// D1: ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED (225 / 226) on the open means another antivirus (Defender) got there
+    /// first; that is <see cref="HashFailureReason.BlockedByAntivirus"/>, reported as such and not as an I/O error.
+    /// </summary>
+    internal static HashFailureReason Reason(SafeTreeFailure failure, int win32Error) => failure switch
     {
+        _ when win32Error is ErrorVirusInfected or ErrorVirusDeleted => HashFailureReason.BlockedByAntivirus,
         SafeTreeFailure.NotFound => HashFailureReason.NotFound,
         SafeTreeFailure.AccessDenied => HashFailureReason.AccessDenied,
         SafeTreeFailure.Locked => HashFailureReason.Locked,
