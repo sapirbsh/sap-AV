@@ -17,6 +17,12 @@
     <InternalsVisibleTo Include="SapAV.Engine.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- D2: the VirusTotal result cache (same package and version as the engine's C5 scan cache). Private: it doesn't flow to
+         the sandboxed scan worker, which never uses the cache; the engine and the tests reference it themselves. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" PrivateAssets="all" />
+  </ItemGroup>
+
   <!-- YARA-X engine: pinned native DLL, downloaded once, hash-verified, copied to the output. -->
   <Import Project="..\..\native\yara-x\YaraX.targets" />
 
