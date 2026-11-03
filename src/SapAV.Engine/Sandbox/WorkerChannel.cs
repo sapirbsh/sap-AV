@@ -27,22 +27,25 @@ internal sealed class WorkerRequestException(WorkerFailureKind kind, string mess
 
 /// <summary>
 /// One request/response exchange with a <see cref="WorkerProcess"/>. The pipes are synchronous (anonymous pipes), so the
-/// exchange runs on a pool thread; on timeout or cancellation the worker is killed, which breaks the pipe and frees it.
-/// Every response is read with the <see cref="WorkerLimits.MaxResponseBytes"/> cap and parsed strictly.
+/// exchange blocks a thread of its own (C2: not a pool thread, so a busy or starved thread pool can't delay a request
+/// past its timeout and get an innocent file blamed); on timeout or cancellation the worker is killed, which breaks the
+/// pipe and ends that thread. Every response is read with a size cap (<see cref="WorkerLimits.MaxResponseBytes"/> unless
+/// the request says otherwise) and parsed strictly.
 /// </summary>
 internal static class WorkerChannel
 {
     /// <exception cref="WorkerRequestException">Crashed, TimedOut or ProtocolViolation (the worker is killed).</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled (the worker is killed).</exception>
     public static async Task<WorkerResponse> ExchangeAsync(
-        WorkerProcess worker, WorkerRequest request, int maxRequestBytes, TimeSpan timeout, CancellationToken cancellationToken)
+        WorkerProcess worker, WorkerRequest request, int maxRequestBytes, TimeSpan timeout, CancellationToken cancellationToken,
+        int maxResponseBytes = WorkerLimits.MaxResponseBytes)
     {
         byte[] payload = WorkerJson.Serialize(request, maxRequestBytes);
-        var exchange = Task.Run(() =>
+        var exchange = Task.Factory.StartNew(() =>
         {
             WorkerFraming.Write(worker.Requests, payload, maxRequestBytes);
-            return WorkerFraming.Read(worker.Responses, WorkerLimits.MaxResponseBytes);
-        }, CancellationToken.None);
+            return WorkerFraming.Read(worker.Responses, maxResponseBytes);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         byte[]? frame;
         try

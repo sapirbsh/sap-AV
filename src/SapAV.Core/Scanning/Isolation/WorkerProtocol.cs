@@ -30,6 +30,15 @@ public static class WorkerLimits
     /// <summary>Largest response (worker to engine). The engine rejects anything bigger before parsing it.</summary>
     public const int MaxResponseBytes = 256 * 1024;
 
+    /// <summary>Most files in one parse request (C2 batching).</summary>
+    public const int MaxParseBatch = 32;
+
+    /// <summary>
+    /// Largest answer to a parse request for <paramref name="files"/> files: the single-answer cap per file (each file's
+    /// text is capped so that its answer fits <see cref="MaxResponseBytes"/>), so at most 8 MiB for a full batch.
+    /// </summary>
+    public static int MaxParseResponseBytes(int files) => MaxResponseBytes * Math.Clamp(files, 1, MaxParseBatch);
+
     /// <summary>JSON nesting limit for both directions.</summary>
     public const int MaxJsonDepth = 16;
 

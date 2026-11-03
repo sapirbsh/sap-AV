@@ -189,36 +189,57 @@ internal sealed class PersistenceContext
     /// adds a <see cref="PersistenceIssueReason.ParserUnavailable"/> issue, and later files aren't sent: an unavailable
     /// worker can't cost a restart wait per file. Files are never parsed in this process instead.
     /// </summary>
-    public PersistenceParseResult Parse(SafeFileHandle file, WorkerParseKind kind, string displayPath, PersistenceKind entryKind)
+    public PersistenceParseResult Parse(SafeFileHandle file, WorkerParseKind kind, string displayPath, PersistenceKind entryKind) =>
+        ParseBatch([new PersistenceParseInput(file, kind, displayPath)], entryKind)[0];
+
+    /// <summary>
+    /// C2: several definition files in one go (the broker sends up to <see cref="WorkerLimits.MaxParseBatch"/> per worker
+    /// request), one result per file in order; otherwise as <see cref="Parse"/>.
+    /// </summary>
+    public IReadOnlyList<PersistenceParseResult> ParseBatch(IReadOnlyList<PersistenceParseInput> files, PersistenceKind entryKind)
     {
+        if (files.Count == 0)
+        {
+            return [];
+        }
+
         if (ParserDown)
         {
-            return PersistenceParseResult.Unavailable("The sandboxed parser isn't available.");
+            return Enumerable.Repeat(PersistenceParseResult.Unavailable("The sandboxed parser isn't available."), files.Count).ToArray();
         }
 
         long started = Stopwatch.GetTimestamp();
-        PersistenceParseResult result;
+        IReadOnlyList<PersistenceParseResult> results;
         try
         {
-            result = Parser.ParseAsync(file, kind, displayPath, CancellationToken).GetAwaiter().GetResult();
+            results = Parser.ParseBatchAsync(files, CancellationToken).GetAwaiter().GetResult();
+            if (results.Count != files.Count)
+            {
+                throw new InvalidOperationException($"The parser returned {results.Count} results for {files.Count} files.");
+            }
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
-            result = PersistenceParseResult.Malformed($"The sandboxed parser failed on this file ({ex.GetType().Name})."); // review C M3
+            var failed = PersistenceParseResult.Malformed($"The sandboxed parser failed on this file ({ex.GetType().Name})."); // review C M3
+            results = Enumerable.Repeat(failed, files.Count).ToArray();
         }
         finally
         {
-            ParsedFiles++;
+            ParsedFiles += files.Count;
             ParseTime += Stopwatch.GetElapsedTime(started);
         }
 
-        if (result.Status == PersistenceParseStatus.Unavailable)
+        for (int i = 0; i < results.Count; i++)
         {
-            ParserDown = true;
-            AddIssue(entryKind, null, displayPath, PersistenceIssueReason.ParserUnavailable, $"{result.Message} What was left of this source was not collected.");
+            if (results[i].Status == PersistenceParseStatus.Unavailable)
+            {
+                ParserDown = true;
+                AddIssue(entryKind, null, files[i].DisplayPath, PersistenceIssueReason.ParserUnavailable, $"{results[i].Message} What was left of this source was not collected.");
+                break;
+            }
         }
 
-        return result;
+        return results;
     }
 
     public void AddIssue(PersistenceKind? kind, string? userSid, string location, PersistenceIssueReason reason, string message)

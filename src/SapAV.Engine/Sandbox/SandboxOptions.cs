@@ -81,6 +81,14 @@ public sealed class SandboxOptions
 
     internal WorkerMitigations Mitigations { get; set; } = WorkerMitigations.Default;
 
+    /// <summary>
+    /// The time limit for a parse batch of <paramref name="files"/> files (C2): <see cref="ParseTimeout"/> for one file, plus
+    /// an eighth of it per further file, and never more than three times <see cref="ParseTimeout"/> (15 s by default), so
+    /// a hang inside a batch still can't use up the collection's budget.
+    /// </summary>
+    internal TimeSpan ParseBatchTimeout(int files) =>
+        TimeSpan.FromTicks(Math.Min(ParseTimeout.Ticks + Math.Max(0, files - 1) * (ParseTimeout.Ticks / 8), 3 * ParseTimeout.Ticks));
+
     internal string ResolvedWorkerPath => Path.GetFullPath(WorkerPath ?? Path.Combine(AppContext.BaseDirectory, "ScanWorker", "SapAV.ScanWorker.exe"));
 
     internal string ResolvedRulesDirectory => Path.GetFullPath(RulesDirectory ?? Path.Combine(AppContext.BaseDirectory, "data", "rules"));

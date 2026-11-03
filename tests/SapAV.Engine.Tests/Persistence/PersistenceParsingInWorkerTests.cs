@@ -125,9 +125,10 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         Assert.True(broker.Status.WorkerRestarts >= 1);
 
         Collect(broker, source);
+        int sent = crashes; // C2: per collection it crashes its batch, then again alone (counted once: only alone is it to blame)
         var third = Collect(broker, source); // two strikes: not sent to a worker again
 
-        Assert.Equal(2, crashes);
+        Assert.Equal(sent, crashes);
         Assert.Contains(third.Issues, i => i.Location == @"\Crash" && i.Reason == PersistenceIssueReason.Malformed && i.Message.Contains("not sent"));
     }
 
@@ -161,6 +162,176 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         Assert.Empty(result.Entries);
         Assert.Contains(result.Issues, i => i.Location == @"\Bad" && i.Reason == PersistenceIssueReason.Malformed);
         Assert.Equal(1, broker.Status.WorkerRestarts);
+    }
+
+    /// <summary>Opens files of the temp folder like the collectors do and keeps them open for one batch.</summary>
+    private sealed class OpenFiles : IDisposable
+    {
+        private readonly SafeFileHandle _folder;
+        private readonly List<SafeFileHandle> _files = [];
+
+        public OpenFiles(string folder) => _folder = SafeFolderReader.OpenFolder(folder, out _)!;
+
+        public List<PersistenceParseInput> Inputs { get; } = [];
+
+        public OpenFiles Add(string name, WorkerParseKind kind)
+        {
+            var file = SafeFolderReader.OpenForParsing(_folder, name, TaskXml.MaxBytes, out _, out _)!;
+            _files.Add(file);
+            Inputs.Add(new PersistenceParseInput(file, kind, @"\" + name));
+            return this;
+        }
+
+        public void Dispose()
+        {
+            _files.ForEach(f => f.Dispose());
+            _folder.Dispose();
+        }
+    }
+
+    private static string TaskFor(string exe) => GoodTask.Replace("ok.exe", exe, StringComparison.Ordinal);
+
+    [Fact]
+    public async Task ABatch_OfTasksAndShortcuts_RoundTripsInOrder_AcrossSeveralRequests()
+    {
+        const int Tasks = WorkerLimits.MaxParseBatch + 8; // more than one request
+        using var files = new OpenFiles(_folder.Path);
+        for (int i = 0; i < Tasks; i++)
+        {
+            WriteTask($"T{i:D2}", TaskFor($"t{i}.exe"));
+            files.Add($"T{i:D2}", WorkerParseKind.ScheduledTask);
+            if (i % 10 == 0)
+            {
+                File.WriteAllBytes(Path.Combine(_folder.Path, $"L{i}.lnk"), new ShellLinkBuilder { IdListPath = $@"C:\Tools\l{i}.exe" }.Build());
+                files.Add($"L{i}.lnk", WorkerParseKind.ShellLink);
+            }
+        }
+
+        var broker = Broker();
+
+        var results = await broker.ParseBatchAsync(files.Inputs, CancellationToken.None);
+
+        Assert.Equal(files.Inputs.Count, results.Count);
+        for (int k = 0; k < results.Count; k++)
+        {
+            string name = files.Inputs[k].DisplayPath.TrimStart('\\');
+            Assert.Equal(PersistenceParseStatus.Parsed, results[k].Status);
+            if (name.StartsWith('T'))
+            {
+                Assert.Equal($@"C:\Tools\t{int.Parse(name[1..])}.exe", results[k].Task!.Actions[0].Command);
+            }
+            else
+            {
+                Assert.Equal($@"C:\Tools\l{name[1..^4]}.exe", results[k].Link!.IdListPath);
+            }
+        }
+
+        Assert.Equal(Tasks + 4, results.Count(r => r.Status == PersistenceParseStatus.Parsed));
+        Assert.Equal(0, broker.Status.WorkerRestarts); // one worker did it all
+    }
+
+    [Theory]
+    [InlineData(nameof(WorkerTestFault.Crash), "Crashed")]
+    [InlineData(nameof(WorkerTestFault.MalformedResponse), "ProtocolViolation")]
+    [InlineData(nameof(WorkerTestFault.KeepHandleCopy), "kept a copy")] // the kept-handle check covers every handle of the batch
+    public async Task OneBadFileInABatch_IsMalformed_AndTheOthersStillParse(string fault, string expected)
+    {
+        using var files = new OpenFiles(_folder.Path);
+        foreach (var name in (string[])["A", "Bad", "B", "C"])
+        {
+            WriteTask(name, TaskFor(name + ".exe"));
+            files.Add(name, WorkerParseKind.ScheduledTask);
+        }
+
+        var broker = Broker(path => path.EndsWith("Bad", StringComparison.Ordinal) ? Enum.Parse<WorkerTestFault>(fault) : WorkerTestFault.None);
+
+        var results = await broker.ParseBatchAsync(files.Inputs, CancellationToken.None);
+
+        Assert.Equal(PersistenceParseStatus.Malformed, results[1].Status);
+        Assert.Contains(expected, results[1].Message);
+        foreach (int k in (int[])[0, 2, 3])
+        {
+            Assert.Equal(PersistenceParseStatus.Parsed, results[k].Status);
+            Assert.EndsWith(".exe", results[k].Task!.Actions[0].Command);
+        }
+
+        Assert.True(broker.Status.WorkerRestarts >= 2); // the batch's worker and the one the file broke alone
+    }
+
+    [Fact]
+    public void TheCollector_SendsTaskFiles_InBatchesOfAtMostTheCap()
+    {
+        const int Tasks = 2 * WorkerLimits.MaxParseBatch + 5;
+        for (int i = 0; i < Tasks; i++)
+        {
+            WriteTask($"T{i:D3}", TaskFor($"t{i}.exe"));
+        }
+
+        var parser = new BatchRecorder();
+
+        var result = Collect(parser, new ScheduledTaskSource(_folder.Path));
+
+        Assert.Equal(Tasks, result.Entries.Count);
+        Assert.Equal(Tasks, parser.Sizes.Sum());
+        Assert.All(parser.Sizes, size => Assert.InRange(size, 1, WorkerLimits.MaxParseBatch));
+        Assert.Equal(3, parser.Sizes.Count);
+    }
+
+    private sealed class BatchRecorder : IPersistenceFileParser
+    {
+        public List<int> Sizes { get; } = [];
+
+        public Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
+            WireTestParser.Instance.ParseAsync(file, kind, displayPath, cancellationToken);
+
+        public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
+        {
+            Sizes.Add(files.Count);
+            var results = new List<PersistenceParseResult>();
+            foreach (var f in files)
+            {
+                results.Add(await ParseAsync(f.File, f.Kind, f.DisplayPath, cancellationToken));
+            }
+
+            return results;
+        }
+    }
+
+    [Fact]
+    public async Task TheWorker_RefusesABatchOverTheCap()
+    {
+        WriteTask("A", GoodTask);
+        using var files = new OpenFiles(_folder.Path).Add("A", WorkerParseKind.ScheduledTask);
+        var broker = Broker();
+        Assert.Equal(PersistenceParseStatus.Parsed, (await broker.ParseBatchAsync(files.Inputs, CancellationToken.None))[0].Status); // a running worker
+        var slot = broker.Slots[0];
+        var worker = slot.Worker!;
+        IntPtr remote = worker.DuplicateInto(files.Inputs[0].File, WorkerProcess.ReadOnlyFileAccess);
+        try
+        {
+            var tooMany = Enumerable.Repeat(new WorkerParseFile { Kind = WorkerParseKind.ScheduledTask, FileHandle = remote, TestFault = WorkerTestFault.None },
+                WorkerLimits.MaxParseBatch + 1).ToArray();
+
+            var response = await slot.ParseAsync(new WorkerParseRequest { Files = tooMany }, CancellationToken.None);
+
+            Assert.Equal(WorkerResponseKind.Failed, response.Kind);
+            Assert.Contains($"1 to {WorkerLimits.MaxParseBatch}", response.Error);
+        }
+        finally
+        {
+            worker.CloseInWorker(remote);
+        }
+    }
+
+    [Fact]
+    public void TheBatchTimeout_ScalesWithTheBatch_AndIsBounded()
+    {
+        var options = new SandboxOptions { ParseTimeout = TimeSpan.FromSeconds(4) };
+
+        Assert.Equal(TimeSpan.FromSeconds(4), options.ParseBatchTimeout(1));
+        Assert.Equal(TimeSpan.FromSeconds(5), options.ParseBatchTimeout(3));
+        Assert.Equal(TimeSpan.FromSeconds(12), options.ParseBatchTimeout(WorkerLimits.MaxParseBatch)); // 3 x ParseTimeout at most
+        Assert.Equal(TimeSpan.FromSeconds(12), options.ParseBatchTimeout(int.MaxValue));
     }
 
     [Fact]

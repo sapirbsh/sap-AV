@@ -16,10 +16,18 @@ public enum WorkerParseKind
 }
 
 /// <summary>
-/// Section C review H2: parse one autostart definition file in the worker. The handle is a value in the worker's handle
-/// table, duplicated there read-only by the broker. The engine never parses these files itself.
+/// Section C review H2: parse a batch of autostart definition files in the worker (C2: up to
+/// <see cref="WorkerLimits.MaxParseBatch"/> files per request, so a collection pays one round trip per batch, not per
+/// file). The answer is one <see cref="WireParsedFile"/> per file, in order. The engine never parses these files itself.
 /// </summary>
 public sealed record WorkerParseRequest
+{
+    /// <summary>1 to <see cref="WorkerLimits.MaxParseBatch"/> files.</summary>
+    public required IReadOnlyList<WorkerParseFile> Files { get; init; }
+}
+
+/// <summary>One file of a <see cref="WorkerParseRequest"/>. The handle is a value in the worker's handle table, duplicated there read-only by the broker.</summary>
+public sealed record WorkerParseFile
 {
     public required WorkerParseKind Kind { get; init; }
 
@@ -130,6 +138,27 @@ public static class WireParsedFileCodec
             Task = null,
             Link = link is null ? null : ToWire(link),
         };
+    }
+
+    /// <summary>
+    /// Rebuilds a worker's answer to a batch: exactly one answer per requested file, in order, each checked like a single
+    /// answer (its kind and its own text caps). The batch's total text is therefore at most <c>files x</c>
+    /// <see cref="MaxTotalCharacters"/>, which is what the batch's frame cap (<see cref="WorkerLimits.MaxParseResponseBytes"/>) allows.
+    /// </summary>
+    /// <exception cref="WorkerProtocolException">Any answer breaks the protocol (the whole batch is discarded).</exception>
+    public static IReadOnlyList<ParsedPersistenceFile> FromWire(IReadOnlyList<WireParsedFile?> wire, IReadOnlyList<WorkerParseKind> expected)
+    {
+        ArgumentNullException.ThrowIfNull(wire);
+        ArgumentNullException.ThrowIfNull(expected);
+        Require(wire.Count == expected.Count, $"{wire.Count} answers for {expected.Count} files");
+        var parsed = new ParsedPersistenceFile[wire.Count];
+        for (int i = 0; i < wire.Count; i++)
+        {
+            Require(wire[i] is not null, "a null answer");
+            parsed[i] = FromWire(wire[i]!, expected[i]);
+        }
+
+        return parsed;
     }
 
     /// <summary>Rebuilds a worker's answer to a <paramref name="expected"/> request.</summary>

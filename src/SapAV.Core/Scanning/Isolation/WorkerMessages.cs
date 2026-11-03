@@ -170,7 +170,8 @@ public sealed record WorkerResponse
 
     public required WorkerProbeResult? Probe { get; init; }
 
-    public required WireParsedFile? Parsed { get; init; }
+    /// <summary>One answer per file of the <see cref="WorkerParseRequest"/>, in order.</summary>
+    public required IReadOnlyList<WireParsedFile?>? Parsed { get; init; }
 
     public required string? Error { get; init; }
 }

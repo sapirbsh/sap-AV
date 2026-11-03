@@ -103,9 +103,13 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     public Task<WorkerResponse> ScanAsync(WorkerScanRequest scan, CancellationToken cancellationToken) =>
         ExchangeAsync(WorkerRequestKind.Scan, null, scan, null, WorkerLimits.MaxRequestBytes, options.RequestTimeout, cancellationToken);
 
-    /// <summary>Sends a parse request to the ready worker. Failures kill the worker and start the backoff.</summary>
+    /// <summary>
+    /// Sends a parse batch to the ready worker; its time limit (<see cref="SandboxOptions.ParseBatchTimeout"/>) and answer cap
+    /// (<see cref="WorkerLimits.MaxParseResponseBytes"/>) scale with its size. Failures kill the worker and start the backoff.
+    /// </summary>
     public Task<WorkerResponse> ParseAsync(WorkerParseRequest parse, CancellationToken cancellationToken) =>
-        ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.ParseTimeout, cancellationToken);
+        ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.ParseBatchTimeout(parse.Files.Count),
+            cancellationToken, WorkerLimits.MaxParseResponseBytes(parse.Files.Count));
 
     /// <summary>A request completed normally: the backoff starts over.</summary>
     public void Succeeded() => _consecutiveFailures = 0;
@@ -115,14 +119,14 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     /// <see cref="SandboxOptions.MaxWorkerLifetime"/> (review M1: bounds how long anything a worker holds can live).
     /// A planned recycle, not a failure: no backoff, not counted as lost.
     /// </summary>
-    public void CountFileAndMaybeRecycle()
+    public void CountFileAndMaybeRecycle(int files = 1)
     {
         if (_worker is null)
         {
             return;
         }
 
-        if (++_filesScanned >= options.MaxFilesPerWorker || time.GetUtcNow() - _startedAt >= options.MaxWorkerLifetime)
+        if ((_filesScanned += files) >= options.MaxFilesPerWorker || time.GetUtcNow() - _startedAt >= options.MaxWorkerLifetime)
         {
             logger.LogDebug("Recycling scan worker {Index} after {Files} files.", Index, _filesScanned);
             Kill();
@@ -153,14 +157,15 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     }
 
     private async Task<WorkerResponse> ExchangeAsync(
-        WorkerRequestKind kind, WorkerLoadRules? rules, WorkerScanRequest? scan, WorkerParseRequest? parse, int maxBytes, TimeSpan timeout, CancellationToken cancellationToken)
+        WorkerRequestKind kind, WorkerLoadRules? rules, WorkerScanRequest? scan, WorkerParseRequest? parse, int maxBytes, TimeSpan timeout, CancellationToken cancellationToken,
+        int maxResponseBytes = WorkerLimits.MaxResponseBytes)
     {
         var worker = _worker ?? throw new WorkerRequestException(WorkerFailureKind.Unavailable, "No scan worker is running.");
         // Random request IDs (review L3): a frame the worker queued in advance can't guess the ID it must echo.
         var request = new WorkerRequest { Id = NewRequestId(), Kind = kind, LoadRules = rules, Scan = scan, Probe = null, Parse = parse };
         try
         {
-            return await WorkerChannel.ExchangeAsync(worker, request, maxBytes, timeout, cancellationToken).ConfigureAwait(false);
+            return await WorkerChannel.ExchangeAsync(worker, request, maxBytes, timeout, cancellationToken, maxResponseBytes).ConfigureAwait(false);
         }
         catch (WorkerRequestException ex)
         {

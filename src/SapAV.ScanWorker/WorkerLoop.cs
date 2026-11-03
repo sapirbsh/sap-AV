@@ -32,17 +32,20 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
                 return 0; // the broker went away
             }
 
-            var fault = request.Scan?.TestFault ?? request.Parse?.TestFault ?? WorkerTestFault.None;
+            var fault = request.Scan?.TestFault
+                ?? request.Parse?.Files?.Select(f => f?.TestFault ?? WorkerTestFault.None).FirstOrDefault(f => f != WorkerTestFault.None)
+                ?? WorkerTestFault.None;
             if (fault != WorkerTestFault.None && service.TestHooksEnabled && TryWriteFaultyResponse(request, fault))
             {
                 continue;
             }
 
             var response = await service.HandleAsync(request).ConfigureAwait(false);
+            int cap = ResponseCap(request);
             byte[] bytes;
             try
             {
-                bytes = WorkerJson.Serialize(response, WorkerLimits.MaxResponseBytes);
+                bytes = WorkerJson.Serialize(response, cap);
             }
             catch (WorkerProtocolException ex)
             {
@@ -51,7 +54,7 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
 
             try
             {
-                WorkerFraming.Write(output, bytes, WorkerLimits.MaxResponseBytes);
+                WorkerFraming.Write(output, bytes, cap);
                 if (fault == WorkerTestFault.TrailingFrame && service.TestHooksEnabled)
                 {
                     var extra = WorkerService.Failed(request.Id + 1, "an unsolicited frame (test hook)");
@@ -64,6 +67,12 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
             }
         }
     }
+
+    /// <summary>The frame cap the broker reads this request's answer with (a parse batch scales with its file count).</summary>
+    private static int ResponseCap(WorkerRequest request) =>
+        request.Kind == WorkerRequestKind.Parse && request.Parse?.Files is { } files
+            ? WorkerLimits.MaxParseResponseBytes(files.Count)
+            : WorkerLimits.MaxResponseBytes;
 
     /// <summary>Test hooks only: answers with a deliberately broken response. False for faults handled by the service.</summary>
     private bool TryWriteFaultyResponse(WorkerRequest request, WorkerTestFault fault)

@@ -125,40 +125,108 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             return;
         }
 
-        foreach (var item in items)
+        var wanted = items.Where(item => !((item.IsDirectory && !item.IsNameSurrogate) || item.Name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)));
+        foreach (var chunk in wanted.Chunk(WorkerLimits.MaxParseBatch))
         {
             if (!context.CanContinue)
             {
                 return;
             }
 
-            if ((item.IsDirectory && !item.IsNameSurrogate) || item.Name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase))
+            var links = ParseLinks(context, handle, display, chunk, sid, environment);
+            foreach (var item in chunk)
             {
-                continue;
-            }
+                if (!context.CanContinue)
+                {
+                    return;
+                }
 
-            CollectItem(context, handle, display, item, sid, environment, approved);
+                if (links.TryGetValue(item.Name, out var link) && link.Failed)
+                {
+                    continue; // already reported
+                }
+
+                CollectItem(context, display, item, sid, environment, approved, link.Parsed);
+            }
         }
     }
 
+    private static bool IsShortcut(SafeTreeEntry item) => !item.IsNameSurrogate && item.Name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A shortcut of a chunk: its parse result (null when it couldn't be opened), or Failed when reading it threw.</summary>
+    private readonly record struct LinkParse(PersistenceParseResult? Parsed, bool Failed);
+
+    /// <summary>C2: opens the chunk's shortcuts and has the worker parse them in one request. Open problems are reported here.</summary>
+    private static Dictionary<string, LinkParse> ParseLinks(
+        PersistenceContext context, SafeFileHandle folder, string display, IReadOnlyList<SafeTreeEntry> chunk, string? sid, EnvironmentBlock environment)
+    {
+        var links = new Dictionary<string, LinkParse>(StringComparer.OrdinalIgnoreCase);
+        var opened = new List<(SafeFileHandle File, string Name, string Path)>();
+        try
+        {
+            foreach (var item in chunk.Where(IsShortcut))
+            {
+                string itemPath = SafeTree.Child(display, item.Name);
+                try
+                {
+                    if (SafeFolderReader.OpenForParsing(folder, item.Name, ShellLinkParser.MaxSize, out var failure, out var message) is { } file)
+                    {
+                        opened.Add((file, item.Name, itemPath));
+                    }
+                    else
+                    {
+                        context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, failure, message);
+                        links[item.Name] = new LinkParse(null, Failed: false);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    ItemUnreadable(context, sid, itemPath, ex); // section C review M3: one item's problem is that item's issue
+                    links[item.Name] = new LinkParse(null, Failed: true);
+                }
+            }
+
+            var results = context.ParseBatch(
+                opened.Select(o => new PersistenceParseInput(o.File, WorkerParseKind.ShellLink, o.Path)).ToArray(), PersistenceKind.StartupFolder);
+            for (int i = 0; i < opened.Count; i++)
+            {
+                links[opened[i].Name] = new LinkParse(results[i], Failed: false);
+            }
+        }
+        finally
+        {
+            foreach (var (file, _, _) in opened)
+            {
+                file.Dispose();
+            }
+        }
+
+        return links;
+    }
+
+    private static void ItemUnreadable(PersistenceContext context, string? sid, string itemPath, Exception ex) =>
+        context.AddIssue(PersistenceKind.StartupFolder, sid, itemPath, PersistenceIssueReason.Error, $"The item can't be read ({ex.GetType().Name}).");
+
     /// <summary>One item; its failure is reported and the next item is collected (section C review M3).</summary>
     private static void CollectItem(
-        PersistenceContext context, SafeFileHandle folder, string display, SafeTreeEntry item, string? sid, EnvironmentBlock environment, IRegistryKeyReader? approved)
+        PersistenceContext context, string display, SafeTreeEntry item, string? sid, EnvironmentBlock environment, IRegistryKeyReader? approved,
+        PersistenceParseResult? link)
     {
         try
         {
             bool enabled = approved is null || RegistryAutorunSource.IsApproved(PersistenceContext.ReadValue(approved, item.Name));
-            var (command, resolution) = Resolve(context, folder, display, item, environment);
+            var (command, resolution) = Resolve(context, display, item, environment, link);
             context.Add(new PersistenceEntry(PersistenceKind.StartupFolder, sid, display, item.Name, command, resolution, enabled));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            context.AddIssue(PersistenceKind.StartupFolder, sid, SafeTree.Child(display, item.Name), PersistenceIssueReason.Error, $"The item can't be read ({ex.GetType().Name}).");
+            ItemUnreadable(context, sid, SafeTree.Child(display, item.Name), ex);
         }
     }
 
+    /// <param name="parsed">A shortcut's parse result from <see cref="ParseLinks"/>; null when it couldn't be opened (already reported).</param>
     private static (string Command, ResolvedCommand Resolution) Resolve(
-        PersistenceContext context, SafeFileHandle folder, string display, SafeTreeEntry item, EnvironmentBlock environment)
+        PersistenceContext context, string display, SafeTreeEntry item, EnvironmentBlock environment, PersistenceParseResult? parsed)
     {
         string itemPath = SafeTree.Child(display, item.Name);
         if (item.IsNameSurrogate)
@@ -166,21 +234,18 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             return (itemPath, ResolvedCommand.Unresolved(TargetUnresolvedReason.LinkNotFollowed));
         }
 
-        if (!item.Name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+        if (!IsShortcut(item))
         {
             return (itemPath, CorePersistenceText.NormalizeLocalPath(itemPath) is { } self
                 ? ResolvedCommand.Resolved(self)
                 : ResolvedCommand.Unresolved(TargetUnresolvedReason.Malformed));
         }
 
-        using var file = SafeFolderReader.OpenForParsing(folder, item.Name, ShellLinkParser.MaxSize, out var failure, out var message);
-        if (file is null)
+        if (parsed is null)
         {
-            context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, failure, message);
             return (itemPath, ResolvedCommand.Unresolved(TargetUnresolvedReason.ShortcutUnreadable));
         }
 
-        var parsed = context.Parse(file, WorkerParseKind.ShellLink, itemPath, PersistenceKind.StartupFolder);
         if (parsed.Status == PersistenceParseStatus.Malformed)
         {
             context.AddIssue(PersistenceKind.StartupFolder, environment.UserSid, itemPath, PersistenceIssueReason.Malformed, parsed.Message ?? "The shortcut can't be parsed.");

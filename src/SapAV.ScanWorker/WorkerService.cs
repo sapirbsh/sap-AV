@@ -140,26 +140,85 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
         };
     }
 
-    /// <summary>Review C H2: parses a brokered shortcut or task definition here, never in the engine.</summary>
+    /// <summary>
+    /// Review C H2: parses brokered shortcuts and task definitions here, never in the engine. C2: a batch, one answer per
+    /// file in order; one file's problem (over the cap, a read error, a parser exception) is that file's error answer.
+    /// </summary>
     private WorkerResponse Parse(long id, WorkerParseRequest parse)
+    {
+        if (parse.Files is not { Count: > 0 and <= WorkerLimits.MaxParseBatch } files)
+        {
+            return Failed(id, $"A parse request needs 1 to {WorkerLimits.MaxParseBatch} files.");
+        }
+
+        if (files.Any(f => f is null))
+        {
+            return Failed(id, "A parse request has a null file.");
+        }
+
+        if (!TestHooksEnabled && files.Any(f => f.TestFault != WorkerTestFault.None))
+        {
+            return Failed(id, "Test faults are disabled in this worker.");
+        }
+
+        var answers = new WireParsedFile?[files.Count];
+        for (int i = 0; i < files.Count; i++)
+        {
+            answers[i] = ParseOne(files[i]);
+        }
+
+        return new WorkerResponse
+        {
+            Id = id,
+            Kind = WorkerResponseKind.Parsed,
+            Rules = null,
+            Report = null,
+            Probe = null,
+            Parsed = answers,
+            Error = null,
+        };
+    }
+
+    private static WireParsedFile ParseOne(WorkerParseFile parse)
     {
         if (parse.TestFault != WorkerTestFault.None)
         {
-            if (!TestHooksEnabled)
-            {
-                return Failed(id, "Test faults are disabled in this worker.");
-            }
-
             TestHooks.Inject(parse.TestFault);
+            if (parse.TestFault == WorkerTestFault.KeepHandleCopy)
+            {
+                TestHooks.KeepCopy(parse.FileHandle);
+            }
         }
 
+        try
+        {
+            return Read(parse) is { } content
+                ? WireParsedFileCodec.ParseInWorker(parse.Kind, content)
+                : ParseError(parse.Kind, $"The file is over the {WireParsedFileCodec.MaxFileBytes(parse.Kind)}-byte cap.");
+        }
+        catch (Exception ex)
+        {
+            return ParseError(parse.Kind, $"The sandboxed parser refused the file: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static WireParsedFile ParseError(WorkerParseKind kind, string error) => new()
+    {
+        Kind = kind,
+        Error = SafeText.SingleLine(error, WorkerLimits.MaxTextLength) is { Length: > 0 } e ? e : "error",
+        Task = null,
+        Link = null,
+    };
+
+    /// <summary>The file's bytes, or null when it is over the cap for its kind.</summary>
+    private static byte[]? Read(WorkerParseFile parse)
+    {
         // Not owned here: the broker closes this handle value in this process after the response.
         using var file = new SafeFileHandle((IntPtr)parse.FileHandle, ownsHandle: false);
         long length = RandomAccess.GetLength(file);
-        int cap = WireParsedFileCodec.MaxFileBytes(parse.Kind);
-        if (length > cap)
+        if (length > WireParsedFileCodec.MaxFileBytes(parse.Kind))
         {
-            return Failed(id, $"The file is {length} bytes, over the {cap}-byte cap.");
+            return null;
         }
 
         var content = new byte[length];
@@ -175,16 +234,7 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             read += n;
         }
 
-        return new WorkerResponse
-        {
-            Id = id,
-            Kind = WorkerResponseKind.Parsed,
-            Rules = null,
-            Report = null,
-            Probe = null,
-            Parsed = WireParsedFileCodec.ParseInWorker(parse.Kind, read == content.Length ? content : content[..read]),
-            Error = null,
-        };
+        return read == content.Length ? content : content[..read];
     }
 
     private WorkerResponse Probe(long id, WorkerProbeRequest probe)

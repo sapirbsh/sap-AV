@@ -85,6 +85,51 @@ public class WireParsedFileCodecTests
     }
 
     [Fact]
+    public void ABatchAnswer_IsRebuiltInOrder_AfterStrictJson()
+    {
+        var response = new WorkerResponse
+        {
+            Id = 7, Kind = WorkerResponseKind.Parsed, Rules = null, Report = null, Probe = null, Error = null,
+            Parsed = [Task(Exec("one.exe")), WireParsedFileCodec.ParseInWorker(WorkerParseKind.ShellLink, new byte[8]), Task(Exec("three.exe"))],
+        };
+        var roundTripped = WorkerJson.Deserialize<WorkerResponse>(WorkerJson.Serialize(response, WorkerLimits.MaxParseResponseBytes(3)));
+
+        var parsed = WireParsedFileCodec.FromWire(roundTripped.Parsed!, [WorkerParseKind.ScheduledTask, WorkerParseKind.ShellLink, WorkerParseKind.ScheduledTask]);
+
+        Assert.Equal("one.exe", parsed[0].Task!.Actions[0].Command);
+        Assert.NotNull(parsed[1].Error);
+        Assert.Equal("three.exe", parsed[2].Task!.Actions[0].Command);
+    }
+
+    [Fact]
+    public void ABatchAnswer_WithTheWrongCount_ANull_OrOneBrokenFile_IsAProtocolViolation()
+    {
+        WorkerParseKind[] two = [WorkerParseKind.ScheduledTask, WorkerParseKind.ScheduledTask];
+        IReadOnlyList<WireParsedFile?>[] broken =
+        [
+            [Task(Exec())], // one answer for two files
+            [Task(Exec()), Task(Exec()), Task(Exec())],
+            [Task(Exec()), null],
+            [Task(Exec()), Task(Exec(new string('x', WireParsedFileCodec.MaxTotalCharacters + 1)))], // per-file caps hold in a batch
+            [Task(Exec()), Task(Exec()) with { Kind = WorkerParseKind.ShellLink }],
+        ];
+
+        foreach (var wire in broken)
+        {
+            Assert.Throws<WorkerProtocolException>(() => WireParsedFileCodec.FromWire(wire, two));
+        }
+    }
+
+    [Fact]
+    public void TheBatchResponseCap_ScalesWithTheFileCount_AndIsBounded()
+    {
+        Assert.Equal(WorkerLimits.MaxResponseBytes, WorkerLimits.MaxParseResponseBytes(1));
+        Assert.Equal(WorkerLimits.MaxResponseBytes * WorkerLimits.MaxParseBatch, WorkerLimits.MaxParseResponseBytes(WorkerLimits.MaxParseBatch));
+        Assert.Equal(WorkerLimits.MaxParseResponseBytes(WorkerLimits.MaxParseBatch), WorkerLimits.MaxParseResponseBytes(int.MaxValue)); // never more
+        Assert.Equal(WorkerLimits.MaxResponseBytes, WorkerLimits.MaxParseResponseBytes(0));
+    }
+
+    [Fact]
     public void AShortcutUnderTheCap_IsCarriedWhole()
     {
         var builder = new TestSupport.ShellLinkBuilder { IdListPath = @"C:\Tools\a.exe", Arguments = new string('x', 8000) };

@@ -93,6 +93,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             return;
         }
 
+        var batch = new List<(string Name, string TaskPath)>(WorkerLimits.MaxParseBatch);
         foreach (var item in items)
         {
             string taskPath = folder.TaskPath + @"\" + item.Name;
@@ -130,33 +131,87 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
                 continue;
             }
 
-            if (!context.CanContinue || context.ParserDown)
+            batch.Add((item.Name, taskPath));
+            if (batch.Count == WorkerLimits.MaxParseBatch && !CollectBatch(context, folder.Handle, batch))
             {
                 return;
             }
-
-            try
-            {
-                CollectTask(context, folder.Handle, item.Name, taskPath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-            {
-                // Section C review M3: one task's problem is that task's issue, not the whole source's.
-                context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Error, $"The task can't be read ({ex.GetType().Name}).");
-            }
         }
+
+        CollectBatch(context, folder.Handle, batch);
     }
 
-    private static void CollectTask(PersistenceContext context, SafeFileHandle folder, string name, string taskPath)
+    /// <summary>
+    /// C2: opens up to <see cref="WorkerLimits.MaxParseBatch"/> task files, has the worker parse them in one request and
+    /// collects each. Empties <paramref name="batch"/>; false when the collection must stop (budget, caps, parser down).
+    /// </summary>
+    private static bool CollectBatch(PersistenceContext context, SafeFileHandle folder, List<(string Name, string TaskPath)> batch)
     {
-        using var file = SafeFolderReader.OpenForParsing(folder, name, TaskXml.MaxBytes, out var failure, out var message);
-        if (file is null)
+        if (batch.Count == 0)
         {
-            context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, failure, message);
-            return;
+            return true;
         }
 
-        var parsed = context.Parse(file, WorkerParseKind.ScheduledTask, taskPath, PersistenceKind.ScheduledTask);
+        if (!context.CanContinue || context.ParserDown)
+        {
+            batch.Clear();
+            return false;
+        }
+
+        var opened = new List<(SafeFileHandle File, string TaskPath)>(batch.Count);
+        try
+        {
+            foreach (var (name, taskPath) in batch)
+            {
+                try
+                {
+                    if (SafeFolderReader.OpenForParsing(folder, name, TaskXml.MaxBytes, out var failure, out var message) is { } file)
+                    {
+                        opened.Add((file, taskPath));
+                    }
+                    else
+                    {
+                        context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, failure, message);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    TaskUnreadable(context, taskPath, ex); // section C review M3: one task's problem is that task's issue
+                }
+            }
+
+            var results = context.ParseBatch(
+                opened.Select(o => new PersistenceParseInput(o.File, WorkerParseKind.ScheduledTask, o.TaskPath)).ToArray(), PersistenceKind.ScheduledTask);
+            for (int i = 0; i < opened.Count; i++)
+            {
+                try
+                {
+                    CollectTask(context, opened[i].TaskPath, results[i]);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    TaskUnreadable(context, opened[i].TaskPath, ex);
+                }
+            }
+        }
+        finally
+        {
+            foreach (var (file, _) in opened)
+            {
+                file.Dispose();
+            }
+
+            batch.Clear();
+        }
+
+        return !context.ParserDown;
+    }
+
+    private static void TaskUnreadable(PersistenceContext context, string taskPath, Exception ex) =>
+        context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Error, $"The task can't be read ({ex.GetType().Name}).");
+
+    private static void CollectTask(PersistenceContext context, string taskPath, PersistenceParseResult parsed)
+    {
         if (parsed.Status == PersistenceParseStatus.Malformed)
         {
             context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Malformed, parsed.Message ?? "The task file can't be parsed.");

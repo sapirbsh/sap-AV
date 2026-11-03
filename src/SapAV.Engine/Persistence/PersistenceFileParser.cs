@@ -37,7 +37,34 @@ internal interface IPersistenceFileParser
     /// <param name="displayPath">For the crash tracking and the log only.</param>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// C2: several files at once, one result per file in order (the sandboxed broker sends them to the worker in batches).
+    /// One file's failure is that file's Malformed result. By default each file goes through <see cref="ParseAsync"/>.
+    /// </summary>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        var results = new PersistenceParseResult[files.Count];
+        for (int i = 0; i < files.Count; i++)
+        {
+            try
+            {
+                results[i] = await ParseAsync(files[i].File, files[i].Kind, files[i].DisplayPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
+            {
+                results[i] = PersistenceParseResult.Malformed($"The sandboxed parser failed on this file ({ex.GetType().Name})."); // review C M3
+            }
+        }
+
+        return results;
+    }
 }
+
+/// <summary>One file for <see cref="IPersistenceFileParser.ParseBatchAsync"/>; the caller keeps <paramref name="File"/> open and closes it.</summary>
+internal sealed record PersistenceParseInput(SafeFileHandle File, WorkerParseKind Kind, string DisplayPath);
 
 /// <summary>
 /// No sandbox (InProcess debugging mode, a refused configuration, or nothing registered): nothing is parsed, so the tasks and

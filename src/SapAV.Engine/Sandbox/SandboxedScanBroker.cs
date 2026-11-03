@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Engine.Persistence;
 using Microsoft.Extensions.Logging;
@@ -184,23 +185,104 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
         }
     }
 
+    /// <summary>One file: a batch of one (see <see cref="ParseBatchAsync"/>).</summary>
+    public async Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
+        (await ParseBatchAsync([new PersistenceParseInput(file, kind, displayPath)], cancellationToken).ConfigureAwait(false))[0];
+
     /// <summary>
-    /// Section C review H2: one shortcut or task definition through the worker, on a read-only duplicate of
-    /// <paramref name="file"/>. The answer is validated like any worker output. A crash, hang or broken answer replaces the
-    /// worker and is a Malformed result; a file version that does that <see cref="SandboxOptions.MaxFailuresPerFile"/> times
-    /// isn't sent again. Only "no worker at all" is Unavailable (the file isn't to blame).
+    /// Section C review H2 + C2: shortcuts and task definitions through the worker, up to <see cref="WorkerLimits.MaxParseBatch"/>
+    /// per request, each on a read-only duplicate of its handle. The answers are validated like any worker output, and the
+    /// kept-handle check runs once per request over all of its handles. A crash, hang or broken answer replaces the worker;
+    /// a batch that does that is retried one file at a time, so only the file to blame gets a Malformed result, and a
+    /// file version that fails alone <see cref="SandboxOptions.MaxFailuresPerFile"/> times isn't sent again. Only "no
+    /// worker at all" is Unavailable (the files aren't to blame).
     /// </summary>
-    public async Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(file);
-        ArgumentNullException.ThrowIfNull(displayPath);
+        ArgumentNullException.ThrowIfNull(files);
         cancellationToken.ThrowIfCancellationRequested();
-        string key = "parse:" + FailureKey(displayPath, file, FileIdentity.TryCapture(file));
-        if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
+        var results = new PersistenceParseResult?[files.Count];
+        var send = new List<ParseItem>(files.Count);
+        for (int i = 0; i < files.Count; i++)
         {
-            return PersistenceParseResult.Malformed($"This file crashed or hung the sandboxed parser {previous} times; it is not sent to a worker again.");
+            var input = files[i] ?? throw new ArgumentException("A null file.", nameof(files));
+            string key = "parse:" + FailureKey(input.DisplayPath, input.File, FileIdentity.TryCapture(input.File));
+            if (_failures.Count(key) is var previous && previous >= _options.MaxFailuresPerFile)
+            {
+                results[i] = PersistenceParseResult.Malformed($"This file crashed or hung the sandboxed parser {previous} times; it is not sent to a worker again.");
+            }
+            else
+            {
+                send.Add(new ParseItem(i, input, key));
+            }
         }
 
+        foreach (var chunk in send.Chunk(WorkerLimits.MaxParseBatch))
+        {
+            await ParseChunkAsync(chunk, results, cancellationToken).ConfigureAwait(false);
+        }
+
+        return results!;
+    }
+
+    /// <summary>A file of a parse batch: its place in the caller's list, the input, and its failure-tracking key.</summary>
+    private sealed record ParseItem(int Index, PersistenceParseInput Input, string Key);
+
+    /// <summary>What one parse request came to: per-file results, or why the whole request failed.</summary>
+    private sealed record BatchOutcome(IReadOnlyList<PersistenceParseResult>? Results, string? Unavailable, string? Refused, WorkerRequestException? Failure);
+
+    private async Task ParseChunkAsync(IReadOnlyList<ParseItem> chunk, PersistenceParseResult?[] results, CancellationToken cancellationToken)
+    {
+        var outcome = await SendBatchAsync(chunk, cancellationToken).ConfigureAwait(false);
+        if (outcome.Results is { } parsed)
+        {
+            for (int k = 0; k < chunk.Count; k++)
+            {
+                results[chunk[k].Index] = parsed[k];
+            }
+
+            return;
+        }
+
+        if (outcome.Unavailable is { } why)
+        {
+            foreach (var item in chunk)
+            {
+                results[item.Index] = PersistenceParseResult.Unavailable(why);
+            }
+
+            return;
+        }
+
+        if (chunk.Count == 1)
+        {
+            var item = chunk[0];
+            results[item.Index] = outcome.Failure is { } failure
+                ? ParseFailed(item.Key, item.Input.DisplayPath, failure.Kind.ToString(), failure.Message)
+                : PersistenceParseResult.Malformed($"The sandboxed parser refused the file: {outcome.Refused}");
+            return;
+        }
+
+        // The batch can't say which file was to blame: each file again on its own, so only that one is a Malformed result.
+        _logger.LogWarning("A batch of {Count} definition files failed in the sandboxed parser ({Why}); parsing them one at a time.",
+            chunk.Count, outcome.Failure?.Message ?? outcome.Refused);
+        for (int k = 0; k < chunk.Count; k++)
+        {
+            await ParseChunkAsync([chunk[k]], results, cancellationToken).ConfigureAwait(false);
+            if (results[chunk[k].Index]!.Status == PersistenceParseStatus.Unavailable)
+            {
+                for (int rest = k + 1; rest < chunk.Count; rest++)
+                {
+                    results[chunk[rest].Index] = results[chunk[k].Index];
+                }
+
+                return;
+            }
+        }
+    }
+
+    private async Task<BatchOutcome> SendBatchAsync(IReadOnlyList<ParseItem> chunk, CancellationToken cancellationToken)
+    {
         RulePackage package;
         try
         {
@@ -209,7 +291,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
         catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
             _lastError = ex.Message;
-            return PersistenceParseResult.Unavailable($"The scan worker's rules can't be loaded ({ex.GetType().Name}).");
+            return new(null, $"The scan worker's rules can't be loaded ({ex.GetType().Name}).", null, null);
         }
 
         var slot = await RentAsync(ScanPriority.High, cancellationToken).ConfigureAwait(false);
@@ -223,10 +305,10 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             catch (WorkerRequestException ex)
             {
                 _lastError = ex.Message;
-                return PersistenceParseResult.Unavailable($"The sandboxed scan worker is unavailable: {ex.Message}");
+                return new(null, $"The sandboxed scan worker is unavailable: {ex.Message}", null, null);
             }
 
-            return await ParseInWorkerAsync(slot, worker, file, kind, displayPath, key, cancellationToken).ConfigureAwait(false);
+            return await ParseInWorkerAsync(slot, worker, chunk, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -235,79 +317,88 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
         }
     }
 
-    private async Task<PersistenceParseResult> ParseInWorkerAsync(
-        WorkerSlot slot, WorkerProcess worker, SafeFileHandle file, WorkerParseKind kind, string displayPath, string key, CancellationToken cancellationToken)
+    private async Task<BatchOutcome> ParseInWorkerAsync(WorkerSlot slot, WorkerProcess worker, IReadOnlyList<ParseItem> chunk, CancellationToken cancellationToken)
     {
-        IntPtr remote = IntPtr.Zero;
+        var remotes = new IntPtr[chunk.Count];
         try
         {
             WorkerResponse response;
             try
             {
-                remote = worker.DuplicateInto(file, WorkerProcess.ReadOnlyFileAccess);
-                response = await slot.ParseAsync(new WorkerParseRequest
+                var files = new WorkerParseFile[chunk.Count];
+                for (int k = 0; k < chunk.Count; k++)
                 {
-                    Kind = kind,
-                    FileHandle = remote,
-                    TestFault = ParseFaultInjector?.Invoke(displayPath) ?? WorkerTestFault.None,
-                }, cancellationToken).ConfigureAwait(false);
+                    remotes[k] = worker.DuplicateInto(chunk[k].Input.File, WorkerProcess.ReadOnlyFileAccess);
+                    files[k] = new WorkerParseFile
+                    {
+                        Kind = chunk[k].Input.Kind,
+                        FileHandle = remotes[k],
+                        TestFault = ParseFaultInjector?.Invoke(chunk[k].Input.DisplayPath) ?? WorkerTestFault.None,
+                    };
+                }
+
+                response = await slot.ParseAsync(new WorkerParseRequest { Files = files }, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 if (!worker.HasExited)
                 {
-                    worker.CloseInWorker(remote);
+                    foreach (var remote in remotes)
+                    {
+                        worker.CloseInWorker(remote);
+                    }
                 }
             }
 
-            switch (BrokeredHandles.Check(file))
+            // Review M-A, once per request: every brokered handle must be back to the broker's own one.
+            switch (BrokeredHandles.Check(chunk.Select(c => (SafeHandle?)c.Input.File).ToArray()))
             {
                 case BrokeredHandleState.StillHeld:
                     slot.Discard($"worker {slot.Index} kept a copy of a brokered file handle");
-                    throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation, "The scan worker kept a copy of the file handle; its answer was discarded.");
+                    throw new WorkerRequestException(WorkerFailureKind.ProtocolViolation, "The scan worker kept a copy of a file handle; its answer was discarded.");
 
                 case BrokeredHandleState.Unknown:
-                    slot.Discard($"worker {slot.Index}: the brokered handle could not be checked");
-                    throw new WorkerRequestException(WorkerFailureKind.Unavailable, "The brokered file handle could not be checked; the worker's answer was discarded.");
+                    slot.Discard($"worker {slot.Index}: the brokered handles could not be checked");
+                    throw new WorkerRequestException(WorkerFailureKind.Unavailable, "The brokered file handles could not be checked; the worker's answer was discarded.");
             }
 
             if (response.Kind == WorkerResponseKind.Failed)
             {
                 slot.Succeeded(); // the worker survived and said so
-                slot.CountFileAndMaybeRecycle();
-                return PersistenceParseResult.Malformed($"The sandboxed parser refused the file: {SafeText.SingleLine(response.Error ?? "?", WorkerLimits.MaxTextLength)}");
+                slot.CountFileAndMaybeRecycle(chunk.Count);
+                return new(null, null, SafeText.SingleLine(response.Error ?? "?", WorkerLimits.MaxTextLength), null);
             }
 
-            ParsedPersistenceFile parsed;
+            IReadOnlyList<ParsedPersistenceFile> parsed;
             try
             {
-                parsed = WireParsedFileCodec.FromWire(response.Parsed!, kind);
+                parsed = WireParsedFileCodec.FromWire(response.Parsed!, chunk.Select(c => c.Input.Kind).ToArray());
             }
             catch (WorkerProtocolException ex)
             {
                 slot.Kill(); // never reuse a worker that sent bad content
-                return ParseFailed(key, displayPath, nameof(WorkerFailureKind.ProtocolViolation), ex.Message);
+                return new(null, null, null, new WorkerRequestException(WorkerFailureKind.ProtocolViolation, ex.Message, ex));
             }
 
             slot.Succeeded();
-            slot.CountFileAndMaybeRecycle();
-            return parsed.Error is { } error
+            slot.CountFileAndMaybeRecycle(chunk.Count);
+            return new(parsed.Select(p => p.Error is { } error
                 ? PersistenceParseResult.Malformed(SafeText.SingleLine(error, WorkerLimits.MaxTextLength))
-                : new PersistenceParseResult(PersistenceParseStatus.Parsed, parsed.Task, parsed.Link, null);
+                : new PersistenceParseResult(PersistenceParseStatus.Parsed, p.Task, p.Link, null)).ToArray(), null, null, null);
         }
         catch (WorkerRequestException ex) when (ex.Kind == WorkerFailureKind.Unavailable)
         {
-            _lastError = ex.Message; // the worker is to blame (or unknown), not the file
-            return PersistenceParseResult.Unavailable(ex.Message);
+            _lastError = ex.Message; // the worker is to blame (or unknown), not the files
+            return new(null, ex.Message, null, null);
         }
         catch (WorkerRequestException ex)
         {
-            return ParseFailed(key, displayPath, ex.Kind.ToString(), ex.Message);
+            return new(null, null, null, ex);
         }
         catch (Win32Exception ex)
         {
-            slot.Kill(); // the worker went away between the start check and the duplication: not the file's fault
-            return PersistenceParseResult.Unavailable($"The scan worker could not receive the file handle: {ex.Message}");
+            slot.Kill(); // the worker went away between the start check and the duplication: not the files' fault
+            return new(null, $"The scan worker could not receive the file handle: {ex.Message}", null, null);
         }
     }
 
