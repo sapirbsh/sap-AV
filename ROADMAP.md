@@ -518,6 +518,18 @@ already-impersonating thread) are fixed in C1.
     from an `Additional` command. Show the command that matched.
   - **C2 (L5):** a `Win32Exception` while duplicating a handle marks the parser down for the whole collection. Retry once
     with a fresh slot.
+- **C2 batch-parse review (`27b65d3`; H1 solo retry ignored the collection budgets and M1 one thread per exchange were
+  fixed in the follow-up commit). Remaining:**
+  - **C2 (M2):** batch failures are charged to no file. A bad file costs a whole failed batch (up to 15 s + restart +
+    rules reload) on every collection until it has failed solo `MaxFailuresPerFile` times. A bomb that fails only inside
+    a batch is never charged. Remember the keys of files from a failed batch and send them solo first next time.
+  - **C2 (M3):** the parse answer cap rose to 8 MiB, and the whole answer is deserialized in the SYSTEM engine before
+    the per-file count and text caps apply (one ~8 MiB string, or >1M `null` entries). Compute the cap from the file
+    count × per-file worst case, or pre-scan with `Utf8JsonReader` and reject an over-long array or string first.
+  - **C2 (L3):** if `TerminateJobObject` fails after a timeout, the exchange thread stays blocked in `Read`. Log when
+    the 5 s exit wait expires, and cancel the read with `CancelSynchronousIo`.
+  - **C2 (L4):** missing tests: a hang inside a batch, two bad files in one batch, exact failure counts (innocent files
+    0, the bad one +1 per collection), cancellation during the solo pass.
 - **Flaky test:** `RemoteFileTests.AdminShare_IsRefusedByDefault_AndScannedOnlyWhenAllowed` failed once after 34 s
   under full-suite load (passes alone and in later runs), most likely an SMB timeout. Give it a generous timeout or
   mark it Slow at the section C tester pass.

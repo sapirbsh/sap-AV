@@ -14,7 +14,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after section C): Core 1351 passed + 1 skipped, Engine 590 passed + 10 skipped. Simulated clean machine: 0 failed.
+Tests (after section C): Core 1354 passed + 1 skipped, Engine 600 passed + 12 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`1fc1d95`).
 
 ## Section A — Detection engine (done)
@@ -141,14 +141,19 @@ clean machine; three combined runs in a row green; 0 build warnings.
 **Open items carried forward**
 - **Elevated collection timings (from CI, `1fc1d95`):** 34.2 s for 927 entries, of which **scheduled tasks 32.6 s**
   (212 task files, 28.8 s in sandbox parsing, about 136 ms per file, one sandbox request per file). Registry and services
-  take milliseconds. **Being fixed now** by batching the parse requests.
+  take milliseconds. **Fixed** (`27b65d3`, review fixes `b336fcd`). The cause was not per-request work but waiting:
+  each pipe exchange waited for a thread-pool thread, plus one background-priority round trip per file. Now up to 32
+  files go in one request, served by one dedicated I/O thread per worker. Local results for 200 files: idle 79 ms →
+  30 ms; busy CPU 3.5 s → 0.3 s; starved thread pool 15.8 s → 44 ms. Immediate review: no Critical. H1 (solo retries
+  ignored the collection budgets) and M1 (one thread per exchange) are fixed. M2/M3/L3/L4 are listed in ROADMAP
+  under section C.
 - **Quick Scan folder phases** were cut short by the 3-minute budget on this dev PC (large AppData); tune with the cache.
 - **Autostart judging is an arms race** (every launcher has its own argument tricks). The rule kept: if sap-AV can't see
   the real payload, the entry is Unverified, never Clean. Remaining launcher tricks are listed under E4.
 
-## Current status (2026-11-02)
+## Current status (2026-11-03)
 
-**Section C is done**, apart from one performance fix in progress (batching task parsing, see above). **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
+**Section C is done**, including the task-parsing performance fix (see above). **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
 Block & remove).
 
 **Open for the user**
