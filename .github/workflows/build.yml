@@ -33,22 +33,49 @@ jobs:
       - name: Annotate failed tests
         if: failure()
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = 'Continue'
           $count = 0
-          foreach ($trx in Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue) {
-            [xml]$doc = Get-Content $trx.FullName -Raw
-            $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
-            foreach ($r in (Select-Xml -Xml $doc -XPath "//t:UnitTestResult[@outcome='Failed']" -Namespace $ns)) {
-              $name = $r.Node.testName
-              $msg  = ($r.Node.Output.ErrorInfo.Message + ' | ' + $r.Node.Output.ErrorInfo.StackTrace) -replace "`r?`n", ' '
-              if ($msg.Length -gt 900) { $msg = $msg.Substring(0, 900) }
-              $msg = $msg -replace '%', '%25'
-              Write-Output "::error title=$name::$msg"
-              $count++
-              if ($count -ge 20) { break }
+          try {
+            foreach ($trx in @(Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue)) {
+              [xml]$doc = Get-Content -LiteralPath $trx.FullName -Raw
+              $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+              $ns.AddNamespace('t', 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010')
+              $counters = $doc.SelectSingleNode('//t:ResultSummary/t:Counters', $ns)
+              if ($counters) {
+                Write-Output "::notice title=$($trx.Name)::total $($counters.total), passed $($counters.passed), failed $($counters.failed), aborted $($counters.aborted), timeout $($counters.timeout)"
+              }
+              foreach ($node in @($doc.SelectNodes("//t:UnitTestResult[@outcome!='Passed' and @outcome!='NotExecuted']", $ns))) {
+                $name = [string]$node.GetAttribute('testName')
+                $m = $node.SelectSingleNode('t:Output/t:ErrorInfo/t:Message', $ns)
+                $s = $node.SelectSingleNode('t:Output/t:ErrorInfo/t:StackTrace', $ns)
+                $msg = "$($node.GetAttribute('outcome')): " + $(if ($m) { $m.InnerText } else { '' }) + ' | ' + $(if ($s) { $s.InnerText } else { '' })
+                $msg = ($msg -replace "`r?`n", ' ') -replace '%', '%25'
+                if ($msg.Length -gt 900) { $msg = $msg.Substring(0, 900) }
+                $name = ($name -replace '%', '%25') -replace '[:,]', '_'
+                Write-Output "::error title=$name::$msg"
+                $count++
+                if ($count -ge 20) { break }
+              }
             }
+            # A crashed or hung test host leaves its message in the run-level output, not in a test result.
+            foreach ($trx in @(Get-ChildItem TestResults -Filter *.trx -ErrorAction SilentlyContinue)) {
+              [xml]$doc = Get-Content -LiteralPath $trx.FullName -Raw
+              $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+              $ns.AddNamespace('t', 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010')
+              foreach ($t in @($doc.SelectNodes('//t:ResultSummary/t:RunInfos/t:RunInfo/t:Text', $ns))) {
+                $msg = ($t.InnerText -replace "`r?`n", ' ') -replace '%', '%25'
+                if ($msg.Length -gt 900) { $msg = $msg.Substring(0, 900) }
+                Write-Output "::error title=Test run message::$msg"
+              }
+            }
+          } catch {
+            $msg = "$_" -replace '%', '%25' -replace "`r?`n", ' '
+            Write-Output "::error title=Annotate step error::$msg"
           }
           Write-Output "Failed tests annotated: $count"
+          exit 0
 
       # Publish the elevated persistence-collection timings as a public notice (the runner is elevated, dev runs usually aren't).
       - name: Report elevated collection timings
