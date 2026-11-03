@@ -24,7 +24,10 @@ public sealed class RealTimeMonitorTests : IDisposable
     {
         var handler = new BudgetRecordingHandler();
         _rt.Handler = handler;
-        _rt.Write("mal-invoice.exe");
+        string path = _rt.Write("mal-invoice.exe");
+        // An elevated run (CI) creates files owned by Administrators, which use the engine's reserved budget.
+        string owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier))!.Value;
+        string expectedKey = owner is "S-1-5-18" or "S-1-5-32-544" ? "engine:RealTime" : "engine:RealTime:" + owner;
         _rt.Start();
 
         _rt.Events.Added(_rt.Watched, "mal-invoice.exe");
@@ -37,7 +40,7 @@ public sealed class RealTimeMonitorTests : IDisposable
         var (report, budget) = Assert.Single(handler.Seen);
         Assert.Equal(ScanTrigger.RealTime, report.Result.Item.Trigger);
         // Review D1 M2: the engine's real-time budget, per owner (a machine-wide folder here: the file's owner), never a requester's.
-        Assert.Equal("engine:RealTime:" + QuarantineTestContext.CurrentUser.Value, budget!.Alerts.Key);
+        Assert.Equal(expectedKey, budget!.Alerts.Key);
         Assert.False(budget.Alerts.Requested);
         Assert.Null(budget.Quota); // no per-user quota check for files a user drops (review C1 L6)
     }
