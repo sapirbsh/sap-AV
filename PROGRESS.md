@@ -9,12 +9,12 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | Not started |
+| D — Real-time + VirusTotal | In progress (D1 done + immediate review fixed; next D2) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after section C): Core 1354 passed + 1 skipped, Engine 600 passed + 12 skipped. Simulated clean machine: 0 failed.
+Tests (after D1): Core 1354 passed + 1 skipped, Engine 642 passed + 13 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`32ce339`).
 
 ## Section A — Detection engine (done)
@@ -156,9 +156,36 @@ clean machine; three combined runs in a row green; 0 build warnings.
 
 ## Current status (2026-11-03)
 
-**Section C is done**, including the task-parsing performance fix (see above). **D1 (real-time file monitoring) is
-being built now.** **Next:** section D (real-time file monitoring, VirusTotal, real-time persistence monitoring,
-Block & remove).
+**Section C is done**, including the task-parsing performance fix (see above).
+
+**D1 (real-time file monitoring) is done** (`7de7442`…`5953ced`):
+- **Watched folders:** each user's Downloads, Desktop, Documents, Temp and Startup, plus the machine Temp, Public and
+  the all-users Startup.
+- **Watching:** `ReadDirectoryChangesExW` on link-safe folder handles, not FileSystemWatcher, which follows junctions
+  as SYSTEM.
+- **Before scanning:** a separate "wait until unlocked" probe with backoff, capped at 2 minutes. Browser in-progress
+  downloads are scanned at their final rename.
+- **Queue:** events for one file are merged. Mark-of-the-Web files go first. Each folder has its own quota and folders
+  take turns. A storm or buffer overflow switches that folder to a bounded "rescan later".
+- **Folder re-checks:** every 5 minutes, so a folder that becomes a link stops being watched.
+- **Scanning:** through the existing sandboxed pipeline. Alert and quarantine budgets are per user. Only Malicious
+  files are quarantined automatically.
+- **Scan cache:** now also capped in bytes.
+
+**D1 immediate review: no Critical.** Fixed:
+- H1: an oplock holder could hang the real-time threads (`FILE_COMPLETE_IF_OPLOCKED` plus a `CancelSynchronousIo`
+  watchdog);
+- H2: one user's event storm could block real-time for everyone (per-folder quotas, round-robin);
+- M1–M3 and L1.
+
+The remaining Medium/Low items are in ROADMAP under "D1 immediate review".
+
+Two flaky tests fixed:
+- Defender's ML detection removed a test file (`MZ` + `.pdf.exe` + an internet zone);
+- a Full Scan pause test had a timing race.
+
+**Next:** D2 (VirusTotal client, cache, rate limiter), D3 (VT wiring + `%ProgramData%\sap-AV` ACL), D4 (real-time
+persistence monitoring), D5 (Block & remove), then the section D tester + reviewer pass.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -172,6 +199,6 @@ Block & remove).
 
 ## What's left
 
-- **D:** real-time file monitoring (D1), VirusTotal (D2, D3), real-time persistence monitoring (D4), Block & remove (D5),
-  then the section D tester + reviewer pass.
+- **D:** VirusTotal (D2, D3), real-time persistence monitoring (D4), Block & remove (D5), then the section D tester +
+  reviewer pass. (D1 done.)
 - Then E → F → G, ending with the Phase 1 security review (G5).

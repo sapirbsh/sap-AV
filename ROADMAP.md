@@ -614,6 +614,67 @@ symlinks in client roots → SMB/NTLM coercion), M3 (jobs keyed by SID only) and
 | D4 | engine-dev | Real-time persistence monitoring (registry, services, startup, tasks) with baseline diff → alerts | New HKCU Run value in a test key triggers an alert |
 | D5 | engine-dev | "Block & remove" with backup + restore for each persistence type | Remove → restore round-trip on HKCU test entries |
 
+**Notes from D1 (real-time file monitoring, built `7de7442`…`446f3b4`).** Closed in D1:
+- From the A2 review: the unlock probe, BlockedByAntivirus, `\\?\` paths and the remote check.
+- B3/D1 M3, L2 and L6; C1 D1 L6 (real-time part) and L7; "C1, before D1" M2; C5 D1 L1 (byte cap and path-length cap).
+
+Deferred:
+- **A7 / B5 (D1 + A2 M1, detection-dev):** byte-range-lock evasion. Read every worker content reader (hasher,
+  Authenticode, heuristics, YARA) from one mapped view. Until then, real-time retries Locked files within its 2-minute
+  wait and reports them Locked, never Clean.
+- **C5 hardening (its own step, before D4):** C5 D1 M1 (worker-supplied verdict/hash/rules fingerprint can poison the
+  cache), M2 (USB-as-fixed and VHD volumes use the cache), L7 (journal ID not bound to rows), and `quick_check`
+  blocking the first scan (rest of C5 L1). C5 D1 L2 (USN moves 2–3 s after a mapped write) is inherent; real-time
+  narrows it, because the probe waits while a writable view exists.
+- **C6 / Full Scan:** C5 D1 M6 (root skip lists by name only) and L4 (global, depth-first entry cap).
+- **Quarantine (C1 L6 rest):** O(N) metadata decryption per pipe request, and the 4 GiB global quota reachable by 8 users.
+- **C1 M3 interplay:** restored files are SYSTEM-owned, so real-time treats a restored Malicious file as "needs
+  confirmation" instead of quarantining it again. If restore ever sets the user as owner, real-time needs a "restored by
+  the user" allowlist.
+- **F:** real-time status and per-file results on the pipe.
+
+**D1 immediate review (no Critical).** Fixed in the D1 fix round:
+- H1: oplock holders stalled the real-time threads.
+- H2: no per-root queue quota or fairness.
+- M1: rescan busy-spin.
+- M2: one shared real-time budget for all users.
+- M3: real-time holding every worker.
+- L1: Parse overflow-safe bounds, and a parse failure treated as an overflow.
+
+Remaining:
+- **D1 follow-up (M4):** storm and overflow rescans filter by timestamps the user controls (backdated `evil.exe`
+  is skipped), and the 256 global rescan slots collapse a moved-in folder into a time-filtered whole-root rescan
+  (moved-in files keep their old times). Recover from the USN journal from the last good USN; never collapse a
+  `since: null` rescan into a time-filtered one; make the slot cap per root.
+- **D1 follow-up (M5):** a byte-range-locked file ends "Scanned / Locked" and is never looked at again, but can still
+  run (image mapping ignores range locks). Keep Locked files on a low-frequency recheck list and show them in status;
+  see also the A7/B5 mapped-view note above.
+- **D1 follow-up (M6):** the deny-writers scan open breaks apps that reopen a just-saved file for writing (SQLite,
+  logs, editors). For real-time, open fully shared and rely on the change-journal check (changed during the scan →
+  queue again). Keep deny-writers only for quarantine.
+- **D1 follow-up (L2):** folders deeper than MaxRescanDepth (32) aren't counted as an incomplete rescan. Count them
+  and log it.
+- **E / D1 (L3):** alternate data streams other than Zone.Identifier are never scanned (`wscript x.txt:a.js`). Queue
+  `file:stream` for non-trivial streams.
+- **D1 follow-up (L4):** rescans walk by path, not from the root handle. After a root rename, events give
+  DifferentFile until the next revalidation (5 min). Walk from the root handle, and revalidate on the first DifferentFile.
+- **D1 follow-up (L5):** a `.part` / `.crdownload` file whose wait expired and that is closed without a rename is
+  never scanned. Queue it again with a long backoff.
+- **D1 follow-up (L6):** a hard link to another user's file in your own Downloads makes SYSTEM scan it, and the
+  hash and verdict go to the alert. Skip or redact files with more than one link that the folder owner can't read.
+- **C5 (L7):** SQLITE_FULL from a really full disk prunes 25% of the cache on every Put. Prune only near
+  MaxPageCount. `max_page_count` below the current size is silently raised.
+- **Docs (L8):** a file written and run within the settle delay runs before it is scanned. Files in
+  `C:\Windows\Temp` are never auto-quarantined (protected folder).
+- **D1 follow-up (L9):** after a 30 s join timeout at shutdown, objects are disposed while a stuck thread may still
+  use them. Skip disposing when a join timed out.
+- **D1 fix round, open:** the watchdog is tested directly, not from the monitor's scheduler. `RealTimeStatus` has no
+  watchdog-cancellation counter (logged only). In machine-wide folders, members of one group can share a per-owner
+  budget (the owner SID can be set to a group they own).
+- **Tests and Defender:** Defender's ML detection (`Trojan:Script/Wacatac.H!ml`) removes test files that start with
+  "MZ", have a `.pdf.exe` name and carry an internet Zone.Identifier. Test markers avoid that combination, and a removed
+  test file fails with a clear "another antivirus removed it" message.
+
 **E. Cracked-software threat pack (detection-dev, engine-dev)**
 
 Detection rules and categories come first, then the scan-time collectors (wired into Quick + Full Scan), then the real-time
