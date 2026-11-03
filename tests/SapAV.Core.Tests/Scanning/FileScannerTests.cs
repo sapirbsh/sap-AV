@@ -180,6 +180,18 @@ public sealed class FileScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task OnlineNonAnswer_IsANote_NeverAFailure_AndTheLocalVerdictStands()
+    {
+        _online.NextNote = new ScanNote(ScanNoteLevel.Information, "VirusTotal not checked: the per-minute request budget is used up.");
+
+        var report = await Scanner().ScanAsync(Item());
+
+        Assert.Equal(ScanStatus.Scanned, report.Result.Status);
+        Assert.Equal(Verdict.Clean, report.Result.Verdict);
+        Assert.Contains(_online.NextNote, report.Notes);
+    }
+
+    [Fact]
     public async Task NoFindings_IsClean_WithHashAndSignatureStatus()
     {
         var report = await Scanner().ScanAsync(Item());
@@ -411,13 +423,14 @@ public sealed class FileScannerTests : IDisposable
     private sealed class FakeOnline : IOnlineHashLookup
     {
         public Detection? Next { get; set; }
+        public ScanNote? NextNote { get; set; }
         public OnlineLookupRequest? LastRequest { get; private set; }
         public int Calls { get; private set; }
-        public Task<Detection?> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default)
+        public Task<OnlineLookupOutcome> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default)
         {
             Calls++;
             LastRequest = request;
-            return Task.FromResult(Next);
+            return Task.FromResult(new OnlineLookupOutcome(Next, NextNote));
         }
     }
 }

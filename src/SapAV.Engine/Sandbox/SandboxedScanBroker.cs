@@ -649,11 +649,16 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
 
         var online = await _online.LookupAsync(
             new OnlineLookupRequest(result.Item, result.Sha256, result.SignatureStatus, result.Verdict ?? Verdict.Clean), cancellationToken).ConfigureAwait(false);
-        return online is null
+        if (online.Note is { } note)
+        {
+            report = report with { Notes = [.. report.Notes, note] };
+        }
+
+        return online.Detection is not { } detection
             ? report
             : report with
             {
-                Result = new ScanResult(result.Item, [.. result.Detections, online], result.Timestamp, result.Sha256, result.Status,
+                Result = new ScanResult(result.Item, [.. result.Detections, detection], result.Timestamp, result.Sha256, result.Status,
                     result.SignatureStatus, result.Signer),
             };
     }

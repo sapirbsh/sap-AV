@@ -11,12 +11,22 @@ namespace SapAV.Core.Scanning;
 public sealed record OnlineLookupRequest(ScanItem Item, string Sha256, SignatureStatus? SignatureStatus, Verdict LocalVerdict);
 
 /// <summary>
-/// Seam for the VirusTotal hash lookup (D2). <see cref="FileScanner"/> calls it only for files without a trusted
+/// What the online lookup adds to a scan: a detection (VirusTotal flagged the file), a note (a non-answer such as rate limited,
+/// no key or offline: review D2 M4, never a scan failure and never "Clean"), both, or nothing (not looked up).
+/// </summary>
+public sealed record OnlineLookupOutcome(Detection? Detection, ScanNote? Note)
+{
+    /// <summary>Not looked up, nothing to add.</summary>
+    public static OnlineLookupOutcome None { get; } = new(null, null);
+}
+
+/// <summary>
+/// Seam for the VirusTotal hash lookup (D2/D3). <see cref="FileScanner"/> calls it only for files without a trusted
 /// signature (Microsoft and OtherTrusted are never looked up, ROADMAP feature 3), after the local steps. The
 /// implementation decides the rest of the policy (risky extensions, Suspicious-only for scans, rate limits,
-/// cache) and returns null when it doesn't look up or has no finding. It must not throw for network errors.
+/// cache). It must not throw for network errors: those become a <see cref="OnlineLookupOutcome.Note"/>.
 /// </summary>
 public interface IOnlineHashLookup
 {
-    Task<Detection?> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default);
+    Task<OnlineLookupOutcome> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default);
 }

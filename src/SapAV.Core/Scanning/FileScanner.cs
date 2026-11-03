@@ -235,9 +235,14 @@ public sealed class FileScanner : IFileScanner
             var local = detections.Count == 0 ? Verdict.Clean : detections.Max(d => d.Verdict);
             var online = await _online.LookupAsync(new OnlineLookupRequest(item, sha256, signatureStatus, local), cancellationToken)
                 .ConfigureAwait(false);
-            if (online is not null)
+            if (online.Detection is { } onlineDetection)
             {
-                detections.Add(online);
+                detections.Add(onlineDetection);
+            }
+
+            if (online.Note is { } onlineNote)
+            {
+                notes.Add(onlineNote);
             }
         }
 
