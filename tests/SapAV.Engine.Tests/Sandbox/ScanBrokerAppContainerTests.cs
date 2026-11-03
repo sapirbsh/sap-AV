@@ -45,6 +45,13 @@ public sealed class ScanBrokerAppContainerTests(AppContainerFixture fixture) : I
         var sandboxed = await brokers.Sandboxed.ScanAsync(item);
         var inProcess = await brokers.InProcess.ScanAsync(item);
 
+        // A real antivirus removing or blocking the test file is named as such, never an opaque failure (and never a pass).
+        Assert.False(inProcess.Identity is null && inProcess.Hash.FailureReason is Core.Hashing.HashFailureReason.BlockedByAntivirus
+                or Core.Hashing.HashFailureReason.NotFound or Core.Hashing.HashFailureReason.IoError,
+            $"Another antivirus blocked or removed the test file ({inProcess.Hash.FailureReason}: {inProcess.Hash.ErrorMessage}); "
+            + "it must use content no antivirus flags.");
+        Assert.NotNull(inProcess.Identity);
+
         Assert.Equal(inProcess.Result with { Timestamp = default }, sandboxed.Result with { Timestamp = default });
         Assert.Equal(inProcess.Hash, sandboxed.Hash);
         Assert.Equal(inProcess.Signature, sandboxed.Signature);
@@ -79,8 +86,10 @@ public sealed class ScanBrokerAppContainerTests(AppContainerFixture fixture) : I
     [RequiresFact(Requires.AppContainer)]
     public async Task DownloadedMarkedFile_WithMotw_SameVerdictAndMark_AsInProcess()
     {
+        // No "MZ" prefix: an MZ-looking .pdf.exe with an internet Zone.Identifier is what Defender's ML flags
+        // (Trojan:Script/Wacatac.H!ml) and removes. The marker rule, not the header, makes it Malicious here.
         var path = Path.Combine(_dir, "invoice.pdf.exe");
-        File.WriteAllText(path, "MZ sapav-b5-marker");
+        File.WriteAllText(path, "plain text sapav-b5-marker");
         File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://downloads.example.test/invoice.pdf.exe\r\n");
 
         var (sandboxed, _) = await BothAsync(Brokers(new FakeRulesSource(ScanBrokerSupervisionTests.MarkerRule)), path);

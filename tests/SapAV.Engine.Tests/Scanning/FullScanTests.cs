@@ -32,6 +32,12 @@ internal sealed class FullScanHarness : IDisposable
         var inner = Jobs.Broker.OnScan!;
         Jobs.Broker.OnScan = async (item, file, token) =>
         {
+            Interlocked.Increment(ref _entered);
+            if (Permits is { } permits)
+            {
+                await permits.WaitAsync(token); // the test decides how far the scan gets (no timing)
+            }
+
             lock (Scanned)
             {
                 Scanned.Add(item.Path);
@@ -58,6 +64,14 @@ internal sealed class FullScanHarness : IDisposable
     public List<string> Scanned { get; } = [];
 
     public TimeSpan Delay { get; set; }
+
+    /// <summary>When set, each scan takes one permit first (it waits, cancellably, while none is free).</summary>
+    public SemaphoreSlim? Permits { get; set; }
+
+    private int _entered;
+
+    /// <summary>Scans that reached the broker (including those waiting for a permit).</summary>
+    public int Entered => Volatile.Read(ref _entered);
 
     public FullScanFactory Factory()
     {
@@ -269,23 +283,28 @@ public sealed class FullScanTests(ITestOutputHelper output)
     [Fact]
     public async Task PauseResumeCancel_WorkAcrossTheDriveWalk()
     {
-        using var f = new FullScanHarness { Delay = TimeSpan.FromMilliseconds(30) };
+        // Permits, not delays: the job can't finish behind the test's back when the suite's thread pool is busy.
+        using var permits = new SemaphoreSlim(3);
+        using var f = new FullScanHarness { Permits = permits };
         for (int i = 0; i < 60; i++)
         {
             f.Write($@"data\file{i}.bin", $"content {i}");
         }
 
         var job = f.Start();
-        await WaitUntil(() => f.Scanned.Count >= 3);
+        await WaitUntil(() => job.GetProgress().FilesDone >= 3 && f.Entered >= 5); // both scan threads now wait at the broker
         Assert.True(job.Pause());
+        permits.Release(2); // the two files in flight finish; the pause stops anything new
         await JobWait.ForState(job, ScanJobState.Paused);
         long done = job.GetProgress().FilesDone;
+        int entered = f.Entered;
         await Task.Delay(200);
         Assert.Equal(done, job.GetProgress().FilesDone); // no progress while paused
+        Assert.Equal(entered, f.Entered);
         Assert.Equal(ScanJobState.Paused, job.State);
 
         Assert.True(job.Resume());
-        await WaitUntil(() => job.GetProgress().FilesDone > done);
+        await WaitUntil(() => f.Entered > entered); // scanning resumed (held at the broker until the cancel)
         Assert.True(job.Cancel());
         await JobWait.Done(job);
 

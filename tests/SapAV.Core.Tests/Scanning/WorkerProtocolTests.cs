@@ -102,8 +102,12 @@ public sealed class WorkerProtocolTests : IDisposable
     [Fact]
     public async Task Codec_RoundTrip_KeepsTheVerdict_WithTheEnginesItemAndTime()
     {
-        var path = _dir.WriteFile("report.pdf.exe", Encoding.ASCII.GetBytes("MZ sapav-b5-marker"));
+        // No "MZ" prefix: an MZ-looking .pdf.exe is what Defender's ML (Trojan:Script/Wacatac.H!ml) flags and removes. The marker
+        // rule, not the header, makes it Malicious here.
+        var path = _dir.WriteFile("report.pdf.exe", Encoding.ASCII.GetBytes("plain text sapav-b5-marker"));
         var original = await Scanner().ScanAsync(Item(path));
+        Assert.False(original.Hash.FailureReason is Core.Hashing.HashFailureReason.BlockedByAntivirus or Core.Hashing.HashFailureReason.NotFound,
+            $"Another antivirus blocked or removed the test file ({original.Hash.FailureReason}); it must use content no antivirus flags.");
         Assert.Equal(Verdict.Malicious, original.Result.Verdict);
 
         var json = WorkerJson.Serialize(WireReportCodec.ToWire(original), WorkerLimits.MaxResponseBytes);

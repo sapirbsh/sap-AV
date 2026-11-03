@@ -219,7 +219,7 @@ public sealed class ScanBrokerSupervisionTests : IDisposable
     public async Task LegitimateScans_NeverTripTheHandleCheck()
     {
         using var broker = Broker();
-        var motw = File("download.exe", "MZ text");
+        var motw = File("download.exe", "plain text"); // no "MZ": an MZ-looking download with a Zone.Identifier draws Defender's ML
         System.IO.File.WriteAllText(motw.Path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
         var items = new[]
         {
