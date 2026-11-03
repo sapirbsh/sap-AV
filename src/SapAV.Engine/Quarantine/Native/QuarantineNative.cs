@@ -66,9 +66,13 @@ internal static unsafe class QuarantineNative
     /// <paramref name="root"/>, never resolving a path from the root of the namespace. Returns null and the Win32
     /// error on failure.
     /// </summary>
+    /// <param name="synchronous">
+    /// False only for D1's directory watch: an overlapped handle (no FILE_SYNCHRONOUS_IO_NONALERT, no SYNCHRONIZE) for
+    /// ReadDirectoryChangesExW on the thread pool. Everything else opens synchronous handles.
+    /// </param>
     public static SafeFileHandle? OpenRelative(
         SafeHandle root, string name, uint access, uint share, uint disposition, uint options, out int win32Error,
-        uint objectAttributes = ObjCaseInsensitive, uint fileAttributes = 0)
+        uint objectAttributes = ObjCaseInsensitive, uint fileAttributes = 0, bool synchronous = true)
     {
         bool added = false;
         root.DangerousAddRef(ref added);
@@ -92,8 +96,8 @@ internal static unsafe class QuarantineNative
                     SecurityQualityOfService = &sqos,
                 };
 
-                int status = NtCreateFile(out IntPtr handle, access | Synchronize, &attributes, out _, IntPtr.Zero,
-                    fileAttributes, share, disposition, options | FileSynchronousIoNonAlert, IntPtr.Zero, 0);
+                int status = NtCreateFile(out IntPtr handle, synchronous ? access | Synchronize : access, &attributes, out _, IntPtr.Zero,
+                    fileAttributes, share, disposition, synchronous ? options | FileSynchronousIoNonAlert : options, IntPtr.Zero, 0);
                 if (status < 0)
                 {
                     win32Error = (int)RtlNtStatusToDosError(status);

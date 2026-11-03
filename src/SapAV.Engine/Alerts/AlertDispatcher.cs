@@ -58,6 +58,10 @@ public interface IAlertDispatcher
 /// the other half is always free for the engine's own (real-time) alerts: a user flood can push only that user's alerts
 /// into the summary, never an engine or real-time Malicious alert.</para>
 /// <para>The summary lists up to <see cref="MaxSummaryHashes"/> distinct SHA-256 values of what was held back.</para>
+/// <para><b>"Malicious alerts are never dropped" has one exception</b> (review C1 L7): a Malicious alert from a job a user
+/// requested over the pipe counts against that user's half of the queue, so when that half is full it is dropped and only
+/// counted (with its SHA-256) in the summary. Malicious alerts on the engine's own budgets (real-time monitoring, engine
+/// scans) are never limited by user-requested jobs; the scan result itself always keeps the verdict.</para>
 /// </remarks>
 public sealed class AlertDispatcher : IAlertDispatcher, IDisposable
 {

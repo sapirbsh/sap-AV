@@ -107,6 +107,11 @@ public static class EngineHost
         builder.Services.Configure<Scanning.Checks.FullScanOptions>(builder.Configuration.GetSection(Scanning.Checks.FullScanOptions.SectionName));
         builder.Services.AddSingleton(Scanning.Checks.FullScanFactory.Create);
 
+        // Real-time monitoring (D1): handle-bound folder watches, wait-until-unlocked, a bounded queue, scans through the
+        // same pipeline as scan jobs (sandboxed worker, cache, alerts, auto-quarantine) on the engine's real-time budget.
+        builder.Services.Configure<RealTime.RealTimeOptions>(builder.Configuration.GetSection(RealTime.RealTimeOptions.SectionName));
+        builder.Services.AddHostedService<RealTime.RealTimeService>();
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();
