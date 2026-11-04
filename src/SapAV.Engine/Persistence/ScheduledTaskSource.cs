@@ -16,7 +16,8 @@ namespace SapAV.Engine.Persistence;
 /// <para>A task whose principal is a user SID gets that user as its scope and is expanded with their environment; for
 /// such a task the user's own <c>HKU\&lt;SID&gt;_Classes\CLSID</c> is checked first, because it overrides the machine
 /// registration (COM hijacking, flagged <see cref="ResolutionFlag.UserComOverride"/>). Principals given as names or
-/// groups use the machine environment: resolving a name to a SID could contact a domain controller.</para>
+/// groups use the machine environment: resolving a name to a SID could contact a domain controller. D4 (M5 / M10): unless
+/// they are service accounts, such tasks run in some user's session, so every loaded user's Classes override is checked.</para>
 /// <para>Limitation: a task deleted from the folder but left in the registry TaskCache (or hidden by removing its
 /// security descriptor there) isn't seen here; cross-checking TaskCache belongs to D4.</para>
 /// </remarks>
@@ -244,7 +245,9 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             var action = task.Actions[i];
             if (action.ComClassId is { } clsid)
             {
-                var resolution = ResolveComHandler(context, clsid, user, profile?.HiveLoaded == true, environment);
+                var resolution = user is null && RunsInAUsersSession(task.UserId)
+                    ? ResolveSessionComHandler(context, clsid, environment)
+                    : ResolveComHandler(context, clsid, user, profile?.HiveLoaded == true, environment);
                 context.Add(new PersistenceEntry(PersistenceKind.ScheduledTask, user, taskPath, $"ComHandler[{i}]",
                     $"{clsid:B} {action.ComData}".TrimEnd(), resolution, task.Enabled, comClassId: clsid));
             }
@@ -275,6 +278,49 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
         }
 
         return ResolvedCommand.Unresolved(TargetUnresolvedReason.ComClassNotRegistered, hostPath);
+    }
+
+    private static readonly HashSet<string> ServiceAccounts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "S-1-5-18", "S-1-5-19", "S-1-5-20", "SYSTEM", "LocalSystem", @"NT AUTHORITY\SYSTEM", "LOCAL SERVICE", @"NT AUTHORITY\LOCAL SERVICE",
+        "LocalService", "NETWORK SERVICE", @"NT AUTHORITY\NETWORK SERVICE", "NetworkService",
+    };
+
+    /// <summary>
+    /// D4 (section C follow-up M5 / M10): a principal that isn't a user SID and isn't a service account (a <c>GroupId</c>, so no
+    /// UserId; a group SID; an account name) runs the task in some user's session, where that user's <c>Classes</c> override the
+    /// machine's COM registration.
+    /// </summary>
+    internal static bool RunsInAUsersSession(string? userId) => userId?.Trim() is not { Length: > 0 } id || !ServiceAccounts.Contains(id);
+
+    /// <summary>
+    /// D4 (M5 / M10): a COM handler of a task that runs in whichever user's session: every loaded user's
+    /// <c>HKU\&lt;SID&gt;_Classes</c> override counts (flagged <see cref="ResolutionFlag.UserComOverride"/>, the first as the
+    /// target and the others plus the machine registration as additional commands), then the machine's registration.
+    /// </summary>
+    private static ResolvedCommand ResolveSessionComHandler(PersistenceContext context, Guid clsid, EnvironmentBlock environment)
+    {
+        string? hostPath = context.Machine.SystemRoot is { } root ? CorePersistenceText.NormalizeLocalPath(Path.Join(root, @"System32\taskhostw.exe")) : null;
+        string subPath = $@"CLSID\{clsid:B}\InprocServer32";
+        var overrides = new List<ResolvedCommand>();
+        foreach (var user in context.Users.Where(u => u.HiveLoaded).Take(64))
+        {
+            if (Server(context, RegistryRoot.Users, $@"{user.Sid}_Classes\{subPath}", user.Sid) is { } dll)
+            {
+                overrides.Add(context.Resolver.ResolveLibrary(dll, user.Environment, hostPath).WithFlags(ResolutionFlag.UserComOverride));
+            }
+        }
+
+        var machine = Server(context, RegistryRoot.LocalMachine, $@"SOFTWARE\Classes\{subPath}", null) is { } machineDll
+            ? context.Resolver.ResolveLibrary(machineDll, environment, hostPath)
+            : null;
+        if (overrides.Count == 0)
+        {
+            return machine ?? ResolvedCommand.Unresolved(TargetUnresolvedReason.ComClassNotRegistered, hostPath);
+        }
+
+        var others = overrides.Skip(1).Concat(machine is null ? [] : [machine]).ToArray();
+        return others.Length == 0 ? overrides[0] : overrides[0].WithAdditional(others);
     }
 
     private static string? Server(PersistenceContext context, RegistryRoot root, string path, string? user)

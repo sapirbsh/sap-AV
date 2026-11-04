@@ -97,6 +97,37 @@ public sealed class ScheduledTaskCollectorTests : IDisposable
     }
 
     [Fact]
+    public void GroupTask_ComHandler_ChecksEveryLoadedUsersClassesOverride_ButASystemTaskDoesNot()
+    {
+        // D4 (section C follow-up M5 / M10): a GroupId task runs in whichever user's session, so that user's Classes win.
+        _root.AddUser(Sid, @"C:\Users\alice", loaded: true);
+        _root.Machine($@"SOFTWARE\Classes\CLSID\{Clsid}\InprocServer32").SetValue("", @"C:\Windows\System32\handler.dll");
+        _root.Users($@"{Sid}_Classes\CLSID\{Clsid}\InprocServer32").SetValue("", @"C:\Users\alice\AppData\Roaming\hijack.dll");
+        Write("Group", $"""
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <Principals><Principal id="Users"><GroupId>S-1-5-32-545</GroupId></Principal></Principals>
+              <Settings><Enabled>true</Enabled></Settings>
+              <Actions Context="Users"><ComHandler><ClassId>{Clsid}</ClassId></ComHandler></Actions>
+            </Task>
+            """);
+        Write("System", Task($"<ComHandler><ClassId>{Clsid}</ClassId></ComHandler>"));
+
+        var entries = Collect().Entries.ToDictionary(e => e.Location);
+
+        var group = entries[@"\Group"];
+        Assert.Null(group.UserSid);
+        Assert.Equal(@"C:\Users\alice\AppData\Roaming\hijack.dll", group.Resolution.TargetPath);
+        Assert.Contains(ResolutionFlag.UserComOverride, group.Resolution.Flags);
+        Assert.Contains(group.Resolution.Additional, a => a.TargetPath == @"C:\Windows\System32\handler.dll");
+        var system = entries[@"\System"];
+        Assert.Equal(@"C:\Windows\System32\handler.dll", system.Resolution.TargetPath);
+        Assert.DoesNotContain(ResolutionFlag.UserComOverride, system.Resolution.Flags);
+        Assert.True(ScheduledTaskSource.RunsInAUsersSession(@"CONTOSO\bob"));
+        Assert.False(ScheduledTaskSource.RunsInAUsersSession(@"NT AUTHORITY\SYSTEM"));
+    }
+
+    [Fact]
     public void MalformedAndXxeTasks_BecomeIssues_AndTheRestIsCollected()
     {
         Write("Good", Task("<Exec><Command>C:\\Tools\\ok.exe</Command></Exec>"));
