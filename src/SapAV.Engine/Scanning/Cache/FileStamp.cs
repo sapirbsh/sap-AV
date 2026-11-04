@@ -31,6 +31,24 @@ internal readonly record struct FileStamp(ulong Volume, UInt128 FileId, long Siz
         return new FileStamp(key.Volume, key.FileId, size, lastWrite, change, usn);
     }
 
+    /// <summary>
+    /// D4 review H2: the same values for change detection only (never for the scan cache): the USN is null when the volume has
+    /// no journal, so without one only the times and size (which a writer can put back) tell a change. Null when the file
+    /// system reports no file ID, times or size.
+    /// </summary>
+    public static FileStamp? CaptureForChangeDetection(SafeFileHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (!NativeFile.TryGetFileId(handle, out ulong volume, out string id) || !TryGetTimes(handle, out long lastWrite, out long change) || !TryGetSize(handle, out long size))
+        {
+            return null;
+        }
+
+        long? usn = NativeFile.TryGetUsn(handle, out long value) ? value : null;
+        var key = IdentityKey.Of(new FileIdentity(volume, id, null));
+        return new FileStamp(key.Volume, key.FileId, size, lastWrite, change, usn);
+    }
+
     /// <summary>Only NTFS and ReFS have the change journal the stamp relies on.</summary>
     internal static bool IsJournalingFileSystem(string? name) => name is "NTFS" or "ReFS";
 

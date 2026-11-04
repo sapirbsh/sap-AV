@@ -10,9 +10,21 @@ internal interface IRegistryWatchFactory
     /// <summary>
     /// Watches <paramref name="path"/> below <paramref name="root"/>; <paramref name="changed"/> runs on a thread-pool thread
     /// after each change (it must be quick and must not throw). Never throws for a missing key: it is watched through its
-    /// nearest existing ancestor until it appears.
+    /// nearest existing ancestor until it appears. <paramref name="failed"/> (review M4 / H3) runs when the watch stops
+    /// watching anything or finds the key denied to the engine; the caller recreates a watch that isn't
+    /// <see cref="IRegistryWatch.Active"/>.
     /// </summary>
-    IDisposable Watch(RegistryRoot root, string path, bool subtree, Action changed);
+    IRegistryWatch Watch(RegistryRoot root, string path, bool subtree, Action changed, Action? failed = null);
+}
+
+/// <summary>A running registry watch.</summary>
+internal interface IRegistryWatch : IDisposable
+{
+    /// <summary>Something is watched (false: it died, e.g. the hive was unloaded or the notification failed twice).</summary>
+    bool Active { get; }
+
+    /// <summary>D4 review H3: the key, or a key on its path, refused the engine (e.g. a user's deny ACE); only an ancestor is watched.</summary>
+    bool Denied { get; }
 }
 
 /// <summary>The real watches (<see cref="RegistryKeyWatch"/>) on HKLM and HKU, or on test roots below HKCU.</summary>
@@ -33,9 +45,9 @@ internal sealed class WindowsRegistryWatchFactory : IRegistryWatchFactory
         _users = users;
     }
 
-    public IDisposable Watch(RegistryRoot root, string path, bool subtree, Action changed) =>
+    public IRegistryWatch Watch(RegistryRoot root, string path, bool subtree, Action changed, Action? failed = null) =>
         new RegistryKeyWatch(root == RegistryRoot.LocalMachine ? _machine.Handle : _users.Handle, path, subtree, changed,
-            minDepth: path.Length == 0 ? 0 : 1);
+            minDepth: path.Length == 0 ? 0 : 1, failed);
 }
 
 /// <summary>
@@ -50,13 +62,15 @@ internal sealed class WindowsRegistryWatchFactory : IRegistryWatchFactory
 /// <para><b>A key that doesn't exist</b> (e.g. a user's <c>Policies\Explorer\Run</c>) is watched through its nearest existing
 /// ancestor, for subkey names only and not its subtree (no noise from the rest of the tree), never above
 /// <paramref name="minDepth"/> components (the SID for a user hive). Its notification re-arms on the full path, so the key is
-/// watched as soon as it exists; a key that is deleted falls back the same way. A hive that is unloaded leaves nothing to
-/// watch until the next plan.</para>
+/// watched as soon as it exists; a key that is deleted falls back the same way. Review H3: a key the engine is <b>denied</b>
+/// falls back the same way but is reported (<see cref="Denied"/>), never taken for a missing one. Review M4: a watch with
+/// nothing left to watch (an unloaded hive, two failed notifications) reports itself through the failure callback.</para>
 /// <para><b>Lifetime.</b> <see cref="Dispose"/> unregisters the wait (waiting for a running callback), then closes the key and
 /// the event; a notification after that does nothing.</para>
 /// </remarks>
-internal sealed class RegistryKeyWatch : IDisposable
+internal sealed class RegistryKeyWatch : IRegistryWatch
 {
+    private const int ErrorAccessDenied = 5;
     private const uint KeyNotify = 0x0010;
     private const uint KeyWow64_64Key = 0x0100;
     private const uint OpenLink = 0x0008; // REG_OPTION_OPEN_LINK
@@ -69,6 +83,7 @@ internal sealed class RegistryKeyWatch : IDisposable
     private readonly string[] _components;
     private readonly bool _subtree;
     private readonly Action _changed;
+    private readonly Action? _failed;
     private readonly int _minDepth;
     private readonly AutoResetEvent _signal = new(false);
     private readonly Lock _lock = new();
@@ -76,11 +91,13 @@ internal sealed class RegistryKeyWatch : IDisposable
     private int _depth;
     private RegisteredWaitHandle? _wait;
     private bool _disposed;
+    private bool _denied;
 
-    public RegistryKeyWatch(SafeRegistryHandle baseKey, string path, bool subtree, Action changed, int minDepth)
+    public RegistryKeyWatch(SafeRegistryHandle baseKey, string path, bool subtree, Action changed, int minDepth, Action? failed = null)
     {
         _base = baseKey ?? throw new ArgumentNullException(nameof(baseKey));
         _changed = changed ?? throw new ArgumentNullException(nameof(changed));
+        _failed = failed;
         _components = path.Split('\\', StringSplitOptions.RemoveEmptyEntries);
         if (_components.Length > MaxDepth)
         {
@@ -107,7 +124,6 @@ internal sealed class RegistryKeyWatch : IDisposable
         }
     }
 
-    /// <summary>Anything is watched (false: not even the minimum ancestor exists, e.g. the hive was unloaded).</summary>
     public bool Active
     {
         get
@@ -119,8 +135,20 @@ internal sealed class RegistryKeyWatch : IDisposable
         }
     }
 
+    public bool Denied
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _denied;
+            }
+        }
+    }
+
     private void OnSignaled(object? state, bool timedOut)
     {
+        bool problem;
         lock (_lock)
         {
             if (_disposed)
@@ -135,12 +163,18 @@ internal sealed class RegistryKeyWatch : IDisposable
                 CloseKey(); // an ancestor fired: try the full path again
             }
 
+            bool wasDenied = _denied;
             Arm();
+            problem = _key is null || (_denied && !wasDenied); // review M4: it died; H3: newly denied
         }
 
         try
         {
             _changed();
+            if (problem)
+            {
+                _failed?.Invoke();
+            }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -201,10 +235,12 @@ internal sealed class RegistryKeyWatch : IDisposable
 
     private bool OpenDeepest()
     {
+        _denied = false;
         for (int depth = _components.Length; depth >= _minDepth; depth--)
         {
             string sub = string.Join('\\', _components, 0, depth);
-            if (RegOpenKeyExW(_base, sub, OpenLink, KeyNotify | KeyWow64_64Key, out var key) == 0 && !key.IsInvalid)
+            int error = RegOpenKeyExW(_base, sub, OpenLink, KeyNotify | KeyWow64_64Key, out var key);
+            if (error == 0 && !key.IsInvalid)
             {
                 _key = key;
                 _depth = depth;
@@ -212,6 +248,10 @@ internal sealed class RegistryKeyWatch : IDisposable
             }
 
             key?.Dispose();
+            if (error == ErrorAccessDenied)
+            {
+                _denied = true; // review H3: hidden from SYSTEM, not missing; the monitor makes it visible
+            }
         }
 
         return false;

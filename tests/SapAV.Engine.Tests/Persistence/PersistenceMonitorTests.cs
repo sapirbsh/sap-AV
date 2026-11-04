@@ -239,8 +239,9 @@ public sealed class PersistenceMonitorTests
         Assert.DoesNotContain(h.FakeRegistry.Live, w => w.Path.StartsWith(Alice, StringComparison.Ordinal));
 
         // Logon: the hive appears under HKU.
-        h.UserRunValue(Alice, "Tray", h.Target("tray.exe"));
-        h.UserRunValue(Alice, "Bad", h.Target("mal-tray.exe"));
+        string tray = h.Target("tray.exe"), bad = h.Target("mal-tray.exe");
+        h.UserRunValue(Alice, "Tray", tray);
+        h.UserRunValue(Alice, "Bad", bad);
         h.Time.Now += h.Options.HiveCheckInterval;
         h.Monitor.Tick();
         h.Monitor.RunDue();
@@ -263,9 +264,9 @@ public sealed class PersistenceMonitorTests
         Assert.NotNull(h.Monitor.Baseline.Find(new PersistenceEntry(PersistenceKind.RunKey, Alice, $@"HKU\{Alice}\{MonitorHarness.UserRun}", "Tray", "x",
             ResolvedCommand.Unresolved(TargetUnresolvedReason.EmptyCommand), true).Key));
 
-        // Logon again with nothing changed: no new judgement, no alert.
-        h.UserRunValue(Alice, "Tray", h.Target("tray.exe"));
-        h.UserRunValue(Alice, "Bad", h.Target("mal-tray.exe"));
+        // Logon again with nothing changed (same values, same target files): no new judgement, no alert.
+        h.UserRunValue(Alice, "Tray", tray);
+        h.UserRunValue(Alice, "Bad", bad);
         int alerts = h.Alerts.Alerts.Count();
         h.Scanner.Calls.Clear();
         h.Time.Now += h.Options.HiveCheckInterval;

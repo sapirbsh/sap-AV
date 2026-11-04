@@ -64,6 +64,8 @@ internal sealed class PersistenceMonitorService(IServiceProvider services, IOpti
 
         IPersistenceBaselineStore store = file ?? new MemoryBaselineStore();
         return new PersistenceMonitor(options, collector, services.GetRequiredService<IPersistenceScanner>(), store, new WindowsRegistryWatchFactory(),
-            NativeDirectoryWatchFactory.Instance, services.GetRequiredService<TimeProvider>(), logger);
+            NativeDirectoryWatchFactory.Instance, services.GetRequiredService<TimeProvider>(), logger,
+            alerts: services.GetRequiredService<Alerts.IAlertDispatcher>(),
+            reportHidden: EngineAccount.IsProtected()); // review H3: a non-elevated debug run is denied other users' locations by design
     }
 }

@@ -38,9 +38,12 @@ internal sealed class FakeRegistryWatchFactory : IRegistryWatchFactory
         }
     }
 
-    public IDisposable Watch(RegistryRoot root, string path, bool subtree, Action changed)
+    /// <summary>Review H3: keys reported denied when a watch on them starts.</summary>
+    public HashSet<string> DeniedPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public IRegistryWatch Watch(RegistryRoot root, string path, bool subtree, Action changed, Action? failed = null)
     {
-        var watch = new FakeRegistryWatch(root, path, subtree, changed);
+        var watch = new FakeRegistryWatch(root, path, subtree, changed, failed) { Denied = DeniedPaths.Contains(path) };
         lock (_all)
         {
             _all.Add(watch);
@@ -61,7 +64,7 @@ internal sealed class FakeRegistryWatchFactory : IRegistryWatchFactory
         return hits.Length > 0;
     }
 
-    internal sealed class FakeRegistryWatch(RegistryRoot root, string path, bool subtree, Action changed) : IDisposable
+    internal sealed class FakeRegistryWatch(RegistryRoot root, string path, bool subtree, Action changed, Action? failed) : IRegistryWatch
     {
         public RegistryRoot Root { get; } = root;
 
@@ -73,6 +76,17 @@ internal sealed class FakeRegistryWatchFactory : IRegistryWatchFactory
 
         public bool Disposed { get; private set; }
 
+        public bool Active { get; set; } = true;
+
+        public bool Denied { get; set; }
+
+        /// <summary>Review M4: the watch dies (like a twice-failed notification) and says so.</summary>
+        public void Die()
+        {
+            Active = false;
+            failed?.Invoke();
+        }
+
         public void Dispose() => Disposed = true;
     }
 }
@@ -81,6 +95,9 @@ internal sealed class FakeRegistryWatchFactory : IRegistryWatchFactory
 internal sealed class RecordingCollector(PersistenceCollector inner) : IScopedPersistenceCollector
 {
     public List<PersistenceScope[]> Calls { get; } = [];
+
+    /// <summary>The options of each call (same order as <see cref="Calls"/>).</summary>
+    public List<PersistenceCollectOptions?> Options { get; } = [];
 
     public PersistenceCollector Inner => inner;
 
@@ -95,6 +112,7 @@ internal sealed class RecordingCollector(PersistenceCollector inner) : IScopedPe
         lock (Calls)
         {
             Calls.Add([.. scopes ?? []]);
+            Options.Add(options);
         }
 
         return inner.CollectScoped(scopes, cancellationToken, options);
@@ -216,7 +234,9 @@ internal sealed class MonitorHarness : IDisposable
     private readonly TempDir _temp = new();
     private PersistenceMonitor? _monitor;
 
-    public MonitorHarness(Action<PersistenceMonitorOptions>? configure = null, IPersistenceBaselineStore? store = null, bool realRegistryWatches = false)
+    public MonitorHarness(
+        Action<PersistenceMonitorOptions>? configure = null, IPersistenceBaselineStore? store = null, bool realRegistryWatches = false,
+        PersistenceLimits? limits = null, Func<SafeFileHandle, string, bool>? trustedTask = null)
     {
         Startup = Directory.CreateDirectory(Path.Combine(_temp.Path, "Startup")).FullName;
         Tasks = Directory.CreateDirectory(Path.Combine(_temp.Path, "Tasks")).FullName;
@@ -234,10 +254,10 @@ internal sealed class MonitorHarness : IDisposable
         configure?.Invoke(Options);
         Store = store ?? new MemoryBaselineStore();
         Collector = new RecordingCollector(new PersistenceCollector(Registry.View, new SafePathProbe(),
-            [new RegistryAutorunSource(), new StartupFolderSource([(Startup, null)]), new ScheduledTaskSource(Tasks)],
+            [new RegistryAutorunSource(), new StartupFolderSource([(Startup, null)]), new ScheduledTaskSource(Tasks, trustedTask)], limits,
             parser: Parser, parsedFiles: new ParsedFileCache()));
         var judge = new PersistenceJudge(new PersistenceJudgeOptions { SystemRoot = @"C:\Windows" });
-        Scanner = new RecordingScanner(new PersistenceScanner(new FakeScanBroker(), Alerts, Time, NullLogger.Instance, judge, () => new AdminOnlyWritability()));
+        Scanner = new RecordingScanner(new PersistenceScanner(Broker, Alerts, Time, NullLogger.Instance, judge, () => new AdminOnlyWritability()));
         RegistryWatches = realRegistryWatches ? new WindowsRegistryWatchFactory(Registry.MachineKey, Registry.UsersKey) : FakeRegistry;
     }
 
@@ -256,6 +276,9 @@ internal sealed class MonitorHarness : IDisposable
     public IPersistenceBaselineStore Store { get; }
 
     public CountingParser Parser { get; } = new();
+
+    /// <summary>The fake broker the target scans go through (verdict by file name unless <see cref="FakeScanBroker.OnScan"/> says otherwise).</summary>
+    public FakeScanBroker Broker { get; } = new();
 
     public RecordingCollector Collector { get; }
 
@@ -276,7 +299,7 @@ internal sealed class MonitorHarness : IDisposable
     public PersistenceMonitor Monitor => _monitor ??= Create();
 
     public PersistenceMonitor Create() =>
-        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log);
+        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log, alerts: Alerts);
 
     /// <summary>A target file whose verdict comes from its name (<c>mal*</c> = Malicious).</summary>
     public string Target(string name)
@@ -295,6 +318,13 @@ internal sealed class MonitorHarness : IDisposable
     {
         Monitor.Initialize();
         Monitor.RunDue();
+    }
+
+    /// <summary>Collects <paramref name="scope"/> again right away (as a safety rescan would) and runs what is due.</summary>
+    public int MarkAndRun(PersistenceScope scope)
+    {
+        Monitor.MarkDirty(scope, immediate: true);
+        return Monitor.RunDue();
     }
 
     /// <summary>Moves the clock and runs what is due then.</summary>

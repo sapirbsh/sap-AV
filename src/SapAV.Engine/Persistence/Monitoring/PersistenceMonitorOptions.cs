@@ -41,6 +41,23 @@ public sealed class PersistenceMonitorOptions
     /// <summary>Most entries judged in one pass (each new target file is scanned); the rest wait for the scope's next turn.</summary>
     public int MaxJudgedPerPass { get; set; } = 64;
 
+    /// <summary>
+    /// Review H1: an entry whose target the judgement couldn't reach (time, a cap, a failed open or scan) stays unjudged and is
+    /// tried again after this, doubling per attempt up to <see cref="CoverageRetryMax"/>.
+    /// </summary>
+    public TimeSpan CoverageRetryBase { get; set; } = TimeSpan.FromSeconds(30);
+
+    public TimeSpan CoverageRetryMax { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>Review H1: after this many attempts in a row a Warning says the entry still can't be verified (it is still retried).</summary>
+    public int CoverageWarnAfter { get; set; } = 5;
+
+    /// <summary>Review H4: a key judged less than this ago that changes again waits until then (a key rewritten over and over can't use the worker up).</summary>
+    public TimeSpan RejudgeMinInterval { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Review H5: a scope cut short (a cap or a budget) this many passes in a row raises a Warning.</summary>
+    public int TruncationWarnAfter { get; set; } = 3;
+
     /// <summary>The time budget of one pass's collection (the whole collection's budget is never exceeded).</summary>
     public TimeSpan CollectionTimeBudget { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -75,6 +92,11 @@ public sealed class PersistenceMonitorOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(CollectionTimeBudget, TimeSpan.FromSeconds(1), nameof(CollectionTimeBudget));
         ArgumentOutOfRangeException.ThrowIfLessThan(ScanTimeBudget, TimeSpan.FromSeconds(1), nameof(ScanTimeBudget));
         ArgumentOutOfRangeException.ThrowIfNegative(MaxLoggedChangesPerPass, nameof(MaxLoggedChangesPerPass));
+        ArgumentOutOfRangeException.ThrowIfLessThan(CoverageRetryBase, TimeSpan.FromMilliseconds(1), nameof(CoverageRetryBase));
+        ArgumentOutOfRangeException.ThrowIfLessThan(CoverageRetryMax, CoverageRetryBase, nameof(CoverageRetryMax));
+        ArgumentOutOfRangeException.ThrowIfLessThan(CoverageWarnAfter, 1, nameof(CoverageWarnAfter));
+        ArgumentOutOfRangeException.ThrowIfNegative(RejudgeMinInterval.Ticks, nameof(RejudgeMinInterval));
+        ArgumentOutOfRangeException.ThrowIfLessThan(TruncationWarnAfter, 1, nameof(TruncationWarnAfter));
         ArgumentOutOfRangeException.ThrowIfLessThan(WatcherBufferBytes, 4096, nameof(WatcherBufferBytes));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(WatcherBufferBytes, 1024 * 1024, nameof(WatcherBufferBytes));
     }

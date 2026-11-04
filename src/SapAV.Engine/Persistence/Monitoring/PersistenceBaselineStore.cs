@@ -206,14 +206,17 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         Records = [.. snapshot.Records.Select(r => new RecordDto
         {
             Key = r.Key, Source = r.Scope.Source, Sid = r.Scope.UserSid, Fingerprint = r.Fingerprint, Display = r.Display, Judged = r.Judged, Change = (int)r.Change,
+            TargetStamp = r.TargetStamp, PendingSince = r.PendingSince, NotBefore = r.NotBefore?.UtcTicks, Attempts = r.Attempts, LastJudged = r.LastJudged?.UtcTicks,
         })],
         Baselined = [.. snapshot.Baselined.Select(s => new ScopeDto { Source = s.Source, Sid = s.UserSid })],
+        Hidden = [.. (snapshot.Hidden ?? []).Select(h => new HiddenDto { Id = h.Id, Source = h.Scope.Source, Sid = h.Scope.UserSid })],
     };
 
     /// <exception cref="InvalidDataException">A field is out of range.</exception>
     private static BaselineSnapshot FromFile(BaselineFile file)
     {
-        if (file.Version != Version || file.Records is null || file.Baselined is null || file.Records.Count > MaxRecords || file.Baselined.Count > MaxRecords)
+        if (file.Version != Version || file.Records is null || file.Baselined is null || file.Records.Count > MaxRecords || file.Baselined.Count > MaxRecords
+            || (file.Hidden?.Count ?? 0) > PersistenceBaseline.MaxHidden)
         {
             throw new InvalidDataException("Unknown version or too many records.");
         }
@@ -221,15 +224,25 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         var records = file.Records.Select(r =>
         {
             if (string.IsNullOrEmpty(r.Key) || r.Key.Length > 8192 || r.Fingerprint is not { Length: 64 } || !Enum.IsDefined((BaselineChange)r.Change)
-                || r.Display is null || r.Display.Length > PersistenceBaseline.MaxDisplayLength)
+                || r.Display is null || r.Display.Length > PersistenceBaseline.MaxDisplayLength || r.TargetStamp is not (null or { Length: 64 })
+                || r.PendingSince < 0 || r.Attempts is < 0 or > 10_000)
             {
                 throw new InvalidDataException("A baseline record is invalid.");
             }
 
-            return new BaselineRecord(r.Key, Scope(r.Source, r.Sid), r.Fingerprint, r.Display, r.Judged, (BaselineChange)r.Change);
+            return new BaselineRecord(r.Key, Scope(r.Source, r.Sid), r.Fingerprint, r.Display, r.Judged, (BaselineChange)r.Change, r.TargetStamp,
+                r.PendingSince, Time(r.NotBefore), r.Attempts, Time(r.LastJudged));
         }).ToArray();
-        return new BaselineSnapshot(records, file.Baselined.Select(s => Scope(s.Source, s.Sid)).ToArray());
+        var hidden = (file.Hidden ?? []).Select(h => h.Id is { Length: > 0 and <= 8192 } id
+            ? new HiddenLocation(id, Scope(h.Source, h.Sid))
+            : throw new InvalidDataException("A hidden location is invalid.")).ToArray();
+        return new BaselineSnapshot(records, file.Baselined.Select(s => Scope(s.Source, s.Sid)).ToArray(), hidden);
     }
+
+    private static DateTimeOffset? Time(long? ticks) =>
+        ticks is null ? null
+        : ticks is >= 0 and <= 3155378975999999999 ? new DateTimeOffset(ticks.Value, TimeSpan.Zero)
+        : throw new InvalidDataException("A baseline time is invalid.");
 
     private static PersistenceScope Scope(string? source, string? sid) =>
         source is { Length: > 0 and <= 64 } && (sid is null || PersistenceEntry.IsSid(sid))
@@ -243,6 +256,8 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         public List<RecordDto>? Records { get; set; }
 
         public List<ScopeDto>? Baselined { get; set; }
+
+        public List<HiddenDto>? Hidden { get; set; }
     }
 
     private sealed class RecordDto
@@ -260,10 +275,29 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         public bool Judged { get; set; }
 
         public int Change { get; set; }
+
+        public string? TargetStamp { get; set; }
+
+        public long PendingSince { get; set; }
+
+        public long? NotBefore { get; set; }
+
+        public int Attempts { get; set; }
+
+        public long? LastJudged { get; set; }
     }
 
     private sealed class ScopeDto
     {
+        public string? Source { get; set; }
+
+        public string? Sid { get; set; }
+    }
+
+    private sealed class HiddenDto
+    {
+        public string? Id { get; set; }
+
         public string? Source { get; set; }
 
         public string? Sid { get; set; }
