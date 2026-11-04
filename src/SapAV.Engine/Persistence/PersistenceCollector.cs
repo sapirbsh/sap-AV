@@ -32,6 +32,16 @@ internal sealed record PersistenceCollectOptions
     /// count against the budget; whatever it throws ends the collection.
     /// </summary>
     public Action? Checkpoint { get; init; }
+
+    /// <summary>
+    /// D4 review H5: the task definition files (task paths, <c>\Folder\Name</c>) the Tasks folder watch reported changed since
+    /// the last collection. A listed file not in this set whose earlier parse result is kept is reused without being opened.
+    /// Null = no hint (every file is opened and checked by its stamp): at start, after an overflow, at the safety rescan.
+    /// </summary>
+    public IReadOnlySet<string>? ChangedTaskFiles { get; init; }
+
+    /// <summary>D4 review H5: the worker priority of this collection's definition-file parses; null = High.</summary>
+    public Sandbox.ScanPriority? ParsePriority { get; init; }
 }
 
 /// <summary>
@@ -78,7 +88,11 @@ internal sealed class PersistenceCollector(
         var resolver = new CommandLineResolver(freshProbe ?? probe);
         var machine = RegistryEnvironment.Machine(registry);
         var limits = options?.TimeBudget is { } budget && budget < _limits.TimeBudget ? _limits with { TimeBudget = budget } : _limits;
-        var context = new PersistenceContext(registry, resolver, machine, [], limits, cancellationToken, clock, parser, parsedFiles);
+        var context = new PersistenceContext(registry, resolver, machine, [], limits, cancellationToken, clock, parser, parsedFiles)
+        {
+            ChangedTaskFiles = options?.ChangedTaskFiles,
+        };
+        using var priority = PersistenceParsePriority.Use(options?.ParsePriority);
         context.Users = RegistryEnvironment.Profiles(registry, machine, context.AddIssue, max: MaxProfiles);
         var timings = sources.ToDictionary(s => s, s => new PersistenceSourceTiming(s.Name, TimeSpan.Zero, 0, 0, 0, TimeSpan.Zero));
         var wanted = scopes is null ? null : new HashSet<PersistenceScope>(scopes);
@@ -126,7 +140,7 @@ internal sealed class PersistenceCollector(
         _logger.Log(scopes is null ? LogLevel.Information : LogLevel.Debug, "Persistence collection{Scope}: {Entries} entries, {Issues} issues in {Milliseconds} ms. {Timings}",
             scopes is null ? string.Empty : $" of {string.Join(", ", scopes)}", result.Entries.Count, result.Issues.Count, (long)result.Duration.TotalMilliseconds,
             string.Join("; ", result.SourceTimings.Where(t => t.Duration > TimeSpan.Zero || t.Entries > 0)));
-        return new PersistenceScopedCollection(result, tracker.EntryScopes, tracker.Outcomes);
+        return new PersistenceScopedCollection(result, tracker.EntryScopes, tracker.Outcomes, tracker.IssueScopes(result.Issues.Count));
     }
 
     public PersistenceWatchPlan Plan(CancellationToken cancellationToken = default)
@@ -180,10 +194,31 @@ internal sealed class PersistenceCollector(
 
         public Dictionary<PersistenceScope, PersistenceScopeOutcome> Outcomes { get; } = [];
 
-        public void Ran(PersistenceScope scope, int entries, IEnumerable<PersistenceIssueReason> reasons, bool truncated)
+        private readonly List<(int From, int To, PersistenceScope Scope)> _issueRanges = [];
+
+        public void Ran(PersistenceScope scope, int entries, IEnumerable<PersistenceIssueReason> reasons, bool truncated, int issuesFrom, int issuesTo)
         {
             EntryScopes.AddRange(Enumerable.Repeat(scope, entries));
             Outcomes[scope] = new PersistenceScopeOutcome(truncated, reasons.Distinct().ToArray());
+            if (issuesTo > issuesFrom)
+            {
+                _issueRanges.Add((issuesFrom, issuesTo, scope));
+            }
+        }
+
+        /// <summary>D4 review H3: the scope each issue was added in (null for the profile listing, before any source).</summary>
+        public PersistenceScope?[] IssueScopes(int count)
+        {
+            var scopes = new PersistenceScope?[count];
+            foreach (var (from, to, scope) in _issueRanges)
+            {
+                for (int i = from; i < to && i < count; i++)
+                {
+                    scopes[i] = scope;
+                }
+            }
+
+            return scopes;
         }
 
         public void Skipped(PersistenceScope scope) => Outcomes[scope] = new PersistenceScopeOutcome(true, [PersistenceIssueReason.TimeBudgetExceeded]);
@@ -244,7 +279,7 @@ internal sealed class PersistenceCollector(
             ParseTime = soFar.ParseTime + context.ParseTime - parseTime,
             ReusedFiles = soFar.ReusedFiles + context.ReusedFiles - reused,
         };
-        tracker.Ran(scope, context.Entries.Count - entries, context.Issues.Skip(issues).Select(i => i.Reason), context.Truncated);
+        tracker.Ran(scope, context.Entries.Count - entries, context.Issues.Skip(issues).Select(i => i.Reason), context.Truncated, issues, context.Issues.Count);
     }
 }
 

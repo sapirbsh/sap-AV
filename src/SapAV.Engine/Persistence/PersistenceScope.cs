@@ -39,8 +39,10 @@ internal sealed record PersistenceScopeOutcome(bool Truncated, IReadOnlyCollecti
 
 /// <summary>A collection with the scope of each entry (in the same order as <see cref="PersistenceCollection.Entries"/>).</summary>
 /// <param name="Outcomes">One per scope that ran (a scope whose user wasn't found, or that the budget skipped, may be missing).</param>
+/// <param name="IssueScopes">D4 review H3: the scope each issue of <see cref="PersistenceCollection.Issues"/> came from (same order; null = none).</param>
 internal sealed record PersistenceScopedCollection(
-    PersistenceCollection Collection, IReadOnlyList<PersistenceScope> EntryScopes, IReadOnlyDictionary<PersistenceScope, PersistenceScopeOutcome> Outcomes);
+    PersistenceCollection Collection, IReadOnlyList<PersistenceScope> EntryScopes, IReadOnlyDictionary<PersistenceScope, PersistenceScopeOutcome> Outcomes,
+    IReadOnlyList<PersistenceScope?>? IssueScopes = null);
 
 /// <summary>What a watch looks at: a registry key (and maybe its subkeys) or a folder.</summary>
 internal enum PersistenceWatchKind

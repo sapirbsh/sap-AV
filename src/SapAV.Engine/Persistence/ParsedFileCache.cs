@@ -70,6 +70,25 @@ internal sealed class ParsedFileCache(int maxEntries = ParsedFileCache.DefaultMa
         return false;
     }
 
+    /// <summary>
+    /// D4 review H5: the kept result for a name without a stamp check, for a file the folder watch says didn't change since
+    /// (the caller's hint; a collection without one, e.g. the safety rescan, always checks the stamp).
+    /// </summary>
+    public bool TryGetKept(WorkerParseKind kind, string displayPath, out PersistenceParseResult result)
+    {
+        lock (_lock)
+        {
+            if (_items.TryGetValue(Key(kind, displayPath), out var kept))
+            {
+                result = kept.Result;
+                return true;
+            }
+        }
+
+        result = null!;
+        return false;
+    }
+
     /// <summary>Keeps a Parsed result; anything else is dropped (and an older result for the same name with it).</summary>
     public void Put(WorkerParseKind kind, string displayPath, FileStamp stamp, PersistenceParseResult result)
     {

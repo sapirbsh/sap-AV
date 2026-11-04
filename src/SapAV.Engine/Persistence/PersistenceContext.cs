@@ -32,6 +32,13 @@ internal sealed record PersistenceLimits
 
     /// <summary>Longest one user's own locations may take; machine-wide locations are always collected first.</summary>
     public TimeSpan UserTimeBudget { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// D4 review H5: task definition files whose owner isn't SYSTEM, Administrators or TrustedInstaller and that the Task
+    /// Scheduler's TaskCache doesn't list (System32\Tasks lets standard users create files) are parsed after all the others,
+    /// and at most this many per collection; the rest are reported (LimitReached).
+    /// </summary>
+    public int MaxUntrustedTaskFiles { get; init; } = 256;
 }
 
 /// <summary>
@@ -69,6 +76,25 @@ internal sealed class PersistenceContext
 
     /// <summary>D4: earlier parse results of unchanged definition files (null = every file is parsed).</summary>
     private ParsedFileCache? ParsedFiles { get; }
+
+    /// <summary>D4 review H5: see <see cref="PersistenceCollectOptions.ChangedTaskFiles"/>.</summary>
+    public IReadOnlySet<string>? ChangedTaskFiles { get; init; }
+
+    /// <summary>
+    /// D4 review H5: a task file the Tasks folder watch didn't report changed reuses its kept parse result without being
+    /// opened. False without a hint, for a reported file, or when nothing is kept.
+    /// </summary>
+    public bool TryReuseUnchanged(WorkerParseKind kind, string displayPath, out PersistenceParseResult result)
+    {
+        result = null!;
+        if (ChangedTaskFiles is not { } changed || changed.Contains(displayPath) || ParsedFiles is not { } cache || !cache.TryGetKept(kind, displayPath, out result))
+        {
+            return false;
+        }
+
+        ReusedFiles++;
+        return true;
+    }
 
     /// <summary>
     /// D4: something was left out silently from here on: the entry cap or the time budget was reached, or the current user's

@@ -21,10 +21,33 @@ namespace SapAV.Engine.Persistence;
 /// <para>Limitation: a task deleted from the folder but left in the registry TaskCache (or hidden by removing its
 /// security descriptor there) isn't seen here; cross-checking TaskCache belongs to D4.</para>
 /// </remarks>
-internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersistenceSource
+/// <param name="trustedFile">
+/// Test seam (D4 review H5): whether an opened task file counts as the system's own; null = by its owner (SYSTEM,
+/// Administrators or TrustedInstaller).
+/// </param>
+internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFileHandle, string, bool>? trustedFile = null) : IPersistenceSource
 {
     public const int MaxDepth = 16;
     public const int MaxFiles = 10_000;
+
+    /// <summary>The Task Scheduler's own list of registered tasks (admin-only); a file listed there isn't a user's stray file.</summary>
+    internal const string TaskCacheTree = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree";
+
+    private static readonly HashSet<string> TrustedOwners = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "S-1-5-18", "S-1-5-32-544", AutoQuarantinePolicy.TrustedInstaller.Value,
+    };
+
+    /// <summary>
+    /// D4 review H5: one walk's untrusted task files (not owned by the system, not in TaskCache), opened but parsed only after
+    /// every trusted one, at most <see cref="PersistenceLimits.MaxUntrustedTaskFiles"/>.
+    /// </summary>
+    private sealed class WalkState
+    {
+        public List<(SafeFileHandle File, string TaskPath)> Deferred { get; } = [];
+
+        public int OverCap { get; set; }
+    }
 
     public string Name => "scheduled tasks";
 
@@ -56,6 +79,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
         }
 
         int files = 0;
+        var state = new WalkState();
         var pending = new Stack<(SafeFileHandle Handle, string TaskPath, int Depth)>();
         pending.Push((top, string.Empty, 0));
         try
@@ -69,9 +93,11 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
                         return;
                     }
 
-                    Walk(context, current, pending, ref files);
+                    Walk(context, current, pending, ref files, state);
                 }
             }
+
+            CollectDeferred(context, state);
         }
         finally
         {
@@ -79,12 +105,76 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             {
                 left.Handle.Dispose();
             }
+
+            foreach (var (file, _) in state.Deferred)
+            {
+                file.Dispose();
+            }
         }
     }
 
-    private static void Walk(
+    /// <summary>D4 review H5: the untrusted task files, after all the others, then one issue for those over the cap.</summary>
+    private static void CollectDeferred(PersistenceContext context, WalkState state)
+    {
+        foreach (var chunk in state.Deferred.Chunk(WorkerLimits.MaxParseBatch))
+        {
+            if (!context.CanContinue || context.ParserDown)
+            {
+                return;
+            }
+
+            var results = context.ParseBatch(chunk.Select(o => new PersistenceParseInput(o.File, WorkerParseKind.ScheduledTask, o.TaskPath)).ToArray(), PersistenceKind.ScheduledTask);
+            for (int i = 0; i < chunk.Length; i++)
+            {
+                try
+                {
+                    CollectTask(context, chunk[i].TaskPath, results[i]);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    TaskUnreadable(context, chunk[i].TaskPath, ex);
+                }
+            }
+        }
+
+        if (state.OverCap > 0)
+        {
+            context.AddIssue(PersistenceKind.ScheduledTask, null, @"\", PersistenceIssueReason.LimitReached,
+                $"{state.OverCap} task files that aren't the system's (not owned by SYSTEM, Administrators or TrustedInstaller, not registered with the Task Scheduler) "
+                + $"were over the cap of {context.Limits.MaxUntrustedTaskFiles}; they were not parsed.");
+        }
+    }
+
+    /// <summary>The file's owner is SYSTEM, Administrators or TrustedInstaller (the Task Scheduler writes registered tasks as SYSTEM).</summary>
+    private static bool IsTrustedOwner(SafeFileHandle file)
+    {
+        var sd = Quarantine.Native.QuarantineNative.TryGetSecurity(file, Quarantine.Native.QuarantineNative.OwnerSecurityInformation, out _);
+        try
+        {
+            return sd is not null && new System.Security.AccessControl.RawSecurityDescriptor(sd, 0).Owner is { } owner && TrustedOwners.Contains(owner.Value);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool InTaskCache(PersistenceContext context, string taskPath)
+    {
+        try
+        {
+            using var key = context.Registry.Open(RegistryRoot.LocalMachine, TaskCacheTree + taskPath);
+            return key is not null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private void Walk(
         PersistenceContext context, (SafeFileHandle Handle, string TaskPath, int Depth) folder,
-        Stack<(SafeFileHandle, string, int)> pending, ref int files)
+        Stack<(SafeFileHandle, string, int)> pending, ref int files, WalkState state)
     {
         List<SafeTreeEntry> items;
         try
@@ -140,20 +230,20 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             }
 
             batch.Add((item.Name, taskPath));
-            if (batch.Count == WorkerLimits.MaxParseBatch && !CollectBatch(context, folder.Handle, batch))
+            if (batch.Count == WorkerLimits.MaxParseBatch && !CollectBatch(context, folder.Handle, batch, state))
             {
                 return;
             }
         }
 
-        CollectBatch(context, folder.Handle, batch);
+        CollectBatch(context, folder.Handle, batch, state);
     }
 
     /// <summary>
     /// C2: opens up to <see cref="WorkerLimits.MaxParseBatch"/> task files, has the worker parse them in one request and
     /// collects each. Empties <paramref name="batch"/>; false when the collection must stop (budget, caps, parser down).
     /// </summary>
-    private static bool CollectBatch(PersistenceContext context, SafeFileHandle folder, List<(string Name, string TaskPath)> batch)
+    private bool CollectBatch(PersistenceContext context, SafeFileHandle folder, List<(string Name, string TaskPath)> batch, WalkState state)
     {
         if (batch.Count == 0)
         {
@@ -173,9 +263,27 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
             {
                 try
                 {
+                    if (context.TryReuseUnchanged(WorkerParseKind.ScheduledTask, taskPath, out var kept))
+                    {
+                        CollectTask(context, taskPath, kept); // D4 review H5: the folder watch reported no change
+                        continue;
+                    }
+
                     if (SafeFolderReader.OpenForParsing(folder, name, TaskXml.MaxBytes, out var failure, out var message) is { } file)
                     {
-                        opened.Add((file, taskPath));
+                        if ((trustedFile?.Invoke(file, taskPath) ?? IsTrustedOwner(file)) || InTaskCache(context, taskPath))
+                        {
+                            opened.Add((file, taskPath));
+                        }
+                        else if (state.Deferred.Count < context.Limits.MaxUntrustedTaskFiles)
+                        {
+                            state.Deferred.Add((file, taskPath)); // D4 review H5: after the system's own tasks
+                        }
+                        else
+                        {
+                            file.Dispose();
+                            state.OverCap++;
+                        }
                     }
                     else
                     {

@@ -358,7 +358,8 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             return new(null, $"The scan worker's rules can't be loaded ({ex.GetType().Name}).", null, null);
         }
 
-        var slot = await RentAsync(ScanPriority.High, cancellationToken).ConfigureAwait(false);
+        var priority = Persistence.PersistenceParsePriority.Current; // D4 review H5: Normal for user-writable locations
+        var slot = await RentAsync(priority, cancellationToken).ConfigureAwait(false);
         try
         {
             WorkerProcess worker;
@@ -377,7 +378,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
         finally
         {
             slot.Lock.Release();
-            _idle.Return(slot, ScanPriority.High);
+            _idle.Return(slot, priority);
         }
     }
 
