@@ -9,12 +9,12 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1, D2, D3 done, D1 and D3 immediate reviews fixed; next D4) |
+| D — Real-time + VirusTotal | In progress (D1–D4 done, immediate reviews fixed; next D5) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after D3): Core 1423 passed + 1 skipped, Engine 692 passed + 15 skipped. Simulated clean machine: 0 failed.
+Tests (after D4): Core 1423 passed + 1 skipped, Engine 722 passed + 15 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`9628568`).
 
 ## Section A — Detection engine (done)
@@ -223,7 +223,22 @@ be 34 s.
 - **Immediate review:** no Critical. Fixed: H1 (that pre-created folder), M1 (the cache read the blocklist by path),
   M2 (the lookup held a worker slot), M3 (per-owner budget), L2, L4, L6. The rest is in ROADMAP under D3.
 
-**Next:** D4 (real-time persistence monitoring), D5 (Block & remove), then the section D tester + reviewer pass.
+**D4 (real-time persistence monitoring) is done** (`fc432d5`…`b63b789`):
+- **Registry:** change watches on HKLM and on every loaded user hive.
+- **Folders:** Startup folders and `System32\Tasks` watched link-safely.
+- **Re-collection:** debounced, and only the affected scope or user is re-collected. Only changed task files are
+  parsed again: about 10 ms for 200 unchanged task files.
+- **Baseline:** HMAC-protected. New or changed entries are judged and alerted; removals are logged.
+- **Safety rescan:** every 45 min.
+- **Immediate review:** no Critical; 5 High fixed. Each was a way for a user to keep their autostart from being judged:
+  - a target that wasn't scanned was marked judged;
+  - a target-file swap after judgement;
+  - a deny-SYSTEM ACE on their own key, now itself a Suspicious alert (T1564);
+  - junk churn starving the queue, now first in, first out;
+  - flooding the user-writable Tasks folder.
+- **Also fixed:** M4 (dead watches) and M5 (budgets per entry user). The rest is in ROADMAP under D4.
+
+**Next:** D5 (Block & remove), then the section D tester + reviewer pass.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -237,6 +252,5 @@ be 34 s.
 
 ## What's left
 
-- **D:** real-time persistence monitoring (D4), Block & remove (D5), then the section D tester + reviewer pass.
-  (D1–D3 done.)
+- **D:** Block & remove (D5), then the section D tester + reviewer pass. (D1–D4 done.)
 - Then E → F → G, ending with the Phase 1 security review (G5).

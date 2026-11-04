@@ -695,6 +695,67 @@ Remaining:
 - **D3 follow-up (L5):** VirusTotal lazy init (ACL checks, SQLite, DPAPI) can run on a pipe thread. Warm it up on a
   background task at start.
 
+**Notes from D4 (real-time persistence monitoring, built `fc432d5`…`0989b7f`).**
+- **How it works:**
+  - registry watches with RegNotifyChangeKeyValue on HKLM and on every loaded HKU hive;
+  - Startup folders and `System32\Tasks` watched through the D1 handle-bound folder watch;
+  - scoped, debounced re-collection;
+  - a parse cache keyed by file ID, size, times and USN;
+  - an HMAC'd baseline in `%ProgramData%\sap-AV\Persistence`;
+  - a 45-min safety rescan.
+- **Speed:** repeat collections with nothing changed take about 10 ms for 200 task files, against 36 ms the first time.
+- **Closed:** "D4 (M5)" and the first half of "D4/E4 (M10)": group-principal tasks now check every loaded
+  `<SID>_Classes` COM override.
+- **Deferred, detection-dev (C3 judge):**
+  - M5 second half: an unregistered COM class with an unloaded hive → Unverified;
+  - D4 L3: writability of the target's ancestor folders.
+- **Deferred, E or a C2 follow-up:** collectors for TaskCache-only tasks, RunOnceEx, `Windows\Load`/`Run` and App Paths.
+- **Still open, a collector fix:** C2 follow-up M1, bucketing task files by owner.
+
+**D4 immediate review (no Critical).** Fixed in the D4 fix round:
+- H1: a Coverage-Unverified entry was marked judged for good.
+- H2: a target-file swap went unnoticed.
+- H3: a deny-SYSTEM ACE silently hid an autostart key.
+- H4: junk churn could starve a new entry.
+- H5: a task-folder flood.
+- M4: dead watches were never restarted.
+- M5: budgets went to the pass owner instead of the entry's user.
+
+Remaining:
+- **D4 fix round, open (section D review):**
+  - H1/H5 warnings ("still unverifiable after 5 attempts", "scope cut short 3 passes in a row") are log Warnings, not
+    Event Log records (that would need new event IDs plus message-DLL entries).
+  - In a hinted tasks pass, a file the watch didn't report is reused without a stamp check. Lost notifications are
+    covered only by full passes on overflow or watch restart, and by the 45-min rescan.
+  - Hidden-location alerts are off in non-protected debug runs.
+  - Flaky: `PersistenceParsingInWorkerTests.OneBadFileInABatch(Crash)` took 15 s and failed once under full-suite load.
+- **D4 follow-up (H3 rest):** read user autostart keys with `REG_OPTION_BACKUP_RESTORE` and SeBackupPrivilege, so a
+  deny ACE can't hide them at all (today the denial is reported as Suspicious).
+- **D4 follow-up (M1):** nothing watches `HKU\<SID>_Classes\CLSID\{X}\InprocServer32` for task COM handlers, and a hive
+  load doesn't re-run the machine "scheduled tasks" scope, so a COM hijack waits up to 45 min. Watch the referenced
+  CLSID keys, and mark scheduled tasks dirty on every hive load.
+- **D4 follow-up (M2):** a change to `HKU\<SID>\Environment` re-collects only the registry scope. Map it to every scope
+  of that SID plus the machine tasks scope.
+- **D4 follow-up (M3):** a value written and removed within the 2 s settle window, or right before the hive unloads, is
+  never seen. Collect Run/RunOnce on the first change and again after the settle; collect a SID right away on session
+  logoff.
+- **D4 follow-up (M6):** KEY_NOTIFY handles in HKU at logoff: event 1530, and with `DisableForceUnload` the hive stays
+  loaded. Release that SID's watches in `OnSessionChange(SessionLogoff)` (a WindowsServiceLifetime subclass with
+  `CanHandleSessionChangeEvent`).
+- **D4 follow-up (M7):** a registry link key at an autostart location is only seen at the safety rescan. Detect links
+  (`SymbolicLinkValue`), raise a Suspicious finding, and watch the target.
+- **D4 follow-up (L1):** a failed root brings the next full plan forward for all users. Re-check only that root, with
+  backoff.
+- **D4 follow-up (L2):** `Services\bam` writes cause a full services collection every 60 s, and continuations
+  re-collect the whole scope. Compare per-service last-write times, and keep the collection between continuations.
+- **D4 follow-up (L3):** a renamed-away Startup folder that is created again goes unwatched for up to 5 min. Watch the
+  parent folder for names.
+- **D4 follow-up (L4):** the 30 s Join in Dispose races StopWatch and uses up the host's shutdown time. Clean up on the
+  monitor thread, with a shorter join.
+- **D4 follow-up (L5):** `ParsedFileCache` keeps results across worker crashes and protocol violations. Clear it then,
+  and record the worker generation.
+- **D4 follow-up (L6):** one owner's pass can hold the single thread for about 90 s. Cap scan time per owner per round.
+
 **D1 immediate review (no Critical).** Fixed in the D1 fix round:
 - H1: oplock holders stalled the real-time threads.
 - H2: no per-root queue quota or fairness.
