@@ -78,6 +78,9 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     private readonly IAlertDispatcher? _alerts;
     private readonly bool _reportHidden;
 
+    /// <summary>D5: the user's own Block &amp; remove / restore changes (held while in progress, then accepted without an alert).</summary>
+    private readonly Remediation.PersistenceActionLedger? _userActions;
+
     private readonly Lock _lock = new();
     private readonly Dictionary<PersistenceScope, ScopeState> _scopes = [];
     private readonly HashSet<PersistenceScope> _known = [];
@@ -116,7 +119,8 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     public PersistenceMonitor(
         PersistenceMonitorOptions options, IScopedPersistenceCollector collector, IPersistenceScanner scanner, IPersistenceBaselineStore store,
         IRegistryWatchFactory registryWatches, IDirectoryWatchFactory folderWatches, TimeProvider time, ILogger logger,
-        Func<string, int>? driveType = null, IRemoteFileProbe? remote = null, IAlertDispatcher? alerts = null, bool reportHidden = true)
+        Func<string, int>? driveType = null, IRemoteFileProbe? remote = null, IAlertDispatcher? alerts = null, bool reportHidden = true,
+        Remediation.PersistenceActionLedger? userActions = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -132,7 +136,15 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         _remote = remote ?? RemoteFileProbe.Instance;
         _alerts = alerts;
         _reportHidden = reportHidden;
+        _userActions = userActions;
+        if (userActions is not null)
+        {
+            userActions.Accepted += OnUserAction;
+        }
     }
+
+    /// <summary>D5: a Block &amp; remove or restore handed over its result: look at that scope again now.</summary>
+    private void OnUserAction(PersistenceScope scope) => MarkDirty(scope, immediate: true);
 
     /// <summary>Raised after each pass that judged entries (on the monitor thread; handlers must be quick and must not throw).</summary>
     public event Action<IReadOnlyList<PersistenceFinding>>? Judged;
@@ -622,7 +634,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             ReportHidden(collected, now);
             CheckTruncation(collected);
 
-            var pending = _baseline.Pending(collected, now);
+            var pending = SkipUserActions(_baseline.Pending(collected, now), now);
             var batch = Cap(pending, _options.MaxJudgedPerPass);
             if (batch.Count > 0)
             {
@@ -667,6 +679,41 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             UpdateCounts();
             SaveIfDirty();
         }
+    }
+
+    /// <summary>
+    /// D5: a waiting record the user's own Block &amp; remove or restore left exactly as handed over is marked judged without an
+    /// alert (once); a record whose action is still in progress waits until the action hands over or its hold runs out.
+    /// </summary>
+    private IReadOnlyList<PendingJudgement> SkipUserActions(IReadOnlyList<PendingJudgement> pending, DateTimeOffset now)
+    {
+        if (_userActions is null || pending.Count == 0)
+        {
+            return pending;
+        }
+
+        var keep = new List<PendingJudgement>(pending.Count);
+        foreach (var item in pending)
+        {
+            var record = item.Record;
+            if (_userActions.TryConsume(record.Key, record.Fingerprint))
+            {
+                _baseline.MarkJudged(record.Key, record.Fingerprint, now);
+                _baselineDirty = true;
+                _logger.LogInformation("Persistence monitor: autostart entry {Location} ({Scope}) was changed by the user's Block & remove or restore; not alerted.",
+                    record.Display, record.Scope);
+            }
+            else if (_userActions.IsHeld(record.Key, out var until))
+            {
+                ContinueLater([record.Scope], until - now);
+            }
+            else
+            {
+                keep.Add(item);
+            }
+        }
+
+        return keep;
     }
 
     private static List<PendingJudgement> Cap(IReadOnlyList<PendingJudgement> pending, int maxEntries)
@@ -1348,6 +1395,11 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
+        }
+
+        if (_userActions is not null)
+        {
+            _userActions.Accepted -= OnUserAction;
         }
 
         _stop.Cancel();

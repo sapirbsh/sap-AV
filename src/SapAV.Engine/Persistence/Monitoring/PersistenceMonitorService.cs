@@ -66,6 +66,7 @@ internal sealed class PersistenceMonitorService(IServiceProvider services, IOpti
         return new PersistenceMonitor(options, collector, services.GetRequiredService<IPersistenceScanner>(), store, new WindowsRegistryWatchFactory(),
             NativeDirectoryWatchFactory.Instance, services.GetRequiredService<TimeProvider>(), logger,
             alerts: services.GetRequiredService<Alerts.IAlertDispatcher>(),
-            reportHidden: EngineAccount.IsProtected()); // review H3: a non-elevated debug run is denied other users' locations by design
+            reportHidden: EngineAccount.IsProtected(), // review H3: a non-elevated debug run is denied other users' locations by design
+            userActions: services.GetService<Remediation.PersistenceActionLedger>()); // D5: the user's own Block & remove / restore isn't re-alerted
     }
 }

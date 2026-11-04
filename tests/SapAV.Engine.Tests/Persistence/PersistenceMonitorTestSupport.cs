@@ -299,7 +299,10 @@ internal sealed class MonitorHarness : IDisposable
     public PersistenceMonitor Monitor => _monitor ??= Create();
 
     public PersistenceMonitor Create() =>
-        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log, alerts: Alerts);
+        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log, alerts: Alerts, userActions: UserActions);
+
+    /// <summary>D5: the Block &amp; remove ledger the monitor consults (set before <see cref="Monitor"/> is first used).</summary>
+    public SapAV.Engine.Persistence.Remediation.PersistenceActionLedger? UserActions { get; set; }
 
     /// <summary>A target file whose verdict comes from its name (<c>mal*</c> = Malicious).</summary>
     public string Target(string name)

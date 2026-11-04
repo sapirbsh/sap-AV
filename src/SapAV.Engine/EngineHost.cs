@@ -134,6 +134,11 @@ public static class EngineHost
             builder.Configuration.GetSection(Persistence.Monitoring.PersistenceMonitorOptions.SectionName));
         builder.Services.AddHostedService<Persistence.Monitoring.PersistenceMonitorService>();
 
+        // Block & remove (D5): only on an explicit user request over the pipe. Backed up first (HMAC'd records in
+        // %ProgramData%\sap-AV\PersistenceBackups), restorable; the ledger keeps D4 from re-alerting the user's own changes.
+        builder.Services.AddSingleton(sp => new Persistence.Remediation.PersistenceActionLedger(sp.GetRequiredService<TimeProvider>()));
+        builder.Services.AddSingleton<Persistence.Remediation.IPersistenceRemediation>(Persistence.Remediation.PersistenceRemediator.CreateDefault);
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();
