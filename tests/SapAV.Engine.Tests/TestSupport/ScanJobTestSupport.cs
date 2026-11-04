@@ -28,7 +28,7 @@ internal sealed class FakeScanBroker : IScanBroker
     public Func<ScanItem, OpenedScanFile, CancellationToken, Task<FileScanReport?>>? OnScan { get; set; }
 
     /// <summary>What <see cref="SandboxStatus.Rules"/> reports (null = not loaded yet).</summary>
-    public RulesLoadSummary? Rules { get; set; } = new(5, [], 0, "fp", 1, 0);
+    public RulesLoadSummary? Rules { get; set; } = new(5, [], 0, "fp", 1, 0) { Blocklist = [] };
 
     /// <summary>What <see cref="ReloadRulesAsync"/> returns.</summary>
     public RulesLoadSummary? ReloadResult { get; set; } = new(5, [], 0, "fp", 1, 0);

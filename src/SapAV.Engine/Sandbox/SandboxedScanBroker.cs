@@ -506,6 +506,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
 
         if (summary is not null)
         {
+            summary = summary with { Blocklist = rules.Blocklist };
             _rules = summary;
             LogRules(_logger, summary, rules.ReadErrors);
         }

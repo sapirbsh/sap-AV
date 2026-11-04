@@ -19,12 +19,13 @@ internal interface IScanCacheFingerprints
 }
 
 /// <summary>
-/// The engine's fingerprints: the rules fingerprint from the broker's last load, and the blocklist loaded by the engine
-/// itself from the same engine-owned file the workers get (it is engine data, a list of hashes, not scanned file content).
-/// The blocklist is re-read whenever the broker reports a new rule load. If it can't be read, the cache is off until the
-/// next load (a cached Clean must never skip a blocklist it can't check).
+/// The engine's fingerprints: the rules fingerprint from the broker's last load, and the blocklist parsed by the engine from
+/// <b>the same bytes</b> the broker sent to the workers with that load (<see cref="RulesLoadSummary.Blocklist"/>). Review D3 M1:
+/// never re-read by path, so a file the rules source refused (or swapped since) can't feed the cache a different list than the
+/// trust-checked one. Parsed again whenever the broker reports a new rule load. If the bytes are unknown or don't parse, the
+/// cache is off until the next load (a cached Clean must never skip a blocklist it can't check).
 /// </summary>
-internal sealed class EngineScanFingerprints(IScanBroker broker, string blocklistPath, ILogger logger) : IScanCacheFingerprints
+internal sealed class EngineScanFingerprints(IScanBroker broker, ILogger logger) : IScanCacheFingerprints
 {
     private readonly Lock _lock = new();
     private RulesLoadSummary? _loadedFor;
@@ -44,7 +45,9 @@ internal sealed class EngineScanFingerprints(IScanBroker broker, string blocklis
                 _loadedFor = rules;
                 try
                 {
-                    _blocklist = HashBlocklist.LoadAsync(blocklistPath).GetAwaiter().GetResult();
+                    _blocklist = rules.Blocklist is not { } bytes ? null
+                        : bytes.Length == 0 ? HashBlocklist.Empty
+                        : HashBlocklist.LoadAsync(new MemoryStream(bytes, writable: false)).GetAwaiter().GetResult();
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
                 {
@@ -111,7 +114,7 @@ internal sealed class ScanCache : IDisposable
     /// the database. Scans then simply run uncached.
     /// </summary>
     internal static ScanCache? TryCreate(
-        ScanCacheOptions options, string blocklistPath, IScanBroker broker, IQuarantineKeyProvider keys, QuarantineAccessPolicy policy,
+        ScanCacheOptions options, IScanBroker broker, IQuarantineKeyProvider keys, QuarantineAccessPolicy policy,
         TimeProvider time, ILogger logger, bool? parentIsDataRoot = null, IScanCacheFingerprints? fingerprints = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -128,7 +131,7 @@ internal sealed class ScanCache : IDisposable
             var key = keys.GetOrCreateKey(folder, policy);
             var store = new ScanCacheStore(folder, key, options, time, logger);
             logger.LogInformation("Scan cache: {Path} ({Rows} rows).", store.DatabasePath, store.Count());
-            return new ScanCache(store, fingerprints ?? new EngineScanFingerprints(broker, blocklistPath, logger), options, time, logger);
+            return new ScanCache(store, fingerprints ?? new EngineScanFingerprints(broker, logger), options, time, logger);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {

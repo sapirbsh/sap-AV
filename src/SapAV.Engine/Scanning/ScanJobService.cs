@@ -89,7 +89,7 @@ public sealed class ScanJobService : IScanJobService, IDisposable
         var preflight = new RulesPreflight(broker, alerts, sandbox.ResolvedRulesDirectory, time);
         RemoteFileProbe.Instance.Logger ??= logger; // review C1 L4: unexpected answers, once per volume
         // C5: created on the first scanned file (never just by resolving the service: no folder, key or database before that).
-        Cache.ScanCache? CreateCache() => Cache.ScanCache.TryCreate(services.GetRequiredService<IOptions<Cache.ScanCacheOptions>>().Value, sandbox.ResolvedBlocklistPath, broker,
+        Cache.ScanCache? CreateCache() => Cache.ScanCache.TryCreate(services.GetRequiredService<IOptions<Cache.ScanCacheOptions>>().Value, broker,
             services.GetRequiredService<Quarantine.IQuarantineKeyProvider>(), Quarantine.QuarantineAccessPolicy.Default, time,
             services.GetRequiredService<ILoggerFactory>().CreateLogger("SapAV.Engine.ScanCache"));
         return new ScanJobService(options, broker, services.GetRequiredService<ExclusionSet>(), handler, preflight, time, logger, cacheFactory: CreateCache);

@@ -367,7 +367,7 @@ public sealed class FullScanTests(ITestOutputHelper output)
         var sandbox = new SandboxOptions();
         using var broker = new InProcessScanBroker(new DirectoryScanRulesSource(sandbox), NullLogger.Instance);
         await broker.ReloadRulesAsync();
-        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, sandbox.ResolvedBlocklistPath, broker,
+        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, broker,
             new FixedKeyProvider(CacheHarness.Key), CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false)!;
         var service = new ScanJobService(new ScanJobOptions { ThreadsPerJob = 2 }, broker, ExclusionSet.Always(new FolderSet([])), null, null,
             TimeProvider.System, NullLogger.Instance, cache: cache);

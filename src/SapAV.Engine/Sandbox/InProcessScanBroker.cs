@@ -92,7 +92,7 @@ internal sealed class InProcessScanBroker : IScanBroker, IDisposable
             }
 
             _rules = new RulesLoadSummary(rules.Rules.Count, rules.FileErrors.Select(e => e.ToString()).ToArray(), rules.Warnings.Count,
-                rules.Fingerprint, _blocklist.Count, _blocklist.TotalErrorCount);
+                rules.Fingerprint, _blocklist.Count, _blocklist.TotalErrorCount) { Blocklist = package.Blocklist };
             SandboxedScanBroker.LogRules(_logger, _rules, package.ReadErrors);
             return _scanner = new FileScanner(new Sha256Hasher(), () => _blocklist, new AuthenticodeVerifier(), _yara,
                 new MarkOfTheWebReader(), new FileHeuristics(), _online);

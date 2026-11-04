@@ -74,7 +74,7 @@ internal sealed class CacheHarness : IDisposable
     public static QuarantineAccessPolicy Policy => new([QuarantineTestContext.CurrentUser]);
 
     public ScanCache CreateCache() =>
-        ScanCache.TryCreate(Options, "unused", new FakeScanBroker(), new FixedKeyProvider(Key), Policy, TimeProvider.System, NullLogger.Instance,
+        ScanCache.TryCreate(Options, new FakeScanBroker(), new FixedKeyProvider(Key), Policy, TimeProvider.System, NullLogger.Instance,
             parentIsDataRoot: false, fingerprints: Fingerprints) ?? throw new InvalidOperationException("The test cache wasn't created.");
 
     public async Task<ScanJob> RunAsync(ScanJobRequest? request = null)
@@ -335,7 +335,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
 
         // A folder someone pre-created with normal inheritance is refused: the cache stays off.
         var wide = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(h.Folder)!, "Wide")).FullName;
-        Assert.Null(ScanCache.TryCreate(new ScanCacheOptions { Folder = wide }, "unused", new FakeScanBroker(), new FixedKeyProvider(CacheHarness.Key),
+        Assert.Null(ScanCache.TryCreate(new ScanCacheOptions { Folder = wide }, new FakeScanBroker(), new FixedKeyProvider(CacheHarness.Key),
             CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false, fingerprints: h.Fingerprints));
     }
 
@@ -449,7 +449,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         var sandbox = new SapAV.Engine.Sandbox.SandboxOptions();
         using var broker = new SapAV.Engine.Sandbox.InProcessScanBroker(new SapAV.Engine.Sandbox.DirectoryScanRulesSource(sandbox), NullLogger.Instance);
         await broker.ReloadRulesAsync();
-        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, sandbox.ResolvedBlocklistPath, broker,
+        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, broker,
             new FixedKeyProvider(CacheHarness.Key), CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false)!;
         Assert.NotNull(cache);
         var service = new ScanJobService(new ScanJobOptions(), broker, ExclusionSet.Always(new FolderSet([])), null, null, TimeProvider.System,
@@ -599,7 +599,7 @@ public sealed class ScanCacheTests(Xunit.Abstractions.ITestOutputHelper output)
         using var temp = new TempDir();
         var error = (Exception)Activator.CreateInstance(errorType)!;
 
-        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, "unused", new FakeScanBroker(), new ThrowingKeys(error),
+        var cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(temp.Path, "Cache") }, new FakeScanBroker(), new ThrowingKeys(error),
             CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false, fingerprints: new FakeFingerprints());
 
         Assert.Null(cache);

@@ -43,7 +43,15 @@ public interface IScanBroker : IFileScanner
 /// <param name="BlocklistCount">Hashes in the blocklist.</param>
 /// <param name="BlocklistErrorCount">Blocklist lines that were not a SHA-256.</param>
 public sealed record RulesLoadSummary(
-    int RuleCount, IReadOnlyList<string> FileErrors, int WarningCount, string Fingerprint, int BlocklistCount, int BlocklistErrorCount);
+    int RuleCount, IReadOnlyList<string> FileErrors, int WarningCount, string Fingerprint, int BlocklistCount, int BlocklistErrorCount)
+{
+    /// <summary>
+    /// The exact blocklist bytes the engine sent to the workers with this load (review D3 M1), or null if unknown. The scan cache
+    /// builds its own blocklist from these, never by re-reading a path, so it checks against the same, trust-checked list.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public byte[]? Blocklist { get; init; }
+}
 
 /// <summary>A snapshot of the scanner's state.</summary>
 /// <param name="Mode">Where parsing runs.</param>

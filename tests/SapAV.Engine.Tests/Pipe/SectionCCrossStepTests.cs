@@ -38,7 +38,7 @@ public sealed class SectionCCrossStepTests
         public SectionCEngine(TimeSpan? scanDelay = null)
         {
             Fingerprints = new FakeFingerprints();
-            Cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(_cacheTemp.Path, "Cache") }, "unused", new FakeScanBroker(),
+            Cache = ScanCache.TryCreate(new ScanCacheOptions { Folder = Path.Combine(_cacheTemp.Path, "Cache") }, new FakeScanBroker(),
                 new FixedKeyProvider(CacheHarness.Key), CacheHarness.Policy, TimeProvider.System, NullLogger.Instance, parentIsDataRoot: false,
                 fingerprints: Fingerprints) ?? throw new InvalidOperationException("The test cache wasn't created.");
             Q.Jobs.Cache = Cache;
