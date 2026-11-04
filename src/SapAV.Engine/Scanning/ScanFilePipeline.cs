@@ -152,6 +152,7 @@ internal sealed class ScanFilePipeline(
             var cached = stamp is { } key ? ResultCache!.TryHit(item, opened!, key, notes) : null;
 
             step = "scan";
+            using var owner = VirusTotal.OnlineLookupOwner.Use(budget?.Owner); // review D3 M3: the real-time VirusTotal share
             var report = cached ?? (opened is null ? failure! : await broker.ScanOpenedAsync(item, opened, notes, priority, jobToken).ConfigureAwait(false));
             if (cached is null && stamp is { } fresh)
             {

@@ -26,6 +26,18 @@ public sealed class VirusTotalOptions
     /// <summary>The same for scan jobs (Suspicious files only). Default zero; at most 2 minutes.</summary>
     public TimeSpan ScanMaxWait { get; set; } = TimeSpan.Zero;
 
+    /// <summary>
+    /// Review D3 M3: requests per UTC day kept for scan jobs and autostart targets, which real time can't use. Default 100 of 500,
+    /// so real time stops at 400 requests a day.
+    /// </summary>
+    public int ScanReserve { get; set; } = 100;
+
+    /// <summary>
+    /// Review D3 M3: one owner's real-time files may use at most 1/<c>RealTimeOwnerShare</c> of the daily budget. Default 4
+    /// (125 of 500). Machine-wide, SYSTEM- and admin-owned files share the engine's own share of the same size.
+    /// </summary>
+    public int RealTimeOwnerShare { get; set; } = 4;
+
     /// <summary>After the protected folder or the cache couldn't be opened, how long until the next try.</summary>
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -40,7 +52,9 @@ public sealed class VirusTotalOptions
     internal void Validate()
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(SuspiciousThreshold, 1, nameof(SuspiciousThreshold));
-        ArgumentOutOfRangeException.ThrowIfLessThan(MaliciousThreshold, 1, nameof(MaliciousThreshold));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaliciousThreshold, SuspiciousThreshold, nameof(MaliciousThreshold)); // review D3 L2
+        ArgumentOutOfRangeException.ThrowIfNegative(ScanReserve, nameof(ScanReserve));
+        ArgumentOutOfRangeException.ThrowIfLessThan(RealTimeOwnerShare, 1, nameof(RealTimeOwnerShare));
         ArgumentOutOfRangeException.ThrowIfNegative(RealTimeMaxWait.Ticks, nameof(RealTimeMaxWait));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(RealTimeMaxWait, TimeSpan.FromMinutes(2), nameof(RealTimeMaxWait));
         ArgumentOutOfRangeException.ThrowIfNegative(ScanMaxWait.Ticks, nameof(ScanMaxWait));
