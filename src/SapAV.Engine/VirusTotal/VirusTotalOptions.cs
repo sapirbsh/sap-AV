@@ -12,10 +12,11 @@ public sealed class VirusTotalOptions
     public int MaliciousThreshold { get; set; } = 5;
 
     /// <summary>
-    /// Below <see cref="MaliciousThreshold"/>, at least this many engines saying "malicious" or "suspicious" make the file
-    /// <b>Suspicious</b> (alert only, never quarantined). Default 2. Fewer is only a scan note.
+    /// Below <see cref="MaliciousThreshold"/> (or for a PUP / HackTool label), at least this many engines saying "malicious" make
+    /// the file <b>Suspicious</b> (alert only, never quarantined). Engines saying only "suspicious" don't count (review D3 L2).
+    /// Default 3. Fewer is only a scan note. Must not be above <see cref="MaliciousThreshold"/>.
     /// </summary>
-    public int SuspiciousThreshold { get; set; } = 2;
+    public int SuspiciousThreshold { get; set; } = 3;
 
     /// <summary>
     /// How long a real-time scan may wait for a free request slot (4 per minute). Default zero: never wait, the file is

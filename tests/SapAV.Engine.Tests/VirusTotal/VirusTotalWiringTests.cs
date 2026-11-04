@@ -152,20 +152,29 @@ public sealed class VirusTotalWiringTests : IDisposable
     }
 
     [Theory]
-    [InlineData(5, 0, Verdict.Malicious)]
-    [InlineData(4, 3, Verdict.Suspicious)]
-    [InlineData(1, 1, Verdict.Suspicious)]
-    [InlineData(1, 0, null)]
-    [InlineData(0, 0, null)]
-    public void FoundReports_MapByEngineCount(int malicious, int suspicious, Verdict? expected)
+    [InlineData(5, 0, "trojan.fake/test", Verdict.Malicious)]
+    [InlineData(4, 9, "trojan.fake/test", Verdict.Suspicious)]
+    [InlineData(3, 0, null, Verdict.Suspicious)]
+    [InlineData(2, 20, "trojan.fake/test", null)] // review D3 L2: "suspicious" engines don't count
+    [InlineData(40, 0, "hacktool.fake/keygen", Verdict.Suspicious)] // review D3 L2: PUP / HackTool is never Malicious (never auto-quarantined)
+    [InlineData(30, 0, "Not-A-Virus:RiskWare.Fake", Verdict.Suspicious)]
+    [InlineData(25, 0, "adware.fake/bundle", Verdict.Suspicious)]
+    [InlineData(0, 0, null, null)]
+    public void FoundReports_MapByMaliciousEngineCount_AndPupLabelsAreSuspiciousAtMost(int malicious, int suspicious, string? label, Verdict? expected)
     {
-        var report = new VirusTotalReport(malicious, suspicious, 60, 0, 70, null, [], "trojan.fake/test");
+        var report = new VirusTotalReport(malicious, suspicious, 60, 0, 70, null, [], label);
         var result = new VirusTotalLookupResult(VirusTotalOrigin.Live, VirusTotalStatus.Found, report, DateTimeOffset.UnixEpoch, null, "VirusTotal: x (live).");
 
         var outcome = VirusTotalVerdict.Map(result, new VirusTotalOptions());
 
         Assert.Equal(expected, outcome.Detection?.Verdict);
         Assert.NotNull(outcome.Note);
+    }
+
+    [Fact]
+    public void TheOptions_RefuseAMaliciousThresholdBelowTheSuspiciousOne()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new VirusTotalOnlineLookup(Service(), new VirusTotalOptions { MaliciousThreshold = 2, SuspiciousThreshold = 3 }, true));
     }
 
     [Fact]

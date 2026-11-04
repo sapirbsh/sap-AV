@@ -8,9 +8,11 @@ namespace SapAV.Engine.VirusTotal;
 /// <summary>
 /// Turns a VirusTotal answer into what the scan gets (D3):
 /// <list type="bullet">
-/// <item>Found, at least <see cref="VirusTotalOptions.MaliciousThreshold"/> (5) engines say malicious → <b>Malicious</b>.</item>
-/// <item>Found, at least <see cref="VirusTotalOptions.SuspiciousThreshold"/> (2) engines say malicious or suspicious →
-/// <b>Suspicious</b>.</item>
+/// <item>Found, at least <see cref="VirusTotalOptions.MaliciousThreshold"/> (5) engines say malicious → <b>Malicious</b>, unless
+/// the threat label is PUP-like (<see cref="IsPotentiallyUnwanted"/>): PUP / HackTool findings are never auto-quarantined
+/// (CLAUDE.md), so those are Suspicious at most (review D3 L2).</item>
+/// <item>Found, at least <see cref="VirusTotalOptions.SuspiciousThreshold"/> (3) engines say malicious → <b>Suspicious</b>.
+/// Engines that only say "suspicious" don't count.</item>
 /// <item>Found with fewer, or NotFound → no detection, an information note.</item>
 /// <item>No answer (rate limited, no key, refused key, error) → a note, <b>never Clean and never a failure</b> (review D2 M4):
 /// the local verdict stands.</item>
@@ -36,13 +38,14 @@ public static class VirusTotalVerdict
             return new(null, new ScanNote(ScanNoteLevel.Information, result.Detail));
         }
 
-        var verdict = report.Malicious >= options.MaliciousThreshold ? Verdict.Malicious
-            : report.Malicious + report.Suspicious >= options.SuspiciousThreshold ? Verdict.Suspicious
+        bool unwanted = IsPotentiallyUnwanted(report.ThreatLabel);
+        var verdict = report.Malicious >= options.MaliciousThreshold && !unwanted ? Verdict.Malicious
+            : report.Malicious >= options.SuspiciousThreshold ? Verdict.Suspicious
             : (Verdict?)null;
         if (verdict is null)
         {
             return new(null, new ScanNote(ScanNoteLevel.Information,
-                $"{result.Detail} Below the detection threshold ({options.SuspiciousThreshold} engines); not counted."));
+                $"{result.Detail} Below the detection threshold ({options.SuspiciousThreshold} engines saying malicious); not counted."));
         }
 
         string label = report.ThreatLabel is { Length: > 0 } threat ? $", labelled {threat}" : string.Empty;
@@ -51,4 +54,12 @@ public static class VirusTotalVerdict
         return new(new Detection(verdict.Value, reason, MitreTechniqueIds.MaliciousFile, DetectionSource.VirusTotal),
             new ScanNote(ScanNoteLevel.Information, result.Detail));
     }
+
+    /// <summary>Label words that mean potentially unwanted software or a hacking tool rather than malware.</summary>
+    public static IReadOnlyList<string> UnwantedLabelWords { get; } =
+        ["hacktool", "pua", "pup", "riskware", "not-a-virus", "adware", "potentially unwanted", "potentiallyunwanted"];
+
+    /// <summary>True if VirusTotal's threat label names a PUP / HackTool category (case-insensitive).</summary>
+    public static bool IsPotentiallyUnwanted(string? threatLabel) =>
+        threatLabel is { Length: > 0 } label && UnwantedLabelWords.Any(w => label.Contains(w, StringComparison.OrdinalIgnoreCase));
 }
