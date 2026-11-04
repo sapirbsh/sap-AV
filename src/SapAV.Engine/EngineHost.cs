@@ -127,6 +127,13 @@ public static class EngineHost
         builder.Services.Configure<RealTime.RealTimeOptions>(builder.Configuration.GetSection(RealTime.RealTimeOptions.SectionName));
         builder.Services.AddHostedService<RealTime.RealTimeService>();
 
+        // Real-time persistence monitoring (D4): registry and folder change watches on every autostart location, re-collecting
+        // only what changed, diffed against an HMAC-protected baseline in %ProgramData%\sap-AV\Persistence; new or changed
+        // entries are judged by the persistence scanner above (alerts 2001 / 2002). Read-only: nothing is removed (D5).
+        builder.Services.Configure<Persistence.Monitoring.PersistenceMonitorOptions>(
+            builder.Configuration.GetSection(Persistence.Monitoring.PersistenceMonitorOptions.SectionName));
+        builder.Services.AddHostedService<Persistence.Monitoring.PersistenceMonitorService>();
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();

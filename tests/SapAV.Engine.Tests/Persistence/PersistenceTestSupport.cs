@@ -35,9 +35,17 @@ internal sealed class RegistryTestRoot : IDisposable
 
     public WindowsRegistryView View { get; }
 
+    /// <summary>The keys standing in for HKLM and HKU (D4: the same roots for the real registry watches).</summary>
+    public RegistryKey MachineKey => _machine;
+
+    public RegistryKey UsersKey => _users;
+
     public RegistryKey Machine(string path) => _machine.CreateSubKey(path);
 
     public RegistryKey Users(string path) => _users.CreateSubKey(path);
+
+    /// <summary>D4: the fake "hive" of <paramref name="sid"/> goes away from HKU (a logoff); its ProfileList entry stays.</summary>
+    public void UnloadUser(string sid) => _users.DeleteSubKeyTree(sid, throwOnMissingSubKey: false);
 
     /// <summary>A ProfileList entry, and (when <paramref name="loaded"/>) a hive under HKU with a Volatile Environment.</summary>
     public void AddUser(string sid, string profile, bool loaded)
