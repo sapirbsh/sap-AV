@@ -54,6 +54,10 @@ internal interface IDirectoryWatchFactory
 {
     /// <exception cref="Win32Exception">The watch could not be started.</exception>
     IDisposable Start(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes);
+
+    /// <summary>D4: as <see cref="Start(WatchedRoot, IDirectoryWatchSink, int)"/>; <paramref name="subtree"/> false watches the folder's own entries only.</summary>
+    /// <exception cref="Win32Exception">The watch could not be started.</exception>
+    IDisposable Start(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes, bool subtree) => Start(root, sink, bufferBytes);
 }
 
 /// <summary>
@@ -144,6 +148,8 @@ internal sealed class NativeDirectoryWatchFactory : IDirectoryWatchFactory
     public static NativeDirectoryWatchFactory Instance { get; } = new();
 
     public IDisposable Start(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes) => new NativeDirectoryWatch(root, sink, bufferBytes);
+
+    public IDisposable Start(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes, bool subtree) => new NativeDirectoryWatch(root, sink, bufferBytes, subtree);
 }
 
 /// <summary>
@@ -176,13 +182,16 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
     private readonly object _gate = new();
     private readonly ThreadPoolBoundHandle? _bound;
     private readonly PreAllocatedOverlapped? _overlapped;
+    private readonly bool _subtree;
     private bool _extended = true;
     private uint _filter = BasicFilter | StreamFilter;
     private bool _pending;
     private bool _disposed;
 
-    public NativeDirectoryWatch(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes)
+    /// <param name="subtree">Also changes in subfolders (D1: yes; D4's Startup folders: only the folder's own entries).</param>
+    public NativeDirectoryWatch(WatchedRoot root, IDirectoryWatchSink sink, int bufferBytes, bool subtree = true)
     {
+        _subtree = subtree;
         _root = root ?? throw new ArgumentNullException(nameof(root));
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _buffer = GC.AllocateArray<byte>(bufferBytes, pinned: true);
@@ -268,8 +277,8 @@ internal sealed unsafe class NativeDirectoryWatch : IDisposable
             fixed (byte* buffer = _buffer)
             {
                 ok = _extended
-                    ? ReadDirectoryChangesExW(_handle, buffer, (uint)_buffer.Length, true, _filter, null, overlapped, IntPtr.Zero, ReadDirectoryNotifyExtendedInformation)
-                    : ReadDirectoryChangesW(_handle, buffer, (uint)_buffer.Length, true, _filter, null, overlapped, IntPtr.Zero);
+                    ? ReadDirectoryChangesExW(_handle, buffer, (uint)_buffer.Length, _subtree, _filter, null, overlapped, IntPtr.Zero, ReadDirectoryNotifyExtendedInformation)
+                    : ReadDirectoryChangesW(_handle, buffer, (uint)_buffer.Length, _subtree, _filter, null, overlapped, IntPtr.Zero);
             }
 
             if (ok)

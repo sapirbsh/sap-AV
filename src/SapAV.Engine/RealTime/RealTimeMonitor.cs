@@ -1015,52 +1015,16 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         }
     }
 
-    private readonly record struct OpenedRoot(SafeFileHandle Handle, ulong Volume, string FileId);
-
-    /// <summary>
-    /// Opens a watched folder: a drive-letter path on a local fixed drive, reached through <see cref="SafeTree"/> (no link on
-    /// the way or at the end), a directory, local by the remote-file check on its handle, not excluded, with a file ID.
-    /// </summary>
-    private OpenedRoot? OpenRoot(string exact, out string? problem)
+    /// <summary>Opens a watched folder (<see cref="WatchedRootOpener"/>) that isn't excluded from scanning.</summary>
+    private WatchedRootOpener.Opened? OpenRoot(string exact, out string? problem)
     {
-        if (exact.Length < 7 || exact[5] != ':' || _driveType(exact.Substring(4, 3)) != FullScanVolumes.DriveFixed)
-        {
-            problem = "it isn't on a local fixed drive";
-            return null;
-        }
-
-        if (_excluded.Contains(exact))
+        if (WatchedRootOpener.IsOnFixedDrive(exact, _driveType) && _excluded.Contains(exact))
         {
             problem = "it is excluded from scanning";
             return null;
         }
 
-        var handle = SafeTree.Open(exact, SafeTree.DirectoryAccess, SafeTree.ShareAll, N.FileDirectoryFile, out var failure, out int error);
-        if (handle is null)
-        {
-            problem = failure switch
-            {
-                SafeTreeFailure.Redirected => "it, or a folder on its path, is a junction or symbolic link; links are never followed",
-                SafeTreeFailure.NotFound => "it doesn't exist",
-                SafeTreeFailure.Remote => "it is on a remote file system",
-                SafeTreeFailure.AccessDenied => "access is denied",
-                _ => $"it could not be opened safely ({failure}, Win32 error {error})",
-            };
-            return null;
-        }
-
-        problem = !SafeTree.IsDirectory(handle) ? "it isn't a folder"
-            : _remote.Classify(handle) != FileLocation.Local ? "it is on a remote file system"
-            : !NativeFile.TryGetFileId(handle, out _, out _) ? "its file system reports no file ID"
-            : null;
-        if (problem is not null)
-        {
-            handle.Dispose();
-            return null;
-        }
-
-        NativeFile.TryGetFileId(handle, out ulong volume, out string fileId);
-        return new OpenedRoot(handle, volume, fileId);
+        return WatchedRootOpener.Open(exact, _driveType, _remote, out problem);
     }
 
     private void StopRootLocked(string key, WatchedRoot root, string why)
