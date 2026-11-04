@@ -12,6 +12,12 @@ internal interface IPersistenceSource
 
     /// <summary>What belongs to one user, under that user's sub-budget, so one user's entries can't crowd out anything machine-wide or another user's.</summary>
     void CollectUser(PersistenceContext context, UserProfile user) { }
+
+    /// <summary>
+    /// D4: the registry keys and folders whose change can change this source's entries: the machine part's (<paramref name="user"/>
+    /// null) or one user's. Real-time persistence monitoring watches them and re-collects only this scope when one changes.
+    /// </summary>
+    IReadOnlyList<PersistenceWatchTarget> WatchTargets(PersistenceContext context, UserProfile? user) => [];
 }
 
 /// <summary>
@@ -39,6 +45,43 @@ internal sealed class RegistryAutorunSource : IPersistenceSource
     private const long MonitorSilentProcessExit = 0x200;
 
     public string Name => "registry autoruns";
+
+    /// <summary>
+    /// D4: the Run / RunOnce / Policies Run keys, StartupApproved (Task Manager's on/off), Winlogon, the IFEO and
+    /// SilentProcessExit trees; per loaded user hive also the user's Environment and Volatile Environment (they change how
+    /// the user's entries resolve).
+    /// </summary>
+    public IReadOnlyList<PersistenceWatchTarget> WatchTargets(PersistenceContext context, UserProfile? user)
+    {
+        if (user is null)
+        {
+            return
+            [
+                .. RunKeyTargets(RegistryRoot.LocalMachine, "SOFTWARE"),
+                PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, $@"SOFTWARE\WOW6432Node\{CurrentVersion}\Run"),
+                PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, $@"SOFTWARE\WOW6432Node\{CurrentVersion}\RunOnce"),
+                PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, IfeoKey, subtree: true),
+                PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, IfeoWowKey, subtree: true),
+                PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, SilentExitKey, subtree: true),
+            ];
+        }
+
+        return !user.HiveLoaded ? [] :
+        [
+            .. RunKeyTargets(RegistryRoot.Users, user.Sid + @"\Software"),
+            PersistenceWatchTarget.Key(RegistryRoot.Users, user.Sid + @"\Environment"),
+            PersistenceWatchTarget.Key(RegistryRoot.Users, user.Sid + @"\Volatile Environment"),
+        ];
+    }
+
+    private static IEnumerable<PersistenceWatchTarget> RunKeyTargets(RegistryRoot root, string software) =>
+    [
+        PersistenceWatchTarget.Key(root, $@"{software}\{CurrentVersion}\Run"),
+        PersistenceWatchTarget.Key(root, $@"{software}\{CurrentVersion}\RunOnce"),
+        PersistenceWatchTarget.Key(root, $@"{software}\{CurrentVersion}\Policies\Explorer\Run"),
+        PersistenceWatchTarget.Key(root, $@"{software}\{Approved}", subtree: true),
+        PersistenceWatchTarget.Key(root, $@"{software}\{WinlogonKey}"),
+    ];
 
     public void CollectMachine(PersistenceContext context)
     {

@@ -90,10 +90,11 @@ public sealed record PersistenceIssue
 /// <summary>What one source cost during a collection (machine and per-user parts together), for the log and for finding slow sources.</summary>
 /// <param name="ParsedFiles">Shortcuts / task definitions sent to the sandboxed parser.</param>
 /// <param name="ParseTime">Time spent waiting for that parser (part of <paramref name="Duration"/>).</param>
-public sealed record PersistenceSourceTiming(string Source, TimeSpan Duration, int Entries, int Issues, int ParsedFiles, TimeSpan ParseTime)
+/// <param name="ReusedFiles">D4: definition files unchanged since an earlier collection, whose earlier parse result was reused (not sent to the parser).</param>
+public sealed record PersistenceSourceTiming(string Source, TimeSpan Duration, int Entries, int Issues, int ParsedFiles, TimeSpan ParseTime, int ReusedFiles = 0)
 {
     public override string ToString() =>
-        $"{Source}: {Duration.TotalMilliseconds:0} ms, {Entries} entries, {Issues} issues, {ParsedFiles} files parsed ({ParseTime.TotalMilliseconds:0} ms)";
+        $"{Source}: {Duration.TotalMilliseconds:0} ms, {Entries} entries, {Issues} issues, {ParsedFiles} files parsed ({ParseTime.TotalMilliseconds:0} ms), {ReusedFiles} unchanged reused";
 }
 
 /// <summary>The result of one collection: the entries and what couldn't be collected. Never thrown, always returned.</summary>

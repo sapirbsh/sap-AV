@@ -65,6 +65,12 @@ public sealed class ParseBenchmarkTests(ITestOutputHelper output) : IDisposable
         var idle = Collect("idle, batched", batched);
         Assert.Equal(Files, idle.Entries.Count);
 
+        // D4: the same collection again with nothing changed, through the parse cache (only changed files are parsed).
+        var cached = new PersistenceCollector(_root.View, new SetProbe(), [new ScheduledTaskSource(_folder.Path)], parser: broker, parsedFiles: new ParsedFileCache());
+        Collect("idle, batched, first with the parse cache", cached);
+        var repeat = Collect("idle, repeat with nothing changed (parse cache)", cached);
+        Assert.Equal(Files, repeat.Entries.Count);
+
         using (Saturate(out int threads))
         {
             Collect($"{threads} busy normal-priority threads, batched", batched);
@@ -137,7 +143,7 @@ public sealed class ParseBenchmarkTests(ITestOutputHelper output) : IDisposable
         }
 
         var tasks = result!.SourceTimings!.Single();
-        output.WriteLine($"{label}: {tasks.Duration.TotalMilliseconds:0} ms, {tasks.Entries} entries, {tasks.Issues} issues, {tasks.ParsedFiles} parsed ({tasks.ParseTime.TotalMilliseconds:0} ms parsing)");
+        output.WriteLine($"{label}: {tasks.Duration.TotalMilliseconds:0} ms, {tasks.Entries} entries, {tasks.Issues} issues, {tasks.ParsedFiles} parsed ({tasks.ParseTime.TotalMilliseconds:0} ms parsing), {tasks.ReusedFiles} unchanged reused");
         return result;
     }
 

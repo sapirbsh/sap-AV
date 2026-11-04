@@ -27,9 +27,16 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null) : IPersisten
 
     public string Name => "scheduled tasks";
 
+    /// <summary>D4: the Tasks folder and its subfolders (a new, changed or deleted definition file).</summary>
+    public IReadOnlyList<PersistenceWatchTarget> WatchTargets(PersistenceContext context, UserProfile? user) =>
+        user is null && Root(context) is { } root && CorePersistenceText.NormalizeLocalPath(root) is { } folder ? [PersistenceWatchTarget.Folder(folder, subtree: true)] : [];
+
+    private string? Root(PersistenceContext context) =>
+        tasksRoot ?? (context.Machine.SystemRoot is { } systemRoot ? Path.Join(systemRoot, @"System32\Tasks") : null);
+
     public void CollectMachine(PersistenceContext context)
     {
-        string? root = tasksRoot ?? (context.Machine.SystemRoot is { } systemRoot ? Path.Join(systemRoot, @"System32\Tasks") : null);
+        string? root = Root(context);
         if (root is null || CorePersistenceText.NormalizeLocalPath(root) is not { } folder)
         {
             context.AddIssue(PersistenceKind.ScheduledTask, null, root ?? "Tasks", PersistenceIssueReason.Error, "The Tasks folder isn't known.");

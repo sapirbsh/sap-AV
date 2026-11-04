@@ -23,6 +23,10 @@ internal sealed class ServiceSource : IPersistenceSource
 
     public string Name => "services";
 
+    /// <summary>D4: the whole Services tree (a new service, or a changed ImagePath / ServiceDll / Start of an existing one).</summary>
+    public IReadOnlyList<PersistenceWatchTarget> WatchTargets(PersistenceContext context, UserProfile? user) =>
+        user is null ? [PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, ServicesKey, subtree: true)] : [];
+
     public void CollectMachine(PersistenceContext context)
     {
         using var services = context.TryOpen(RegistryRoot.LocalMachine, ServicesKey, PersistenceKind.Service, null, out var display);

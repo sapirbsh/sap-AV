@@ -42,9 +42,7 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             return;
         }
 
-        string? common = ShellFolder(context, RegistryRoot.LocalMachine, @"SOFTWARE\" + ShellFolders, "Common Startup", context.Machine)
-            ?? (context.Machine.Get("ProgramData") is { } programData ? Path.Join(programData, DefaultSuffix) : null);
-        if (common is not null)
+        if (CommonFolder(context) is { } common)
         {
             CollectOne(context, common, null);
         }
@@ -52,20 +50,63 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
 
     public void CollectUser(PersistenceContext context, UserProfile user)
     {
-        if (folderOverride is not null)
-        {
-            return;
-        }
-
-        string? folder = user.HiveLoaded
-            ? ShellFolder(context, RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}", "Startup", user.Environment)
-            : null;
-        folder ??= user.ProfilePath is { } profile ? Path.Join(profile, @"AppData\Roaming", DefaultSuffix) : null;
-        if (folder is not null)
+        if (folderOverride is null && UserFolder(context, user) is { } folder)
         {
             CollectOne(context, folder, user.Sid);
         }
     }
+
+    /// <summary>
+    /// D4: the Startup folder itself (top level only, as Explorer runs it), the User Shell Folders key that can move it, and
+    /// StartupApproved (Task Manager's on / off). A folder on a network share or that isn't a local path isn't watched.
+    /// </summary>
+    public IReadOnlyList<PersistenceWatchTarget> WatchTargets(PersistenceContext context, UserProfile? user)
+    {
+        var targets = new List<PersistenceWatchTarget>();
+        void AddFolder(string? folder)
+        {
+            if (folder is not null && !(folder.StartsWith(@"\\", StringComparison.Ordinal) && !folder.StartsWith(@"\\?\", StringComparison.Ordinal))
+                && CorePersistenceText.NormalizeLocalPath(folder) is { } local)
+            {
+                targets.Add(PersistenceWatchTarget.Folder(local, subtree: false));
+            }
+        }
+
+        if (folderOverride is not null)
+        {
+            if (user is null)
+            {
+                folderOverride.ToList().ForEach(f => AddFolder(f.Folder));
+            }
+
+            return targets;
+        }
+
+        if (user is null)
+        {
+            AddFolder(CommonFolder(context));
+            targets.Add(PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, @"SOFTWARE\" + ShellFolders));
+            targets.Add(PersistenceWatchTarget.Key(RegistryRoot.LocalMachine, @"SOFTWARE\" + Approved));
+            return targets;
+        }
+
+        AddFolder(UserFolder(context, user));
+        if (user.HiveLoaded)
+        {
+            targets.Add(PersistenceWatchTarget.Key(RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}"));
+            targets.Add(PersistenceWatchTarget.Key(RegistryRoot.Users, $@"{user.Sid}\Software\{Approved}"));
+        }
+
+        return targets;
+    }
+
+    private static string? CommonFolder(PersistenceContext context) =>
+        ShellFolder(context, RegistryRoot.LocalMachine, @"SOFTWARE\" + ShellFolders, "Common Startup", context.Machine)
+            ?? (context.Machine.Get("ProgramData") is { } programData ? Path.Join(programData, DefaultSuffix) : null);
+
+    private static string? UserFolder(PersistenceContext context, UserProfile user) =>
+        (user.HiveLoaded ? ShellFolder(context, RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}", "Startup", user.Environment) : null)
+            ?? (user.ProfilePath is { } profile ? Path.Join(profile, @"AppData\Roaming", DefaultSuffix) : null);
 
     private static void CollectOne(PersistenceContext context, string folder, string? sid)
     {

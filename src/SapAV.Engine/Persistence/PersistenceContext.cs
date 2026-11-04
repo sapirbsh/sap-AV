@@ -53,7 +53,8 @@ internal sealed class PersistenceContext
 
     public PersistenceContext(
         IRegistryView registry, CommandLineResolver resolver, EnvironmentBlock machine, IReadOnlyList<UserProfile> users,
-        PersistenceLimits limits, CancellationToken cancellationToken, Stopwatch? clock = null, IPersistenceFileParser? parser = null)
+        PersistenceLimits limits, CancellationToken cancellationToken, Stopwatch? clock = null, IPersistenceFileParser? parser = null,
+        ParsedFileCache? parsedFiles = null)
     {
         Registry = registry;
         Resolver = resolver;
@@ -63,7 +64,17 @@ internal sealed class PersistenceContext
         CancellationToken = cancellationToken;
         _clock = clock ?? Stopwatch.StartNew();
         Parser = parser ?? UnavailablePersistenceParser.NoSandbox;
+        ParsedFiles = parsedFiles;
     }
+
+    /// <summary>D4: earlier parse results of unchanged definition files (null = every file is parsed).</summary>
+    private ParsedFileCache? ParsedFiles { get; }
+
+    /// <summary>
+    /// D4: something was left out silently from here on: the entry cap or the time budget was reached, or the current user's
+    /// sub-budget ran out (each is reported once, as an issue of whatever was running then). Later parts look complete but aren't.
+    /// </summary>
+    public bool Truncated => _entryCapReported || _budgetReported || (_currentUser is not null && _userReported) || _issues.Count >= Limits.MaxIssues;
 
     public IRegistryView Registry { get; }
 
@@ -203,6 +214,50 @@ internal sealed class PersistenceContext
             return [];
         }
 
+        if (ParsedFiles is not { } cache)
+        {
+            return ParseUncached(files, entryKind);
+        }
+
+        // D4: unchanged files (same stamp, with the USN) reuse their earlier result; only the rest go to the worker.
+        var results = new PersistenceParseResult[files.Count];
+        var stamps = new Scanning.Cache.FileStamp?[files.Count];
+        var misses = new List<int>(files.Count);
+        for (int i = 0; i < files.Count; i++)
+        {
+            stamps[i] = ParsedFileCache.StampOf(files[i].File);
+            if (stamps[i] is { } stamp && cache.TryGet(files[i].Kind, files[i].DisplayPath, stamp, out var kept))
+            {
+                results[i] = kept;
+                ReusedFiles++;
+            }
+            else
+            {
+                misses.Add(i);
+            }
+        }
+
+        if (misses.Count == 0)
+        {
+            return results;
+        }
+
+        var parsed = ParseUncached(misses.Select(i => files[i]).ToArray(), entryKind);
+        for (int k = 0; k < misses.Count; k++)
+        {
+            int i = misses[k];
+            results[i] = parsed[k];
+            if (stamps[i] is { } stamp)
+            {
+                cache.Put(files[i].Kind, files[i].DisplayPath, stamp, parsed[k]);
+            }
+        }
+
+        return results;
+    }
+
+    private IReadOnlyList<PersistenceParseResult> ParseUncached(IReadOnlyList<PersistenceParseInput> files, PersistenceKind entryKind)
+    {
         if (ParserDown)
         {
             return Enumerable.Repeat(PersistenceParseResult.Unavailable("The sandboxed parser isn't available."), files.Count).ToArray();
@@ -225,7 +280,7 @@ internal sealed class PersistenceContext
         }
         finally
         {
-            ParsedFiles += files.Count;
+            FilesParsed += files.Count;
             ParseTime += Stopwatch.GetElapsedTime(started);
         }
 
@@ -331,9 +386,12 @@ internal sealed class PersistenceContext
     }
 
     /// <summary>Definition files sent to the parser so far, and how long the parser took (for the per-source timings).</summary>
-    public int ParsedFiles { get; private set; }
+    public int FilesParsed { get; private set; }
 
     public TimeSpan ParseTime { get; private set; }
+
+    /// <summary>D4: definition files whose earlier parse result was reused (unchanged since).</summary>
+    public int ReusedFiles { get; private set; }
 
     public PersistenceCollection ToCollection(IReadOnlyList<PersistenceSourceTiming>? timings = null) => new(_entries, _issues, Now, timings);
 }
