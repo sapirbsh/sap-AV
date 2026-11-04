@@ -647,6 +647,54 @@ Deferred:
   - The key string can't be wiped from memory.
   - The cache MAC key file has no trusted-owner check of its own; it relies on the D3 folder ACL.
 
+**Notes from D3 (VirusTotal wiring, protected rules and blocklist; built `b4f9191`…`c6e7086`).**
+- **When a hash is looked up:**
+  - signed files (Microsoft or OtherTrusted) never;
+  - real time: only risky extensions;
+  - scans and Persistence: only Suspicious files;
+  - already Malicious files: never.
+- **MITRE:** VirusTotal detections get T1204.002.
+- **Data:** VirusTotal data lives in `%ProgramData%\sap-AV\VirusTotal\`. The feature is off by default; setting the key
+  and turning it on or off is admin-only over the pipe.
+- **Rules and blocklist:** they come from `%ProgramData%\sap-AV\Rules` and `\Blocklist`, seeded from a FolderTrust-checked
+  install folder.
+- **Open from the builder:**
+  - **D2 L6:** a scan-cache hit skips the VirusTotal lookup, so a Suspicious file cached while VirusTotal was rate-limited
+    isn't looked up again until the entry expires.
+  - **Health alert:** a refused VirusTotal folder shows only as `LastProblem` and a scan note, with no Event Log alert.
+  - **Duplicated helper:** `RunningAsSystemOrElevated` exists in both `QuarantineStartupService` and `EnginePipeServer`;
+    move both to `EngineAccount`.
+  - **Installer items:** B2 M3, B5 M-B, Installer M3/M4/M5, the configured-Root ancestors check (L5), and B6
+    M1/L1/L2 still wait for the installer step.
+
+**D3 immediate review (no Critical).** Fixed in the D3 fix round:
+- H1: a user-created data root disabled the rules and blocklist; they now fall back to the trusted install folder,
+  with an alert.
+- M1: the cache read the blocklist by path.
+- M2: the VirusTotal lookup held the worker slot.
+- M3: per-owner VirusTotal budget shares.
+- L2: PUP-like labels are never Malicious.
+- L4 and L6.
+
+Remaining:
+- **D3 follow-up (M4):** seeding by last-write time can't remove or roll back shipped rules. A rule an update removes
+  stays forever, an update with older mtimes is never applied, and an admin's blocklist additions are overwritten.
+  - Ship a manifest (file name, SHA-256, package version) and sync by content hash.
+  - Delete managed files the new manifest drops.
+  - Keep admin content in `local-*.yar` / `blocklist.local.txt`.
+- **D3 follow-up (L1):** FolderTrust checks the folder and its parent only, and seed files are re-read by path. Read
+  them through handles relative to the verified folder (`SafeTree.OpenChild`).
+- **B5 / D3 (L3):** a compromised worker can report a famous malware hash for an innocent file, which yields a
+  convincing "VirusTotal 60/70" alert. Before a VirusTotal-only auto-quarantine, require the engine-side quarantine
+  re-hash to match.
+- **D3 follow-up (M2 rest):** the slot is now released before the VirusTotal lookup. The caller's file handle, which
+  denies writers, is still held during the request (up to the 20 s client timeout), because quarantine needs it
+  afterwards. Close it and reopen it identity-checked for quarantine, or do the lookup after the verdict handler.
+- **D3 follow-up (M3 rest):** per-owner VirusTotal day counts are in memory only, so a restart resets them; the global
+  `vt-usage.json` limit still holds.
+- **D3 follow-up (L5):** VirusTotal lazy init (ACL checks, SQLite, DPAPI) can run on a pipe thread. Warm it up on a
+  background task at start.
+
 **D1 immediate review (no Critical).** Fixed in the D1 fix round:
 - H1: oplock holders stalled the real-time threads.
 - H2: no per-root queue quota or fairness.

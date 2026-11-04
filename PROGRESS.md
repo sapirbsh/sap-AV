@@ -9,12 +9,12 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1 done + immediate review fixed, D2 done; D3 being built) |
+| D — Real-time + VirusTotal | In progress (D1, D2, D3 done, D1 and D3 immediate reviews fixed; next D4) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after D2): Core 1420 passed + 1 skipped, Engine 642 passed + 13 skipped. Simulated clean machine: 0 failed.
+Tests (after D3): Core 1423 passed + 1 skipped, Engine 692 passed + 15 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`9628568`).
 
 ## Section A — Detection engine (done)
@@ -202,8 +202,28 @@ D1 after the push:
 Elevated collection timings on CI now vary between 3.5 s and 9 s per run (24.9 s once, on a slow runner). They used to
 be 34 s.
 
-**Next:** D3 (VT wiring + `%ProgramData%\sap-AV` ACL, being built now, then an immediate review), D4 (real-time
-persistence monitoring), D5 (Block & remove), then the section D tester + reviewer pass.
+**D3 (VirusTotal wiring + protected data folders) is done** (`b4f9191`…`efbd9d4`):
+- **When VirusTotal is asked:**
+  - never for signed files;
+  - real time: only risky extensions;
+  - scans and autostarts: only Suspicious files.
+- **Verdict from VirusTotal:**
+  - 5 or more engines say "malicious": Malicious;
+  - 3 or more: Suspicious;
+  - PUP or HackTool labels are never more than Suspicious, so they're never auto-quarantined;
+  - MITRE T1204.002.
+- **When there's no answer:** rate limited, no key or an error leave a scan note, never Clean.
+- **Daily budget:** 500 requests, with 100 kept for scans. Each user gets at most 125 a day for real time, so one user
+  can't use up everyone's budget.
+- **Pipe:** status for everyone, but never the key. Setting the key and turning the feature on or off are admin-only.
+  The feature is off by default.
+- **Rules and blocklist:** they load only from `%ProgramData%\sap-AV\Rules` and `\Blocklist`, seeded from the trusted
+  install folder. If a user pre-creates the data folder, the engine falls back to the install folder and raises an
+  alert, never "no rules".
+- **Immediate review:** no Critical. Fixed: H1 (that pre-created folder), M1 (the cache read the blocklist by path),
+  M2 (the lookup held a worker slot), M3 (per-owner budget), L2, L4, L6. The rest is in ROADMAP under D3.
+
+**Next:** D4 (real-time persistence monitoring), D5 (Block & remove), then the section D tester + reviewer pass.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -217,6 +237,6 @@ persistence monitoring), D5 (Block & remove), then the section D tester + review
 
 ## What's left
 
-- **D:** VirusTotal wiring (D3), real-time persistence monitoring (D4), Block & remove (D5), then the section D
-  tester + reviewer pass. (D1 and D2 done.)
+- **D:** real-time persistence monitoring (D4), Block & remove (D5), then the section D tester + reviewer pass.
+  (D1–D3 done.)
 - Then E → F → G, ending with the Phase 1 security review (G5).
