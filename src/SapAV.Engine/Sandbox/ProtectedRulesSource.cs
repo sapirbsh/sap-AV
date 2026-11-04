@@ -101,27 +101,49 @@ public sealed class ProtectedRulesSource : IScanRulesSource
         string blocklistPath = _options.ResolvedBlocklistPath;
 
         IReadOnlyList<YaraRuleFile> rules = [];
-        if (Prepare(rulesDirectory, _managedRules, "rules", errors, SeedRules))
+        switch (Prepare(rulesDirectory, _managedRules, "rules", errors, SeedRules, _shippedRules, Directory.Exists(_shippedRules)))
         {
-            rules = DirectoryScanRulesSource.ReadRules(rulesDirectory, errors, cancellationToken);
+            case Source.Target:
+                rules = DirectoryScanRulesSource.ReadRules(rulesDirectory, errors, cancellationToken);
+                break;
+            case Source.Shipped:
+                rules = DirectoryScanRulesSource.ReadRules(_shippedRules, errors, cancellationToken);
+                break;
         }
 
         byte[] blocklist = [];
         bool blocklistManaged = Same(blocklistPath, _managedBlocklist);
         string blocklistFolder = Path.GetDirectoryName(blocklistPath) ?? blocklistPath;
-        if (Prepare(blocklistFolder, blocklistManaged ? blocklistFolder : null, "blocklist", errors, SeedBlocklist))
+        string shippedFolder = Path.GetDirectoryName(_shippedBlocklist) ?? _shippedBlocklist;
+        switch (Prepare(blocklistFolder, blocklistManaged ? blocklistFolder : null, "blocklist", errors, SeedBlocklist, shippedFolder, File.Exists(_shippedBlocklist)))
         {
-            blocklist = await DirectoryScanRulesSource.ReadBlocklistAsync(blocklistPath, errors, cancellationToken).ConfigureAwait(false);
+            case Source.Target:
+                blocklist = await DirectoryScanRulesSource.ReadBlocklistAsync(blocklistPath, errors, cancellationToken).ConfigureAwait(false);
+                break;
+            case Source.Shipped:
+                blocklist = await DirectoryScanRulesSource.ReadBlocklistAsync(_shippedBlocklist, errors, cancellationToken).ConfigureAwait(false);
+                break;
         }
 
         return DirectoryScanRulesSource.Package(rules, blocklist, errors);
     }
 
+    private enum Source
+    {
+        None,
+        Target,
+        Shipped,
+    }
+
     /// <summary>
-    /// True if <paramref name="folder"/> may be read: the protected folder (created / verified, then seeded), or a configured
-    /// folder that passes the trust check. Otherwise false with a read error (the engine then alerts, B3 M5).
+    /// Where to read: the protected folder (created / verified, then seeded), or a configured folder that passes the trust check
+    /// (<see cref="Source.Target"/>). Review D3 H1: when the protected folder itself is refused (e.g. a standard user pre-created
+    /// <c>%ProgramData%\sap-AV</c> before the first start), the shipped files are read directly, if the install folder passes the
+    /// trust check, so a user can't switch YARA and the blocklist off that way; the read error stays, so the engine still raises
+    /// the rules health alert (B3 M5). Otherwise <see cref="Source.None"/> with a read error.
     /// </summary>
-    private bool Prepare(string folder, string? managed, string label, List<string> errors, Action<string, List<string>> seed)
+    private Source Prepare(string folder, string? managed, string label, List<string> errors, Action<string, List<string>> seed,
+        string shippedFolder, bool shippedExists)
     {
         if (managed is not null && Same(folder, managed))
         {
@@ -131,31 +153,40 @@ public sealed class ProtectedRulesSource : IScanRulesSource
             }
             catch (QuarantineStoreException ex)
             {
+                if (shippedExists && ShippedTrusted(shippedFolder, label, errors))
+                {
+                    errors.Add($"The protected {label} folder was refused ({ex.Message}); the {label} were loaded from the install folder {shippedFolder} instead.");
+                    return Source.Shipped;
+                }
+
                 errors.Add($"Not loaded ({label}): {ex.Message}");
-                return false;
+                return Source.None;
             }
 
             seed(folder, errors);
-            return true;
+            return Source.Target;
         }
 
-        string? problem;
-        try
-        {
-            problem = _trust.Problem(folder);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            problem = $"it could not be checked ({ex.GetType().Name})";
-        }
-
+        string? problem = Check(folder);
         if (problem is not null)
         {
             errors.Add($"The configured {label} folder {folder} was refused: {problem}. Only a folder that no standard user can change is used.");
-            return false;
+            return Source.None;
         }
 
-        return true;
+        return Source.Target;
+    }
+
+    private string? Check(string folder)
+    {
+        try
+        {
+            return _trust.Problem(folder);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return $"it could not be checked ({ex.GetType().Name})";
+        }
     }
 
     private void SeedRules(string target, List<string> errors)
@@ -201,22 +232,12 @@ public sealed class ProtectedRulesSource : IScanRulesSource
 
     private bool ShippedTrusted(string folder, string label, List<string> errors)
     {
-        string? problem;
-        try
-        {
-            problem = _trust.Problem(folder);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            problem = $"it could not be checked ({ex.GetType().Name})";
-        }
-
-        if (problem is null)
+        if (Check(folder) is not { } problem)
         {
             return true;
         }
 
-        errors.Add($"The shipped {label} files in {folder} were not copied into the protected folder: {problem}. Install the engine into an " +
+        errors.Add($"The shipped {label} files in {folder} can't be used (not copied, not loaded): {problem}. Install the engine into an " +
             "administrator-only folder (Program Files), or put the files into the protected folder as an administrator.");
         return false;
     }

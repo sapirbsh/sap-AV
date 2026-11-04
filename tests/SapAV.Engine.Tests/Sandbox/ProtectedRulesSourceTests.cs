@@ -88,7 +88,7 @@ public sealed class ProtectedRulesSourceTests : IDisposable
 
         Assert.Empty(package.Blocklist);
         Assert.Empty(package.RuleFiles);
-        Assert.Contains(package.ReadErrors, e => e.Contains("were not copied", StringComparison.Ordinal));
+        Assert.Contains(package.ReadErrors, e => e.Contains("can't be used", StringComparison.Ordinal));
         Assert.False(File.Exists(ManagedBlocklist));
     }
 
@@ -120,18 +120,63 @@ public sealed class ProtectedRulesSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task APreCreatedDataRoot_WithAUserMadeBlocklistFolder_IsRefused_AndThePlantedListIsNeverLoaded()
+    public async Task APreCreatedDataRoot_WithAUserMadeBlocklistFolder_IsRefused_ThePlantedListIsNeverLoaded_AndTheShippedOneIs()
     {
         // A standard user pre-created %ProgramData%\sap-AV\Blocklist (inherited ProgramData ACL) holding an empty list, to take
-        // their malware off the blocklist. The root can't be fixed (it holds content a user made), so nothing is loaded.
+        // their malware off the blocklist. The root can't be fixed (it holds content a user made). Review D3 H1: the engine then
+        // reads the trusted shipped files directly instead of running with no rules, and says so (rules health alert).
         var planted = Directory.CreateDirectory(Path.GetDirectoryName(ManagedBlocklist)!).FullName;
         File.WriteAllText(Path.Combine(planted, "blocklist.txt"), "# nothing blocked\n");
 
         var package = await Source().LoadAsync();
 
-        Assert.Empty(package.Blocklist);
-        Assert.Contains(package.ReadErrors, e => e.StartsWith("Not loaded (blocklist)", StringComparison.Ordinal));
+        Assert.Equal(ShippedHash + "\n", Encoding.UTF8.GetString(package.Blocklist));
+        Assert.Equal("shipped.yar", Assert.Single(package.RuleFiles).Name);
+        Assert.Contains(package.ReadErrors, e => e.StartsWith("The protected blocklist folder was refused", StringComparison.Ordinal)
+            && e.Contains("loaded from the install folder", StringComparison.Ordinal));
         Assert.Equal("# nothing blocked\n", File.ReadAllText(Path.Combine(planted, "blocklist.txt"))); // never deleted or rewritten
+
+        // ... and the engine raises the rules health alert for it, while YARA and the blocklist work.
+        using var broker = new InProcessScanBroker(Source(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        var summary = await broker.ReloadRulesAsync();
+        Assert.Equal((1, 1), (summary!.RuleCount, summary.BlocklistCount));
+        Assert.NotNull(RulesPreflight.Judge(summary).AlertText);
+    }
+
+    [Fact]
+    public async Task ARefusedDataRoot_AndAnUntrustedInstallFolder_LoadNothing_AndSayWhy()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(ManagedBlocklist)!);
+        _trust.Bad.Add(Path.GetDirectoryName(ShippedBlocklist)!);
+        _trust.Bad.Add(ShippedRules);
+
+        var package = await Source().LoadAsync();
+
+        Assert.Empty(package.Blocklist);
+        Assert.Empty(package.RuleFiles);
+        Assert.Contains(package.ReadErrors, e => e.StartsWith("Not loaded (blocklist)", StringComparison.Ordinal));
+    }
+
+    [RequiresFact(Requires.RunningElevated)]
+    public async Task ADataRootPreCreatedAndOwnedByAStandardUserGroup_StillLoadsTheShippedRulesAndBlocklist()
+    {
+        // Review D3 H1 as reported: `mkdir %ProgramData%\sap-AV` by a user before the first start (UntrustedOwner).
+        var root = Directory.CreateDirectory(Root);
+        Assert.Equal(0, SapAV.Engine.Quarantine.Native.RestorePrivilege.Run(() =>
+        {
+            var owner = new DirectorySecurity();
+            owner.SetOwner(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null));
+            root.SetAccessControl(owner);
+            return 0;
+        }));
+        var source = new ProtectedRulesSource(new SandboxOptions { RulesDirectory = ManagedRules, BlocklistPath = ManagedBlocklist },
+            QuarantineAccessPolicy.Default, _trust, ShippedRules, ShippedBlocklist, ManagedRules, ManagedBlocklist, parentIsDataRoot: true);
+
+        var package = await source.LoadAsync();
+
+        Assert.Equal(ShippedHash + "\n", Encoding.UTF8.GetString(package.Blocklist));
+        Assert.Single(package.RuleFiles);
+        Assert.Contains(package.ReadErrors, e => e.Contains("owner", StringComparison.Ordinal) && e.Contains("install folder", StringComparison.Ordinal));
     }
 
     private sealed class FakeTrust : IFolderTrust
