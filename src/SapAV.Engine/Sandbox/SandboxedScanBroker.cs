@@ -122,6 +122,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
 
         var package = await CurrentPackageAsync(cancellationToken).ConfigureAwait(false);
         var slot = await RentAsync(priority, cancellationToken).ConfigureAwait(false);
+        FileScanReport local;
         try
         {
             WorkerProcess worker;
@@ -178,14 +179,19 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             slot.CountFileAndMaybeRecycle();
             notes.AddRange(report.Notes);
             report = report with { Identity = opened.Identity, Notes = notes.AsReadOnly() };
-            report = await OnlineLookupAsync(report, cancellationToken).ConfigureAwait(false);
-            return ScanFileOpener.VerifyUnchanged(opened, report, notes, _time);
+
+            // The shared-fallback change check covers what the worker read; the online lookup only uses the hash.
+            local = ScanFileOpener.VerifyUnchanged(opened, report, notes, _time);
         }
         finally
         {
             slot.Lock.Release();
             _idle.Return(slot, priority);
         }
+
+        // Review D3 M2: the online lookup (a network request, up to its timeout) runs after the worker slot is back in the pool,
+        // so a slow VirusTotal never holds a scan worker. The file handle belongs to the caller (the quarantine acts on it).
+        return await OnlineLookupAsync(local, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>One file: a batch of one (see <see cref="ParseBatchAsync"/>).</summary>

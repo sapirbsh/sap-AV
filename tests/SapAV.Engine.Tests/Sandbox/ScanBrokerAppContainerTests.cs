@@ -181,6 +181,42 @@ public sealed class ScanBrokerAppContainerTests(AppContainerFixture fixture) : I
         Assert.Equal([path], online.Paths);
     }
 
+    /// <summary>Review D3 M2: a slow online lookup doesn't hold the worker slot (one worker: a second scan runs during the lookup).</summary>
+    [RequiresFact(Requires.AppContainer)]
+    public async Task TheOnlineLookup_RunsAfterTheWorkerSlotIsReleased()
+    {
+        var options = fixture.Container.Options();
+        options.WorkerCount = 1;
+        SandboxedScanBroker? broker = null;
+        var other = Path.Combine(_dir, "other.exe");
+        File.WriteAllText(other, "second file");
+        FileScanReport? nested = null;
+        var online = new DelegateOnline(async request =>
+        {
+            if (request.Item.Path != other)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                nested = await broker!.ScanAsync(new ScanItem(other, ScanTrigger.RealTime), timeout.Token); // would wait forever for the slot
+            }
+
+            return OnlineLookupOutcome.None;
+        });
+        broker = new SandboxedScanBroker(options, new FakeRulesSource(), NullLogger.Instance, online: online);
+        _owned.Add(broker);
+        var first = Path.Combine(_dir, "first.exe");
+        File.WriteAllText(first, "first file");
+
+        var report = await broker.ScanAsync(new ScanItem(first, ScanTrigger.RealTime));
+
+        Assert.Equal(ScanStatus.Scanned, report.Result.Status);
+        Assert.Equal(ScanStatus.Scanned, nested!.Result.Status);
+    }
+
+    private sealed class DelegateOnline(Func<OnlineLookupRequest, Task<OnlineLookupOutcome>> lookup) : IOnlineHashLookup
+    {
+        public Task<OnlineLookupOutcome> LookupAsync(OnlineLookupRequest request, CancellationToken cancellationToken = default) => lookup(request);
+    }
+
     private sealed class RecordingOnline : IOnlineHashLookup
     {
         public const string NoteText = "VirusTotal: 3/70 engines flagged the file (live).";
