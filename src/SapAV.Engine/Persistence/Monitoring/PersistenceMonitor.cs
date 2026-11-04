@@ -547,7 +547,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             {
                 _logger.LogInformation("Persistence monitor: {Waiting} autostart entries of {Owner} wait for their judgement (at most {Max} per pass).",
                     pending.Count - batch.Count, OwnerName(owner), _options.MaxJudgedPerPass);
-                ContinueLater(scopes, _options.ContinuationDelay);
+                ContinueLater(pending.Skip(batch.Count).Select(p => p.Record.Scope).Distinct(), _options.ContinuationDelay); // only scopes with entries left
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)

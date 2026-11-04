@@ -151,7 +151,8 @@ internal sealed class RegistryKeyWatch : IDisposable
     /// <summary>Opens the deepest existing key (from the full path down to the minimum depth) and asks for its next change.</summary>
     private void Arm()
     {
-        for (int attempt = 0; attempt < 2 && !_disposed; attempt++)
+        int failures = 0;
+        for (int round = 0; round <= MaxDepth + 1 && !_disposed; round++)
         {
             if (_key is null && !OpenDeepest())
             {
@@ -161,14 +162,41 @@ internal sealed class RegistryKeyWatch : IDisposable
             bool atKey = _depth == _components.Length;
             uint filter = (atKey ? ChangeName | ChangeLastSet : ChangeName) | ThreadAgnostic;
             int error = RegNotifyChangeKeyValue(_key!, atKey && _subtree, filter, _signal.SafeWaitHandle, true);
-            if (error == 0)
+            if (error != 0)
             {
-                _wait = ThreadPool.UnsafeRegisterWaitForSingleObject(_signal, OnSignaled, null, Timeout.Infinite, executeOnlyOnce: true);
-                return;
+                CloseKey(); // deleted (ERROR_KEY_DELETED) or unusable: open again from the path, once
+                if (++failures > 1)
+                {
+                    return;
+                }
+
+                continue;
             }
 
-            CloseKey(); // deleted (ERROR_KEY_DELETED) or unusable: open again from the path, once
+            // An ancestor: a child created after the deepest-key open but before the notification was armed raised nothing, so
+            // look once more now that it is armed; if the next component exists, go deeper (a whole chain created at once).
+            if (!atKey && Exists(_depth + 1))
+            {
+                CloseKey();
+                _signal.Reset(); // closing the armed key may have signalled it
+                continue;
+            }
+
+            _wait = ThreadPool.UnsafeRegisterWaitForSingleObject(_signal, OnSignaled, null, Timeout.Infinite, executeOnlyOnce: true);
+            return;
         }
+    }
+
+    private bool Exists(int depth)
+    {
+        if (RegOpenKeyExW(_base, string.Join('\\', _components, 0, depth), OpenLink, KeyNotify | KeyWow64_64Key, out var key) == 0 && !key.IsInvalid)
+        {
+            key.Dispose();
+            return true;
+        }
+
+        key?.Dispose();
+        return false;
     }
 
     private bool OpenDeepest()
