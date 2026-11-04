@@ -82,6 +82,7 @@ public sealed class VirusTotalService : IVirusTotalService, IDisposable
     private readonly bool? _parentIsDataRoot;
     private readonly Lock _lock = new();
     private State? _state;
+    private bool _disposed;
     private DateTimeOffset _nextAttempt;
     private string? _initProblem;
     private string? _lookupProblem;
@@ -241,6 +242,7 @@ public sealed class VirusTotalService : IVirusTotalService, IDisposable
     {
         lock (_lock)
         {
+            _disposed = true; // review D3 L4: never reopened afterwards
             _state?.Dispose();
             _state = null;
         }
@@ -261,6 +263,12 @@ public sealed class VirusTotalService : IVirusTotalService, IDisposable
 
         lock (_lock)
         {
+            if (_disposed)
+            {
+                Volatile.Write(ref _initProblem, "VirusTotal is shut down (the engine is stopping).");
+                return null;
+            }
+
             if (_state is not null || _time.GetUtcNow() < _nextAttempt)
             {
                 return _state;

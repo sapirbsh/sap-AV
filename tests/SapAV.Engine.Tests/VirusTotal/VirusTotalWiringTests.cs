@@ -121,6 +121,19 @@ public sealed class VirusTotalWiringTests : IDisposable
     }
 
     [Fact]
+    public void AfterDispose_TheServiceNeverReopensItsFiles()
+    {
+        var service = Active();
+        service.Dispose();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        File.Delete(Path.Combine(Folder, VirusTotalCache.DatabaseName)); // nothing holds or recreates it
+
+        Assert.Equal(VirusTotalActivity.Unavailable, service.Activity);
+        Assert.Equal(VirusTotalChange.Unavailable, service.SetKey(FakeKey));
+        Assert.False(File.Exists(Path.Combine(Folder, VirusTotalCache.DatabaseName)));
+    }
+
+    [Fact]
     public async Task ANonElevatedDebugRun_NeverTouchesTheDataFolder_AndAddsNoNote()
     {
         var service = Service(protectedMode: false);
