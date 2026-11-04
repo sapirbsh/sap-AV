@@ -70,4 +70,13 @@ public enum AlertType
 
     /// <summary>An autostart entry the persistence rules (or its target's scan) judged Suspicious (C3).</summary>
     SuspiciousPersistence,
+
+    // User actions (D5, event IDs 3000-3999). FilePath = the entry's location and value name; Autostart = the entry;
+    // TechniqueId = the entry kind's technique; Verdict = Suspicious (the convention when no file verdict applies).
+
+    /// <summary>Information: a user's Block &amp; remove of an autostart entry (backed up first; restorable).</summary>
+    PersistenceBlocked,
+
+    /// <summary>Information: a user restored an autostart entry from its Block &amp; remove backup.</summary>
+    PersistenceRestored,
 }

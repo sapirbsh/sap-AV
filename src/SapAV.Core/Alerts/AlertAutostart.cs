@@ -18,8 +18,9 @@ public sealed record AlertAutostart
     public const int MaxLocationLength = 512;
     public const int MaxValueNameLength = 256;
 
+    /// <param name="entryId">D5: the entry's <see cref="PersistenceEntryId"/> (what the GUI sends for Block &amp; remove), or null.</param>
     [JsonConstructor]
-    public AlertAutostart(PersistenceKind kind, string location, string? valueName, string? userSid, bool enabled)
+    public AlertAutostart(PersistenceKind kind, string location, string? valueName, string? userSid, bool enabled, string? entryId = null)
     {
         if (!Enum.IsDefined(kind))
         {
@@ -32,19 +33,29 @@ public sealed record AlertAutostart
             throw new ArgumentException("The user scope must be a SID.", nameof(userSid));
         }
 
+        if (entryId is not null && !PersistenceEntryId.TryParse(entryId, out _, out _))
+        {
+            throw new ArgumentException("Not a persistence entry ID.", nameof(entryId));
+        }
+
         Kind = kind;
         Location = PersistenceText.Identifier(location, MaxLocationLength);
         ValueName = valueName is null ? null : PersistenceText.Identifier(valueName, MaxValueNameLength);
         UserSid = userSid;
         Enabled = enabled;
+        EntryId = entryId;
     }
 
-    /// <summary>The alert form of <paramref name="entry"/>.</summary>
+    /// <summary>The alert form of <paramref name="entry"/> (with its D5 entry ID).</summary>
     public static AlertAutostart From(PersistenceEntry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        return new AlertAutostart(entry.Kind, entry.Location, entry.ValueName, entry.UserSid, entry.Enabled);
+        return new AlertAutostart(entry.Kind, entry.Location, entry.ValueName, entry.UserSid, entry.Enabled, PersistenceEntryId.Compute(entry));
     }
+
+    /// <summary>D5: the ID to send with a Block &amp; remove request (<see cref="PersistenceEntryId"/>); null when not known.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EntryId { get; }
 
     [JsonRequired]
     [JsonInclude]

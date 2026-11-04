@@ -228,6 +228,22 @@ public sealed class EnginePipeClient : IAsyncDisposable
     public Task<VirusTotalStatusInfo> SetVirusTotalEnabledAsync(bool enabled, CancellationToken cancellationToken = default) =>
         SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalSetEnabled, new VirusTotalSetEnabledRequest(enabled), cancellationToken);
 
+    /// <summary>D5: Block &amp; remove of the autostart entry with this ID (from an alert or a finding); backed up first.</summary>
+    public Task<PersistenceActionReply> BlockPersistenceAsync(string entryId, CancellationToken cancellationToken = default) =>
+        SendAsync<PersistenceActionReply>(PipeRequestKind.PersistenceBlock, new PersistenceBlockRequest(entryId), cancellationToken);
+
+    /// <summary>D5: the Block &amp; remove backups the caller may act on.</summary>
+    public Task<PersistenceBackupListReply> ListPersistenceBackupsAsync(CancellationToken cancellationToken = default) =>
+        SendAsync<PersistenceBackupListReply>(PipeRequestKind.PersistenceBackupList, null, cancellationToken);
+
+    /// <summary>D5: puts a blocked autostart entry back (refused if its place holds something else now).</summary>
+    public Task<PersistenceActionReply> RestorePersistenceAsync(string backupId, CancellationToken cancellationToken = default) =>
+        SendAsync<PersistenceActionReply>(PipeRequestKind.PersistenceRestore, new PersistenceBackupRequest(backupId), cancellationToken);
+
+    /// <summary>D5: drops a backup record (it can't be restored afterwards).</summary>
+    public Task<PersistenceActionReply> PurgePersistenceBackupAsync(string backupId, CancellationToken cancellationToken = default) =>
+        SendAsync<PersistenceActionReply>(PipeRequestKind.PersistenceBackupPurge, new PersistenceBackupRequest(backupId), cancellationToken);
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

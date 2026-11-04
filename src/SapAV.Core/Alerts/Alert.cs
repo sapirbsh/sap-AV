@@ -166,7 +166,8 @@ public sealed record Alert
 
     /// <summary>
     /// The autostart entry of a persistence alert (C3); required for <see cref="AlertType.MaliciousPersistence"/> /
-    /// <see cref="AlertType.SuspiciousPersistence"/>, null for every other type. Older JSON without it still reads.
+    /// <see cref="AlertType.SuspiciousPersistence"/> and the D5 actions (<see cref="AlertType.PersistenceBlocked"/> /
+    /// <see cref="AlertType.PersistenceRestored"/>), null for every other type. Older JSON without it still reads.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] // file and health alerts keep their B1 payload exactly
     public AlertAutostart? Autostart { get; }
@@ -298,12 +299,16 @@ public sealed record Alert
 
     private static bool IsPersistence(AlertType type) => type is AlertType.MaliciousPersistence or AlertType.SuspiciousPersistence;
 
+    /// <summary>D5: Block &amp; remove and its restore are about one autostart entry too.</summary>
+    private static bool IsPersistenceAction(AlertType type) => type is AlertType.PersistenceBlocked or AlertType.PersistenceRestored;
+
     private static AlertAutostart? ValidateAutostart(AlertType type, AlertAutostart? autostart)
     {
-        if (IsPersistence(type) != (autostart is not null))
+        bool needs = IsPersistence(type) || IsPersistenceAction(type);
+        if (needs != (autostart is not null))
         {
             throw new ArgumentException(
-                IsPersistence(type) ? $"Alert type {type} needs the autostart entry." : $"Alert type {type} can't carry an autostart entry.",
+                needs ? $"Alert type {type} needs the autostart entry." : $"Alert type {type} can't carry an autostart entry.",
                 nameof(autostart));
         }
 

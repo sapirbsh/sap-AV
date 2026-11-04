@@ -87,6 +87,25 @@ public enum PipeRequestKind
 
     /// <summary>D3: body <see cref="VirusTotalSetEnabledRequest"/>; reply: <see cref="VirusTotalStatusInfo"/>. <b>Administrators only.</b></summary>
     VirusTotalSetEnabled,
+
+    /// <summary>
+    /// D5: body <see cref="PersistenceBlockRequest"/>; reply: <see cref="PersistenceActionReply"/>. Block &amp; remove of one
+    /// autostart entry, named by the ID the engine gave out (alerts, findings), never by a path. The entry is backed up first.
+    /// A standard user may act only on entries of their own scope; machine-wide entries need an administrator (AccessDenied).
+    /// </summary>
+    PersistenceBlock,
+
+    /// <summary>D5: no body; reply: <see cref="PersistenceBackupListReply"/> (only backups of entries the caller may act on).</summary>
+    PersistenceBackupList,
+
+    /// <summary>D5: body <see cref="PersistenceBackupRequest"/>; reply: <see cref="PersistenceActionReply"/>. Same scope rule as PersistenceBlock.</summary>
+    PersistenceRestore,
+
+    /// <summary>
+    /// D5: body <see cref="PersistenceBackupRequest"/>; reply: <see cref="PersistenceActionReply"/>. Drops a backup record (it can't
+    /// be restored afterwards); a quarantined Startup item stays in quarantine. Same scope rule as PersistenceBlock.
+    /// </summary>
+    PersistenceBackupPurge,
 }
 
 /// <param name="Id">Client-chosen request ID (positive), echoed in <see cref="PipeFrame.ReplyTo"/>.</param>
@@ -466,10 +485,11 @@ public sealed record ScanFindingsRequest(Guid JobId, int Offset = 0, int Limit =
 /// <param name="Outcome">What the entry is. <see cref="Persistence.PersistenceOutcome.Unverified"/>: something it runs has no scan result, and the finding has no verdict.</param>
 /// <param name="UnverifiedReasons">Why (administrators: the judgement's text, sanitised; everyone else: nothing beyond the outcome).</param>
 /// <param name="UnverifiedKind">M3: for an Unverified entry, whether that is how it is written (Inherent) or a gap in the scan (Coverage).</param>
+/// <param name="EntryId">D5: the ID for <see cref="PipeRequestKind.PersistenceBlock"/> (<see cref="Persistence.PersistenceEntryId"/>).</param>
 public sealed record PersistenceFindingInfo(
     Persistence.PersistenceKind Kind, bool MachineWide, string? UserSid, WirePath Location, WirePath? ValueName, WirePath? CommandLine,
     WirePath? TargetPath, bool Enabled, IReadOnlyList<string> RuleIds, Verdict? TargetVerdict, Persistence.PersistenceOutcome Outcome,
-    IReadOnlyList<string> UnverifiedReasons, Persistence.UnverifiedKind? UnverifiedKind = null);
+    IReadOnlyList<string> UnverifiedReasons, Persistence.UnverifiedKind? UnverifiedKind = null, string? EntryId = null);
 
 /// <param name="FindingId">Stable index of the finding in its job (findings are only appended).</param>
 /// <param name="Verdict">Null when there is no verdict: an Unverified autostart entry (see <see cref="PersistenceFindingInfo.Outcome"/>).</param>
@@ -485,3 +505,94 @@ public sealed record ScanFindingInfo(
 public sealed record JobFindingsReply(
     Guid JobId, bool Complete, IReadOnlyList<ScanPhaseInfo> Phases, long Duplicates, IReadOnlyList<ScanFindingInfo> Findings, int? NextOffset,
     long FindingsOmitted);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// D5: Block & remove of autostart entries, backups, restore
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// <param name="EntryId">A <see cref="Persistence.PersistenceEntryId"/> from an alert or a finding.</param>
+public sealed record PersistenceBlockRequest(string EntryId);
+
+/// <param name="BackupId">A <see cref="PersistenceBackupInfo.BackupId"/>.</param>
+public sealed record PersistenceBackupRequest(string BackupId);
+
+/// <summary>What a Block &amp; remove, restore or purge did. Everything but Blocked / Restored / Purged left the system as it was.</summary>
+[JsonConverter(typeof(StrictEnumConverter<PersistenceActionOutcome>))]
+public enum PersistenceActionOutcome
+{
+    Blocked,
+    Restored,
+    Purged,
+
+    /// <summary>No entry with that ID exists now: it changed or went since the ID was given out. Refresh and ask again.</summary>
+    EntryChanged,
+
+    /// <summary>Nothing to do (e.g. Winlogon already holds the Windows default, the service is already disabled).</summary>
+    NothingToDo,
+
+    /// <summary>Restore refused: the location now holds something else than what was put there; nothing was overwritten.</summary>
+    LocationChanged,
+
+    /// <summary>Restore refused: the key, service, task, folder or hive isn't there (or not loaded) now.</summary>
+    LocationMissing,
+
+    /// <summary>A registry link or file reparse point is on the way: refused, never followed.</summary>
+    Redirected,
+
+    /// <summary>This entry can't be acted on safely (e.g. its stored name can't be told apart exactly).</summary>
+    NotSupported,
+
+    /// <summary>The backup record failed its integrity check, or is in a state that doesn't allow this.</summary>
+    InvalidBackup,
+
+    /// <summary>The user's backup quota is used up (restore or purge some first).</summary>
+    QuotaExceeded,
+
+    /// <summary>The change itself failed (see the reason); the earlier state is kept.</summary>
+    Failed,
+}
+
+[JsonConverter(typeof(StrictEnumConverter<PersistenceBackupState>))]
+public enum PersistenceBackupState
+{
+    /// <summary>The entry is blocked; the record can restore it.</summary>
+    Active,
+
+    /// <summary>The entry was put back; the record stays for the history until purged.</summary>
+    Restored,
+}
+
+[JsonConverter(typeof(StrictEnumConverter<PersistenceBackupAction>))]
+public enum PersistenceBackupAction
+{
+    /// <summary>A registry value (Run, RunOnce, IFEO Debugger, SilentProcessExit MonitorProcess) was deleted.</summary>
+    ValueDeleted,
+
+    /// <summary>A Winlogon Shell / Userinit value was set back to the Windows default (never deleted).</summary>
+    ValueReset,
+
+    /// <summary>A service was set to Disabled (and stopped if it was running); never deleted.</summary>
+    ServiceDisabled,
+
+    /// <summary>A scheduled task was disabled through the Task Scheduler; never deleted.</summary>
+    TaskDisabled,
+
+    /// <summary>A Startup folder item was moved into the quarantine (reversible).</summary>
+    FileQuarantined,
+}
+
+/// <summary>One Block &amp; remove backup. Entry text is untrusted: paths and names go out exact as <see cref="WirePath"/>.</summary>
+/// <param name="UserSid">The entry's user (administrators only; null = machine-wide or not shown).</param>
+/// <param name="CommandLine">What the entry ran (sanitised, capped).</param>
+/// <param name="QuarantineItemId">For a Startup item: its quarantine item.</param>
+/// <param name="Notes">Engine text: what couldn't be backed up or restored exactly.</param>
+public sealed record PersistenceBackupInfo(
+    string BackupId, Persistence.PersistenceKind Kind, bool MachineWide, string? UserSid, WirePath Location, WirePath? ValueName, WirePath CommandLine,
+    PersistenceBackupAction Action, PersistenceBackupState State, DateTimeOffset BlockedAtUtc, DateTimeOffset? RestoredAtUtc, string? QuarantineItemId,
+    IReadOnlyList<string> Notes);
+
+public sealed record PersistenceBackupListReply(IReadOnlyList<PersistenceBackupInfo> Backups);
+
+/// <param name="Reason">Engine text.</param>
+/// <param name="Backup">The record the action made or changed (null when nothing was done).</param>
+public sealed record PersistenceActionReply(PersistenceActionOutcome Status, string Reason, PersistenceBackupInfo? Backup);
