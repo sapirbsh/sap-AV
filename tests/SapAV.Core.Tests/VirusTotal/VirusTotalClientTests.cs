@@ -105,7 +105,9 @@ public sealed class VirusTotalClientTests
         """{"error": null}""",
         """{"data": {"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "type": "file", "attributes": {}}}""", // another file
         """{"data": {"type": "url", "attributes": {}}}""",
-        """{"data": {"attributes": {"last_analysis_stats": {"malicious": 0}}, "attributes": {"last_analysis_stats": {"malicious": 9}}}}""", // duplicate key
+        """{"data": {"type": "file", "attributes": {"last_analysis_stats": {"malicious": 40}}}}""", // review D3 L6: no id, so no file it is for
+        """{"data": {"id": 12, "type": "file", "attributes": {"last_analysis_stats": {"malicious": 40}}}}""", // id not a string
+        """{"data": {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "attributes": {"last_analysis_stats": {"malicious": 0}}, "attributes": {"last_analysis_stats": {"malicious": 9}}}}""", // duplicate key
         """{"data": {"attributes": {} }, } """, // trailing comma
         """{"data": {"attributes": {"x": """ + new string('[', 5000) + new string(']', 5000) + "} } }", // too deep
     ];

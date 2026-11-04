@@ -79,9 +79,15 @@ internal static class VirusTotalResponseParser
             return null;
         }
 
-        // The id of a file object is its SHA-256: a report for another file is refused, not cached under this hash.
-        if (data.TryGetProperty("id", out var id)
-            && (id.ValueKind != JsonValueKind.String || !string.Equals(id.GetString(), sha256, StringComparison.OrdinalIgnoreCase)))
+        // The id of a file object is its SHA-256: a report for another file (or one that doesn't say which file it is, review D3
+        // L6) is refused, not cached under this hash.
+        if (!data.TryGetProperty("id", out var id))
+        {
+            problem = "the response doesn't say which file it is for";
+            return null;
+        }
+
+        if (id.ValueKind != JsonValueKind.String || !string.Equals(id.GetString(), sha256, StringComparison.OrdinalIgnoreCase))
         {
             problem = "the response is for a different file";
             return null;
