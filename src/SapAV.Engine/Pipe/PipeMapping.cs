@@ -196,11 +196,20 @@ internal static class PipeMapping
                 entry.Resolution.TargetPath is { } target ? WirePath.From(target) : null,
                 entry.Enabled, rules, p.Target?.Verdict, judgement.Outcome,
                 forAdmin ? judgement.UnverifiedReasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray() : [],
-                judgement.UnverifiedKind);
+                judgement.UnverifiedKind, Core.Persistence.PersistenceEntryId.Compute(entry));
         }
 
         return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence);
     }
+
+    /// <summary>
+    /// D5: one Block &amp; remove backup for a client (only records the client may act on reach here). Entry text goes out exact as
+    /// <see cref="WirePath"/>; the user SID only to administrators (like findings); notes are engine text.
+    /// </summary>
+    public static PersistenceBackupInfo Backup(Persistence.Remediation.PersistenceBackupRecord r, bool forAdmin) =>
+        new(r.Id, r.Kind, r.UserSid is null, forAdmin ? r.UserSid : null, WirePath.From(r.Location), r.ValueName is null ? null : WirePath.From(r.ValueName),
+            WirePath.From(r.CommandLine), r.Action, r.State, r.BlockedAtUtc, r.RestoredAtUtc, r.QuarantineItemId,
+            r.Notes.Take(MaxReasons).Select(n => Text(n)).ToArray());
 
     /// <summary>An engine rule identifier: 1-64 of a-z, 0-9 and '-'. Anything else is never sent.</summary>
     internal static bool IsRuleId(string? rule) =>

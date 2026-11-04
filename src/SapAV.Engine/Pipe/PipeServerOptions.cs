@@ -77,6 +77,15 @@ public sealed class PipeServerOptions
     /// <summary>QuarantineFromResult burst per standard user (token bucket size).</summary>
     public int QuarantineRequestBurst { get; set; } = 10;
 
+    /// <summary>
+    /// D5: Block &amp; remove, restore and purge requests per minute per standard user (token bucket refill; administrators are
+    /// not limited). Each Block &amp; remove re-collects autostart entries and writes a backup record.
+    /// </summary>
+    public double PersistenceRequestsPerMinute { get; set; } = 10;
+
+    /// <summary>D5: the burst of <see cref="PersistenceRequestsPerMinute"/>.</summary>
+    public int PersistenceRequestBurst { get; set; } = 10;
+
     /// <summary>Test seam: the pipe name. Internal so configuration can't move the engine's pipe.</summary>
     internal string PipeName { get; set; } = Core.Pipe.PipeProtocol.PipeName;
 
@@ -103,6 +112,8 @@ public sealed class PipeServerOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(RequestBurst, 1, nameof(RequestBurst));
         ArgumentOutOfRangeException.ThrowIfLessThan(QuarantineRequestsPerMinute, 0.01, nameof(QuarantineRequestsPerMinute));
         ArgumentOutOfRangeException.ThrowIfLessThan(QuarantineRequestBurst, 1, nameof(QuarantineRequestBurst));
+        ArgumentOutOfRangeException.ThrowIfLessThan(PersistenceRequestsPerMinute, 0.01, nameof(PersistenceRequestsPerMinute));
+        ArgumentOutOfRangeException.ThrowIfLessThan(PersistenceRequestBurst, 1, nameof(PersistenceRequestBurst));
         ArgumentException.ThrowIfNullOrWhiteSpace(PipeName, nameof(PipeName));
     }
 }

@@ -61,9 +61,10 @@ public sealed class EnginePipeServer : BackgroundService
 
     public EnginePipeServer(IOptions<PipeServerOptions> options, IScanJobService jobs, IQuarantineService quarantine, TimeProvider time,
         ILogger<EnginePipeServer> logger, IAlertDispatcher alerts, Scanning.Checks.QuickScanFactory quickScan, Scanning.Checks.FullScanFactory fullScan,
-        VirusTotal.IVirusTotalService virusTotal)
+        VirusTotal.IVirusTotalService virusTotal, IServiceProvider services)
         : this(ForThisProcess(options.Value, RunningAsSystemOrElevated()), jobs, quarantine, time, logger, new PipeClientIdentityResolver(),
-            EnginePipeSecurity.CurrentAccount(), alerts: alerts, quickScan: quickScan, fullScan: fullScan, virusTotal: virusTotal)
+            EnginePipeSecurity.CurrentAccount(), alerts: alerts, quickScan: quickScan, fullScan: fullScan, virusTotal: virusTotal,
+            remediation: services.GetService<Persistence.Remediation.IPersistenceRemediation>()) // D5 (internal type: resolved here)
     {
     }
 
@@ -74,7 +75,7 @@ public sealed class EnginePipeServer : BackgroundService
     internal EnginePipeServer(PipeServerOptions options, IScanJobService jobs, IQuarantineService? quarantine, TimeProvider time, ILogger logger,
         IClientIdentityResolver resolver, SecurityIdentifier? serverAccount, Func<string, int>? driveType = null, IAlertDispatcher? alerts = null,
         Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null,
-        VirusTotal.IVirusTotalService? virusTotal = null)
+        VirusTotal.IVirusTotalService? virusTotal = null, Persistence.Remediation.IPersistenceRemediation? remediation = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -83,7 +84,7 @@ public sealed class EnginePipeServer : BackgroundService
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType, quickScan, fullScan, virusTotal);
+        _handler = new PipeRequestHandler(jobs, quarantine, options, time, logger, driveType, quickScan, fullScan, virusTotal, remediation);
         _owner = EnginePipeSecurity.CurrentAccount();
         _descriptor = EnginePipeSecurity.Create(_owner, serverAccount);
         _securityDescriptor = EnginePipeSecurity.ToBytes(_descriptor);

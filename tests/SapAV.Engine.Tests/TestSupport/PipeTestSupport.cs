@@ -190,12 +190,14 @@ internal sealed class PipeTestServer : IAsyncDisposable
 {
     private readonly List<EnginePipeClient> _clients = [];
 
-    public PipeTestServer(Action<PipeServerOptions>? configure = null, SecurityIdentifier? serverAccount = null, bool start = true)
+    public PipeTestServer(
+        Action<PipeServerOptions>? configure = null, SecurityIdentifier? serverAccount = null, bool start = true,
+        SapAV.Engine.Persistence.Remediation.IPersistenceRemediation? remediation = null)
     {
         Options.PipeName = "sap-AV.engine.test." + Guid.NewGuid().ToString("N");
         configure?.Invoke(Options);
         Server = new EnginePipeServer(Options, Harness.Service, Quarantine, Harness.Time, NullLogger.Instance, Resolver,
-            serverAccount ?? EnginePipeSecurity.CurrentAccount(), _ => 3 /* DRIVE_FIXED */);
+            serverAccount ?? EnginePipeSecurity.CurrentAccount(), _ => 3 /* DRIVE_FIXED */, remediation: remediation);
         if (start)
         {
             Server.StartAsync(CancellationToken.None).GetAwaiter().GetResult();

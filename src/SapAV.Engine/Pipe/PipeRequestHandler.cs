@@ -46,11 +46,13 @@ internal sealed class PipeRequestHandler : IDisposable
     private readonly Scanning.Checks.QuickScanFactory? _quickScan;
     private readonly Scanning.Checks.FullScanFactory? _fullScan;
     private readonly VirusTotal.IVirusTotalService? _virusTotal;
+    private readonly Persistence.Remediation.IPersistenceRemediation? _remediation;
+    private readonly UserRateLimiter _persistenceRate;
 
     public PipeRequestHandler(
         IScanJobService jobs, IQuarantineService? quarantine, PipeServerOptions options, TimeProvider time, ILogger logger,
         Func<string, int>? driveType = null, Scanning.Checks.QuickScanFactory? quickScan = null, Scanning.Checks.FullScanFactory? fullScan = null,
-        VirusTotal.IVirusTotalService? virusTotal = null)
+        VirusTotal.IVirusTotalService? virusTotal = null, Persistence.Remediation.IPersistenceRemediation? remediation = null)
     {
         _jobs = jobs ?? throw new ArgumentNullException(nameof(jobs));
         _quarantine = quarantine;
@@ -63,6 +65,8 @@ internal sealed class PipeRequestHandler : IDisposable
         _quickScan = quickScan;
         _fullScan = fullScan;
         _virusTotal = virusTotal;
+        _remediation = remediation;
+        _persistenceRate = new UserRateLimiter(time, options.PersistenceRequestsPerMinute / 60, options.PersistenceRequestBurst);
 
         // Review B H3: pending-job expiry and orphaned standard-user jobs are checked every minute, not only on the next create.
         _prune = time.CreateTimer(_ => PruneSafely(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
@@ -119,6 +123,12 @@ internal sealed class PipeRequestHandler : IDisposable
                 PipeRequestKind.VirusTotalSetKey => VirusTotalSetKey(session, request),
                 PipeRequestKind.VirusTotalClearKey => VirusTotalAdmin(session) ?? NoBody(request) ?? VirusTotalChanged(session, "cleared the API key", _virusTotal!.ClearKey()),
                 PipeRequestKind.VirusTotalSetEnabled => VirusTotalSetEnabled(session, request),
+                PipeRequestKind.PersistenceBlock =>
+                    await PersistenceBlockAsync(session, PipeJson.Body<PersistenceBlockRequest>(request.Body), cancellationToken).ConfigureAwait(false),
+                PipeRequestKind.PersistenceBackupList => NoBody(request) ?? PersistenceBackupList(session),
+                PipeRequestKind.PersistenceRestore =>
+                    await PersistenceRestoreAsync(session, PipeJson.Body<PersistenceBackupRequest>(request.Body), cancellationToken).ConfigureAwait(false),
+                PipeRequestKind.PersistenceBackupPurge => PersistencePurge(session, PipeJson.Body<PersistenceBackupRequest>(request.Body)),
                 _ => PipeReply.Fail(PipeStatus.BadRequest, "Unknown request."),
             };
         }
@@ -596,5 +606,86 @@ internal sealed class PipeRequestHandler : IDisposable
         _logger.LogInformation("Pipe: user {User} asked to quarantine result {ResultId} of job {JobId}: {Status}.",
             client.User.Value, request.ResultId, job.Id, outcome.Status);
         return PipeReply.Ok(new QuarantineFromResultReply(PipeMapping.Map(outcome.Status), PipeMapping.Text(outcome.Reason), outcome.Entry?.Id));
+    }
+
+    // ---- Block & remove (D5) ----
+    // The client names an entry only by the engine's own entry ID and a backup only by its ID; who may act on what is decided
+    // by the remediation service on the freshly collected entry / the signed record (standard users: their own scope only).
+    // A standard user's actions are rate-limited before any collection or file access.
+
+    /// <summary>Most backups in one list reply (newest first); the reply is halved further until it fits a frame.</summary>
+    internal const int MaxBackupsListed = 500;
+
+    private PipeReply? PersistenceGate(PipeSession session)
+    {
+        if (_remediation is not { IsAvailable: true })
+        {
+            return PipeReply.Fail(PipeStatus.Unavailable, "Block & remove is not available in this engine.");
+        }
+
+        return !session.Identity.IsAdmin && !_persistenceRate.TryAcquire(session.Identity.User)
+            ? PipeReply.Fail(PipeStatus.RateLimited, "Too many Block & remove requests; try again in a minute.")
+            : null;
+    }
+
+    private async Task<PipeReply> PersistenceBlockAsync(PipeSession session, PersistenceBlockRequest request, CancellationToken cancellationToken)
+    {
+        if (PersistenceGate(session) is { } refused)
+        {
+            return refused;
+        }
+
+        var result = await _remediation!.BlockAsync(session.Identity, request.EntryId, cancellationToken).ConfigureAwait(false);
+        return PersistenceReply(session, result);
+    }
+
+    private async Task<PipeReply> PersistenceRestoreAsync(PipeSession session, PersistenceBackupRequest request, CancellationToken cancellationToken)
+    {
+        if (PersistenceGate(session) is { } refused)
+        {
+            return refused;
+        }
+
+        var result = await _remediation!.RestoreAsync(session.Identity, request.BackupId, cancellationToken).ConfigureAwait(false);
+        return PersistenceReply(session, result);
+    }
+
+    private PipeReply PersistencePurge(PipeSession session, PersistenceBackupRequest request) =>
+        PersistenceGate(session) ?? PersistenceReply(session, _remediation!.Purge(session.Identity, request.BackupId));
+
+    private PipeReply PersistenceBackupList(PipeSession session)
+    {
+        if (_remediation is not { IsAvailable: true } remediation)
+        {
+            return PipeReply.Fail(PipeStatus.Unavailable, "Block & remove is not available in this engine.");
+        }
+
+        bool admin = session.Identity.IsAdmin;
+        var records = remediation.List(session.Identity);
+        int limit = MaxBackupsListed;
+        while (true)
+        {
+            var reply = new PersistenceBackupListReply(records.Take(limit).Select(r => PipeMapping.Backup(r, admin)).ToArray());
+            if (limit <= 1 || JsonSerializer.SerializeToUtf8Bytes(reply, PipeJson.Options).Length <= PipeProtocol.MaxServerFrameBytes - 4096)
+            {
+                return PipeReply.Ok(reply);
+            }
+
+            limit /= 2;
+        }
+    }
+
+    private static PipeReply PersistenceReply(PipeSession session, Persistence.Remediation.RemediationResult result)
+    {
+        string reason = PipeMapping.Text(result.Reason);
+        return result.Status switch
+        {
+            Persistence.Remediation.RemediationStatus.NotFound => PipeReply.Fail(PipeStatus.NotFound, reason),
+            Persistence.Remediation.RemediationStatus.AccessDenied => PipeReply.Fail(PipeStatus.AccessDenied, reason),
+            Persistence.Remediation.RemediationStatus.Unavailable => PipeReply.Fail(PipeStatus.Unavailable, reason),
+            Persistence.Remediation.RemediationStatus.Busy => PipeReply.Fail(PipeStatus.LimitReached, reason),
+            _ => PipeReply.Ok(new PersistenceActionReply(Enum.Parse<PersistenceActionOutcome>(result.Status.ToString()), reason,
+                result.Record is { } record ? PipeMapping.Backup(record, session.Identity.IsAdmin) : null)),
+        };
     }
 }
