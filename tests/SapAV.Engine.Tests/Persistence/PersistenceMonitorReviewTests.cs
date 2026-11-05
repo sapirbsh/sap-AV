@@ -228,7 +228,7 @@ public sealed class PersistenceMonitorReviewTests
     [Fact]
     public void M5_AUserPrincipalTask_CountsAgainstThatUsersBudget_NotTheEngines()
     {
-        using var h = new MonitorHarness();
+        using var h = new MonitorHarness(trustedTask: (_, _) => true); // registered tasks (section D review H3: stray files are charged to their owner)
         h.Registry.AddUser(Alice, Path.Combine(h.Base, "alice"), loaded: true);
         WriteTask(h.Tasks, "UserTask", h.Target("mal-task.exe"), userId: Alice);
         WriteTask(h.Tasks, "SystemTask", h.Target("mal-system.exe"));
