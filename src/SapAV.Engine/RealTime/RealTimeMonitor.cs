@@ -144,7 +144,10 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
                 Interlocked.Read(ref c.Dropped), Interlocked.Read(ref c.Overflows), Interlocked.Read(ref c.Rescans), Interlocked.Read(ref c.RescansIncomplete),
                 Interlocked.Read(ref c.Scanned), Interlocked.Read(ref c.Flagged), Interlocked.Read(ref c.Quarantined), Interlocked.Read(ref c.LockRetries),
                 Interlocked.Read(ref c.LockWaitsExpired), Interlocked.Read(ref c.Blocked), Interlocked.Read(ref c.Gone), Interlocked.Read(ref c.Links),
-                Interlocked.Read(ref c.TooLarge), Interlocked.Read(ref c.Errors));
+                Interlocked.Read(ref c.TooLarge), Interlocked.Read(ref c.Errors))
+            {
+                Cancelled = Interlocked.Read(ref c.Cancelled),
+            };
         }
     }
 
@@ -727,7 +730,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         }
 
         var budget = BudgetFor(file.Root, probe.Owner);
-        watch.Arm(shown, "scan", StuckScanTimeout); // the worker has its own timeout; this catches a stuck quarantine reopen
+        watch.Arm(shown, "scan", _options.StuckScanTimeout); // the worker has its own timeout; this catches a stuck quarantine reopen
         var outcome = _pipeline.ProcessDetailedAsync(shown, ScanTrigger.RealTime, _ => { }, _stop.Token, folder: parent, name: name,
             priority: ScanPriority.High, budget: budget, completeIfOplocked: true).GetAwaiter().GetResult();
         if (outcome.Result is not { } result)
@@ -754,8 +757,6 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     /// <summary>Distinct owners with their own real-time budget (review D1 M2); further owners share one.</summary>
     internal const int MaxOwnerBudgets = 64;
 
-    /// <summary>Review D1 H1: the pipeline call (worker scan, alert, quarantine) is overdue after this.</summary>
-    private static readonly TimeSpan StuckScanTimeout = TimeSpan.FromMinutes(3);
 
     /// <summary>
     /// Review D1 M2: the real-time budget for a file: the watched folder's user (<c>engine:RealTime:&lt;SID&gt;</c>), or for a

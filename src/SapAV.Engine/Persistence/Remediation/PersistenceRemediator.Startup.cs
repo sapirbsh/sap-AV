@@ -42,7 +42,9 @@ internal sealed partial class PersistenceRemediator
         }
 
         string path = SafeTree.Child(folder, name);
-        using var file = SafeFile.TryOpen(path, QuarantineAccess, N.ShareRead | N.ShareDelete, out var directory, out var failure, out int error, out var reason);
+        // Section D review H2: never wait for an oplock break (a user's oplock on their Startup item must not hold the D5 lock).
+        using var file = SafeFile.TryOpen(path, QuarantineAccess, N.ShareRead | N.ShareDelete, out var directory, out var failure, out int error, out var reason,
+            N.FileCompleteIfOplocked);
         using (directory)
         {
             if (file is null)

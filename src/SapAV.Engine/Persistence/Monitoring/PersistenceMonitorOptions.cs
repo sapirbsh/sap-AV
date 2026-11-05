@@ -58,6 +58,12 @@ public sealed class PersistenceMonitorOptions
     /// <summary>Review H5: a scope cut short (a cap or a budget) this many passes in a row raises a Warning.</summary>
     public int TruncationWarnAfter { get; set; } = 3;
 
+    /// <summary>
+    /// Section D review H2: a pass still running after this has its synchronous I/O cancelled (CancelSynchronousIo), again every
+    /// second, so an open stuck behind an oplock break the holder never acknowledges can't freeze the monitor thread.
+    /// </summary>
+    public TimeSpan PassWatchdog { get; set; } = TimeSpan.FromMinutes(3);
+
     /// <summary>The time budget of one pass's collection (the whole collection's budget is never exceeded).</summary>
     public TimeSpan CollectionTimeBudget { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -90,6 +96,7 @@ public sealed class PersistenceMonitorOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxJudgedPerPass, 1, nameof(MaxJudgedPerPass));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxJudgedPerPass, 4096, nameof(MaxJudgedPerPass));
         ArgumentOutOfRangeException.ThrowIfLessThan(CollectionTimeBudget, TimeSpan.FromSeconds(1), nameof(CollectionTimeBudget));
+        ArgumentOutOfRangeException.ThrowIfLessThan(PassWatchdog, TimeSpan.FromMilliseconds(100), nameof(PassWatchdog));
         ArgumentOutOfRangeException.ThrowIfLessThan(ScanTimeBudget, TimeSpan.FromSeconds(1), nameof(ScanTimeBudget));
         ArgumentOutOfRangeException.ThrowIfNegative(MaxLoggedChangesPerPass, nameof(MaxLoggedChangesPerPass));
         ArgumentOutOfRangeException.ThrowIfLessThan(CoverageRetryBase, TimeSpan.FromMilliseconds(1), nameof(CoverageRetryBase));

@@ -52,4 +52,8 @@ internal sealed record RealTimeFileResult(string Path, RealTimeOutcome Outcome, 
 internal sealed record RealTimeStatus(
     int WatchedFolders, int RefusedFolders, int Pending, int Ready, long Events, long Coalesced, long Dropped, long Overflows, long Rescans,
     long RescansIncomplete, long Scanned, long Flagged, long Quarantined, long LockRetries, long LockWaitsExpired, long BlockedByAntivirus,
-    long Gone, long Links, long TooLarge, long Errors);
+    long Gone, long Links, long TooLarge, long Errors)
+{
+    /// <summary>Review D1 H1: times a stuck scan thread had its synchronous I/O cancelled by its watchdog.</summary>
+    public long Cancelled { get; init; }
+}

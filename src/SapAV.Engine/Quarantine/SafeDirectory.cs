@@ -183,10 +183,12 @@ public static class SafeFile
 {
     /// <summary>
     /// Opens <paramref name="fullPath"/> (validated <c>X:\...</c>). On success returns the file handle and, in
-    /// <paramref name="directory"/>, the verified parent folder handle (the caller owns both).
+    /// <paramref name="directory"/>, the verified parent folder handle (the caller owns both). <paramref name="extraOptions"/> adds
+    /// NtCreateFile options (section D review H2: FILE_COMPLETE_IF_OPLOCKED; a pending oplock break is then a sharing violation).
     /// </summary>
     public static SafeFileHandle? TryOpen(
-        string fullPath, uint access, uint share, out SafeFileHandle? directory, out SafeDirectoryFailure failure, out int win32Error, out string reason)
+        string fullPath, uint access, uint share, out SafeFileHandle? directory, out SafeDirectoryFailure failure, out int win32Error, out string reason,
+        uint extraOptions = 0)
     {
         win32Error = 0;
         directory = null;
@@ -204,7 +206,7 @@ public static class SafeFile
         }
 
         var file = N.OpenRelative(parent, Path.GetFileName(fullPath), access, share, N.FileOpen,
-            N.FileNonDirectoryFile | N.FileOpenReparsePoint, out win32Error, N.ObjCaseInsensitive | N.ObjDontReparse);
+            N.FileNonDirectoryFile | N.FileOpenReparsePoint | extraOptions, out win32Error, N.ObjCaseInsensitive | N.ObjDontReparse);
         if (file is null)
         {
             parent.Dispose();

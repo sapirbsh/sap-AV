@@ -25,6 +25,9 @@ internal sealed record PersistenceMonitorStatus(
 
     /// <summary>Review H3: locations hidden from the engine right now.</summary>
     public int HiddenLocations { get; init; }
+
+    /// <summary>Section D review H2: times a stuck pass had its synchronous I/O cancelled.</summary>
+    public long WatchdogCancels { get; init; }
 }
 
 /// <summary>
@@ -104,7 +107,10 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     private BaselineLoadStatus _baselineStatus = BaselineLoadStatus.Missing;
     private bool _baselineDirty, _saveFailing, _initialized, _firstCollectionMarked;
     private int _entries, _unjudged, _hiddenCount;
-    private long _passes, _judged, _new, _changed, _removed, _flagged, _failures, _retries, _hidden;
+    private long _passes, _judged, _new, _changed, _removed, _flagged, _failures, _retries, _hidden, _watchdogCancels;
+
+    /// <summary>Section D review H2: the monitor thread's watchdog (null when passes run on another thread, e.g. in tests).</summary>
+    private RealTime.ScanThreadWatch? _watch;
 
     /// <summary>Review H5: task files the Tasks folder watch reported changed since the tasks scope's last pass (null = a full pass is needed).</summary>
     private HashSet<string>? _taskChanges = null;
@@ -168,6 +174,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
                 Retries = Interlocked.Read(ref _retries),
                 HiddenAlerts = Interlocked.Read(ref _hidden),
                 HiddenLocations = Volatile.Read(ref _hiddenCount),
+                WatchdogCancels = Interlocked.Read(ref _watchdogCancels),
             };
         }
     }
@@ -372,6 +379,31 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             return;
         }
 
+        // Section D review H2: a watchdog on this thread; a pass past PassWatchdog gets its synchronous I/O cancelled.
+        using var watch = RealTime.ScanThreadWatch.ForCurrentThread();
+        using var timer = new Timer(_ => CheckWatchdog(watch), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _watch = watch;
+        try
+        {
+            LoopWatched();
+        }
+        finally
+        {
+            _watch = null;
+        }
+    }
+
+    private void CheckWatchdog(RealTime.ScanThreadWatch watch)
+    {
+        if (watch.CancelIfOverdue(Environment.TickCount64) is { } stuck)
+        {
+            Interlocked.Increment(ref _watchdogCancels);
+            _logger.LogWarning("Persistence monitor: the pass for {Owner} is past its {Limit}; its synchronous I/O was cancelled (an oplock or a hung open).", stuck.Path, _options.PassWatchdog);
+        }
+    }
+
+    private void LoopWatched()
+    {
         Initialize();
         var waits = new WaitHandle[] { _wake, _stop.Token.WaitHandle };
         while (!_stop.IsCancellationRequested)
@@ -606,6 +638,19 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     private void RunPass(string owner, PersistenceScope[] scopes)
     {
         Interlocked.Increment(ref _passes);
+        _watch?.Arm(OwnerName(owner), "persistence pass", _options.PassWatchdog); // section D review H2
+        try
+        {
+            RunPassWatched(owner, scopes);
+        }
+        finally
+        {
+            _watch?.Disarm();
+        }
+    }
+
+    private void RunPassWatched(string owner, PersistenceScope[] scopes)
+    {
         bool tasks = scopes.Contains(TasksScope);
         HashSet<string>? hint = null;
         if (tasks)

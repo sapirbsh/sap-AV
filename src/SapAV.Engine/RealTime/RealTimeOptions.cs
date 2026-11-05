@@ -45,6 +45,9 @@ public sealed class RealTimeOptions
     /// <summary>Review D1 H1: a real-time thread stuck in an open longer than this gets its synchronous I/O cancelled.</summary>
     public TimeSpan StuckOpenTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>Review D1 H1: the pipeline call (worker scan, alert, quarantine) is overdue after this; its synchronous I/O is cancelled.</summary>
+    public TimeSpan StuckScanTimeout { get; set; } = TimeSpan.FromMinutes(3);
+
     /// <summary>The scan threads actually used with <paramref name="workerCount"/> sandboxed workers (review D1 M3).</summary>
     internal int EffectiveScanThreads(int workerCount) => workerCount > 1 ? Math.Min(ScanThreads, workerCount - 1) : 1;
 

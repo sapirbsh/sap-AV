@@ -51,7 +51,9 @@ internal static class SafeFolderReader
     public static SafeFileHandle? OpenForParsing(SafeFileHandle folder, string name, int maxBytes, out PersistenceIssueReason failure, out string message)
     {
         failure = PersistenceIssueReason.Error;
-        var handle = SafeTree.OpenChild(folder, name, N.GenericRead, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall, out var why, out int error);
+        // Section D review H2: FILE_COMPLETE_IF_OPLOCKED, so a user's oplock on a shortcut or task file can't freeze the collection (it is "in use").
+        var handle = SafeTree.OpenChild(folder, name, N.GenericRead, SafeTree.ShareAll, N.FileNonDirectoryFile | SafeTree.OpenNoRecall | N.FileCompleteIfOplocked,
+            out var why, out int error);
         if (handle is null)
         {
             failure = why switch

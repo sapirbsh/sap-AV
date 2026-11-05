@@ -89,7 +89,8 @@ internal sealed class RemediationHarness : IDisposable
 
     /// <param name="collector">D4 tests: the monitor harness's collector (with <paramref name="registry"/>, its registry).</param>
     public RemediationHarness(
-        IScopedPersistenceCollector? collector = null, PersistenceActionLedger? ledger = null, ManualTime? time = null, RegistryTestRoot? registry = null)
+        IScopedPersistenceCollector? collector = null, PersistenceActionLedger? ledger = null, ManualTime? time = null, RegistryTestRoot? registry = null,
+        TimeSpan? actionTimeout = null)
     {
         _ownsRegistry = registry is null;
         Registry = registry ?? new RegistryTestRoot();
@@ -117,7 +118,10 @@ internal sealed class RemediationHarness : IDisposable
             }
         };
         Remediator = new PersistenceRemediator(collector ?? Collector, () => Store, new NoFollowRegistryEditor(Registry.MachineKey, Registry.UsersKey),
-            Services, TaskScheduler, Quarantine.Manager, Ledger, Time, alerts: Alerts);
+            Services, TaskScheduler, Quarantine.Manager, Ledger, Time, alerts: Alerts)
+        {
+            ActionTimeout = actionTimeout ?? TimeSpan.FromMinutes(2),
+        };
     }
 
     private readonly bool _ownsRegistry;

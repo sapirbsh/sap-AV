@@ -142,6 +142,50 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     /// <summary>The engine's own service: never disabled through Block &amp; remove.</summary>
     internal string OwnServiceName { get; init; } = EngineHost.ServiceName;
 
+    /// <summary>
+    /// Section D review H2: the longest one action may hold the lock. Its thread has a watchdog that cancels its synchronous I/O
+    /// from 3/4 of this on (an open stuck behind an oplock break); at this the caller gets Failed and the lock is released.
+    /// </summary>
+    internal TimeSpan ActionTimeout { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>Runs one action on its own background thread with an I/O watchdog, and waits at most <see cref="ActionTimeout"/>.</summary>
+    private async Task<RemediationResult> Guarded(Func<RemediationResult> action, CancellationToken cancellationToken)
+    {
+        var done = new TaskCompletionSource<RemediationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            using var watch = RealTime.ScanThreadWatch.ForCurrentThread();
+            using var timer = new Timer(_ => watch.CancelIfOverdue(Environment.TickCount64), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+            watch.Arm("Block & remove", "action", ActionTimeout * 3 / 4);
+            try
+            {
+                done.TrySetResult(action());
+            }
+            catch (Exception ex)
+            {
+                done.TrySetException(ex);
+            }
+            finally
+            {
+                watch.Disarm();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "sap-AV Block & remove",
+        };
+        thread.Start();
+        try
+        {
+            return await done.Task.WaitAsync(ActionTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogError("Block & remove: an action didn't finish within {Limit}; the lock is released. It may still complete: check the backup list.", ActionTimeout);
+            return new(RemediationStatus.Failed, "The action didn't finish in time (a file or key it needed was held). It may still complete; check the backups before trying again.");
+        }
+    }
+
     public bool IsAvailable => _lazyStore.Value is not null;
 
     // ---- Block & remove ----
@@ -172,7 +216,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
         try
         {
-            return await Task.Run(() => Block(store, client, entryId, kind, machine, confirmCritical, cancellationToken), cancellationToken).ConfigureAwait(false);
+            return await Guarded(() => Block(store, client, entryId, kind, machine, confirmCritical, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -297,7 +341,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
         try
         {
-            return await Task.Run(() => Restore(store, client, backupId, cancellationToken), cancellationToken).ConfigureAwait(false);
+            return await Guarded(() => Restore(store, client, backupId, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         finally
         {

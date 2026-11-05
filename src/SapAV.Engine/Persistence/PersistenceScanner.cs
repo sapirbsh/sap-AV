@@ -249,13 +249,16 @@ internal sealed class PersistenceScanner(
         return await ScanOwnAsync(path, options, cancellationToken).ConfigureAwait(false);
     }
 
+    private static readonly ScanOpenChecks OplockSafe = new(CompleteIfOplocked: true);
+
     private async Task<FileScanReport> ScanOwnAsync(string path, PersistenceScanOptions options, CancellationToken cancellationToken)
     {
         var item = new ScanItem(path, options.Trigger);
         var notes = new List<ScanNote>();
         try
         {
-            using var opened = SafeScanOpen.Open(item, notes, _time, out var failure, out _, ScanOpenChecks.None);
+            // Section D review H2: never wait for an oplock break (a held oplock would freeze the D4 thread or the scan); the target is Locked, retried later.
+            using var opened = SafeScanOpen.Open(item, notes, _time, out var failure, out _, OplockSafe);
             if (opened is null)
             {
                 return failure!;
