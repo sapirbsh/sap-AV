@@ -207,6 +207,7 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         {
             Key = r.Key, Source = r.Scope.Source, Sid = r.Scope.UserSid, Fingerprint = r.Fingerprint, Display = r.Display, Judged = r.Judged, Change = (int)r.Change,
             TargetStamp = r.TargetStamp, PendingSince = r.PendingSince, NotBefore = r.NotBefore?.UtcTicks, Attempts = r.Attempts, LastJudged = r.LastJudged?.UtcTicks,
+            JudgedFingerprint = r.JudgedFingerprint,
         })],
         Baselined = [.. snapshot.Baselined.Select(s => new ScopeDto { Source = s.Source, Sid = s.UserSid })],
         Hidden = [.. (snapshot.Hidden ?? []).Select(h => new HiddenDto { Id = h.Id, Source = h.Scope.Source, Sid = h.Scope.UserSid })],
@@ -225,13 +226,13 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         {
             if (string.IsNullOrEmpty(r.Key) || r.Key.Length > 8192 || r.Fingerprint is not { Length: 64 } || !Enum.IsDefined((BaselineChange)r.Change)
                 || r.Display is null || r.Display.Length > PersistenceBaseline.MaxDisplayLength || r.TargetStamp is not (null or { Length: 64 })
-                || r.PendingSince < 0 || r.Attempts is < 0 or > 10_000)
+                || r.PendingSince < 0 || r.Attempts is < 0 or > 10_000 || r.JudgedFingerprint is not (null or { Length: 64 }))
             {
                 throw new InvalidDataException("A baseline record is invalid.");
             }
 
             return new BaselineRecord(r.Key, Scope(r.Source, r.Sid), r.Fingerprint, r.Display, r.Judged, (BaselineChange)r.Change, r.TargetStamp,
-                r.PendingSince, Time(r.NotBefore), r.Attempts, Time(r.LastJudged));
+                r.PendingSince, Time(r.NotBefore), r.Attempts, Time(r.LastJudged), r.JudgedFingerprint);
         }).ToArray();
         var hidden = (file.Hidden ?? []).Select(h => h.Id is { Length: > 0 and <= 8192 } id
             ? new HiddenLocation(id, Scope(h.Source, h.Sid))
@@ -285,6 +286,9 @@ internal sealed class FileBaselineStore : IPersistenceBaselineStore
         public int Attempts { get; set; }
 
         public long? LastJudged { get; set; }
+
+        /// <summary>D5: the fingerprint the record was last judged under (null in older baselines).</summary>
+        public string? JudgedFingerprint { get; set; }
     }
 
     private sealed class ScopeDto

@@ -1,5 +1,8 @@
 namespace SapAV.Engine.Persistence.Remediation;
 
+/// <summary>D5: a key's state right after the user's change, and (for a neighbour) the judged state it must have come from.</summary>
+internal sealed record LedgerAcceptance(string After, string? JudgedAs = null);
+
 /// <summary>
 /// D5 ↔ D4: tells real-time persistence monitoring about the changes the user made through Block &amp; remove and restore, so
 /// they don't come back as alerts. Thread-safe (actions run on pipe threads, the monitor on its own thread).
@@ -9,7 +12,8 @@ namespace SapAV.Engine.Persistence.Remediation;
 /// (they wait, unjudged) until the action is done or the hold runs out (<see cref="MaxHold"/>), so a monitor pass that lands
 /// between the change and the hand-over can't alert on it.</para>
 /// <para><b>Accept.</b> After the change, the action collects the scope again and hands over each touched key's fingerprint
-/// as it is now. The monitor marks a waiting record judged, silently, only if its fingerprint is exactly that one, once
+/// as it is now: the entry's own key, and (Winlogon, services, tasks) neighbours that were already judged. The monitor marks a
+/// waiting record judged, silently, only if its fingerprint is exactly that one, once
 /// (<see cref="TryConsume"/>), within <see cref="AcceptFor"/>. Anything else (another value written right after, a later
 /// change) is judged and alerted as usual. A removed key needs no hand-over: removals are only logged.</para>
 /// </remarks>
@@ -21,7 +25,7 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
 
     private readonly Lock _lock = new();
     private readonly Dictionary<string, DateTimeOffset> _held = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (string Fingerprint, DateTimeOffset Until)> _accepted = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (LedgerAcceptance Acceptance, DateTimeOffset Until)> _accepted = new(StringComparer.Ordinal);
 
     /// <summary>Raised (on the acting thread) after <see cref="Accept"/> with the scope to look at again now.</summary>
     public event Action<PersistenceScope>? Accepted;
@@ -54,18 +58,23 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
         }
     }
 
-    /// <summary>The keys' fingerprints right after the user's change (keys that are gone aren't listed).</summary>
-    public void Accept(IReadOnlyDictionary<string, string> fingerprints, PersistenceScope scope)
+    /// <summary>
+    /// The keys the user's change touched, each with its fingerprint right after the change (keys that are gone aren't
+    /// listed). <see cref="LedgerAcceptance.JudgedAs"/> set (review H1, a neighbour of the entry: another program of a Winlogon
+    /// value, a service's other entry, a task's other action): the record is accepted only if it was last judged under exactly
+    /// that pre-action fingerprint, so a new or unjudged key, or one changed meanwhile, is never accepted.
+    /// </summary>
+    public void Accept(IReadOnlyDictionary<string, LedgerAcceptance> accepted, PersistenceScope scope)
     {
         var until = time.GetUtcNow() + AcceptFor;
         lock (_lock)
         {
             Prune();
-            foreach (var (key, fingerprint) in fingerprints)
+            foreach (var (key, acceptance) in accepted)
             {
                 if (_accepted.Count < MaxEntries)
                 {
-                    _accepted[key] = (fingerprint, until);
+                    _accepted[key] = (acceptance, until);
                 }
             }
         }
@@ -93,13 +102,17 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
         }
     }
 
-    /// <summary>True once if the user's change left <paramref name="key"/> with exactly <paramref name="fingerprint"/>.</summary>
-    public bool TryConsume(string key, string fingerprint)
+    /// <summary>
+    /// True once if the user's change left <paramref name="key"/> with exactly <paramref name="fingerprint"/> (and, for a
+    /// neighbour, the record was last judged under the handed-over pre-action fingerprint, <paramref name="judgedFingerprint"/>).
+    /// </summary>
+    public bool TryConsume(string key, string fingerprint, string? judgedFingerprint)
     {
         lock (_lock)
         {
             if (!_accepted.TryGetValue(key, out var accepted) || accepted.Until <= time.GetUtcNow()
-                || !string.Equals(accepted.Fingerprint, fingerprint, StringComparison.Ordinal))
+                || !string.Equals(accepted.Acceptance.After, fingerprint, StringComparison.Ordinal)
+                || (accepted.Acceptance.JudgedAs is { } before && !string.Equals(before, judgedFingerprint, StringComparison.Ordinal)))
             {
                 return false;
             }

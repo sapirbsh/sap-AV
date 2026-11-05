@@ -696,7 +696,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         foreach (var item in pending)
         {
             var record = item.Record;
-            if (_userActions.TryConsume(record.Key, record.Fingerprint))
+            if (_userActions.TryConsume(record.Key, record.Fingerprint, record.JudgedFingerprint))
             {
                 _baseline.MarkJudged(record.Key, record.Fingerprint, now);
                 _baselineDirty = true;

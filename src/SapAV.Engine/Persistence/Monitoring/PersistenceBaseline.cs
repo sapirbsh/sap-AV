@@ -28,9 +28,10 @@ internal enum BaselineChange
 /// <param name="NotBefore">Not judged before this (H1: a retry after a coverage gap; H4: a key that keeps changing).</param>
 /// <param name="Attempts">Review H1: judgements in a row that couldn't reach the target (time, a cap, a failed open or scan).</param>
 /// <param name="LastJudged">When it was last judged (H4: re-judging a key that keeps changing is rate-limited).</param>
+/// <param name="JudgedFingerprint">D5: the fingerprint it was last judged under (a Block &amp; remove neighbour is accepted only from that state).</param>
 internal sealed record BaselineRecord(
     string Key, PersistenceScope Scope, string Fingerprint, string Display, bool Judged, BaselineChange Change, string? TargetStamp = null,
-    long PendingSince = 0, DateTimeOffset? NotBefore = null, int Attempts = 0, DateTimeOffset? LastJudged = null);
+    long PendingSince = 0, DateTimeOffset? NotBefore = null, int Attempts = 0, DateTimeOffset? LastJudged = null, string? JudgedFingerprint = null);
 
 /// <summary>Review H3: an autostart location the engine was denied, already reported (until it is readable again).</summary>
 internal sealed record HiddenLocation(string Id, PersistenceScope Scope);
@@ -200,7 +201,7 @@ internal sealed class PersistenceBaseline
     {
         if (_records.TryGetValue(key, out var record) && record.Fingerprint == fingerprint)
         {
-            _records[key] = record with { Judged = true, LastJudged = now, NotBefore = null, Attempts = 0 };
+            _records[key] = record with { Judged = true, LastJudged = now, NotBefore = null, Attempts = 0, JudgedFingerprint = fingerprint };
             return true;
         }
 

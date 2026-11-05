@@ -70,6 +70,21 @@ public sealed class BlockAndRemoveMonitorTests : IDisposable
     }
 
     [Fact]
+    public void AValueWrittenIntoTheSameKey_ThenBlockingAnother_StillGetsJudged()
+    {
+        // Review H1: a user process writes V2 and right away blocks V1 in the same Run key; V2 must not ride along.
+        _m.UserRunValue(Alice, "V1", _m.Target("tool.exe"));
+        _m.Baseline();
+        _m.UserRunValue(Alice, "V2", _m.Target("malware.exe"));
+
+        var blocked = _h.Block(_h.User(Alice), IdOf("V1"));
+        _m.Monitor.RunDue();
+
+        Assert.Equal(RemediationStatus.Blocked, blocked.Status);
+        Assert.Single(_m.PersistenceAlerts("V2"));
+    }
+
+    [Fact]
     public void Ledger_HoldsByPrefixUntilReleasedOrExpired_AndAcceptsAFingerprintOnce()
     {
         var time = new ManualTime();
@@ -81,9 +96,18 @@ public sealed class BlockAndRemoveMonitorTests : IDisposable
         time.Now += PersistenceActionLedger.MaxHold + TimeSpan.FromSeconds(1);
         Assert.False(ledger.IsHeld("RunKey|S-1-5-21-1|HKU\\X\\RUN|EVIL", out _));
 
-        ledger.Accept(new Dictionary<string, string> { ["k"] = "f1" }, new PersistenceScope("registry autoruns", null));
-        Assert.False(ledger.TryConsume("k", "f2"));
-        Assert.True(ledger.TryConsume("k", "f1"));
-        Assert.False(ledger.TryConsume("k", "f1"));
+        ledger.Accept(new Dictionary<string, LedgerAcceptance>
+        {
+            ["k"] = new("f1"),
+            ["neighbour"] = new("n2", JudgedAs: "n1"),
+        }, new PersistenceScope("registry autoruns", null));
+        Assert.False(ledger.TryConsume("k", "f2", null));
+        Assert.True(ledger.TryConsume("k", "f1", null));
+        Assert.False(ledger.TryConsume("k", "f1", null));
+
+        // Review H1: a neighbour only from the state it was judged in (never a new or unjudged one).
+        Assert.False(ledger.TryConsume("neighbour", "n2", null));
+        Assert.False(ledger.TryConsume("neighbour", "n2", "other"));
+        Assert.True(ledger.TryConsume("neighbour", "n2", "n1"));
     }
 }

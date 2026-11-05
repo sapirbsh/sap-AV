@@ -28,6 +28,7 @@ internal enum RemediationStatus
     NotSupported,
     InvalidBackup,
     QuotaExceeded,
+    NeedsConfirmation,
     Failed,
 }
 
@@ -39,7 +40,8 @@ internal interface IPersistenceRemediation
     bool IsAvailable { get; }
 
     /// <summary>Blocks the entry the engine collects now under <paramref name="entryId"/>, for <paramref name="client"/>.</summary>
-    Task<RemediationResult> BlockAsync(IClientIdentity client, string entryId, CancellationToken cancellationToken = default);
+    /// <param name="confirmCritical">Review M3: the user confirmed disabling a boot-critical or core Windows service.</param>
+    Task<RemediationResult> BlockAsync(IClientIdentity client, string entryId, CancellationToken cancellationToken = default, bool confirmCritical = false);
 
     Task<RemediationResult> RestoreAsync(IClientIdentity client, string backupId, CancellationToken cancellationToken = default);
 
@@ -60,8 +62,10 @@ internal interface IPersistenceRemediation
 /// or rewritten only if they still hold exactly the backed-up bytes, under the same open key).</para>
 /// <para><b>Who may act.</b> A machine-wide entry (HKLM, services, IFEO, machine tasks, the all-users Startup folder) needs an
 /// administrator. A standard user may act only on entries of their own scope: their own hive's values, their own Startup folder
-/// (and only on a file they could delete themselves), tasks whose registered principal is them. The same rule applies to
-/// restore, purge and listing. The ID's own claims only choose what to collect; the decision is on the collected entry.</para>
+/// (and only on a file they could delete themselves), their own hive values only where they could set them, tasks whose own
+/// security descriptor lets them change them (review M1). Restore and purge: a standard user only on records they created
+/// themselves, never on an administrator's block (review M2); listing shows the same records.
+/// The ID's own claims only choose what to collect; the decision is on the collected entry.</para>
 /// <para><b>Backed up first, never deleted.</b> Every action writes its backup record (HMAC'd, <see cref="IPersistenceBackupStore"/>)
 /// before it changes anything (a Startup item's backup is its quarantine item). Values are deleted only for Run / RunOnce /
 /// IFEO; Winlogon Shell / Userinit are set back to the Windows default; services are disabled (and stopped), never deleted;
@@ -69,7 +73,9 @@ internal interface IPersistenceRemediation
 /// <para><b>Restore</b> puts back exactly what was removed, or re-enables it, and refuses (LocationChanged) when the place
 /// now holds something else than what Block &amp; remove left there: nothing is overwritten.</para>
 /// <para><b>No re-alerts.</b> While an action runs its keys are held from real-time judgement; afterwards the result is handed
-/// to <see cref="PersistenceActionLedger"/>, so D4 neither re-alerts a blocked entry nor raises "new entry" for a restored one.</para>
+/// to <see cref="PersistenceActionLedger"/>: only the entry's own key, plus (Winlogon, services, tasks) neighbours that D4 had judged in
+/// exactly their pre-action state (review H1), so D4 neither re-alerts a blocked entry nor raises "new entry" for a restored one,
+/// while anything else written into the same key or folder is still judged.</para>
 /// <para>Every action is an Event Log alert: 3002 PersistenceBlocked, 3003 PersistenceRestored, with the entry kind's MITRE ID.</para>
 /// <para>One action at a time (a lock), so two requests can't interleave on the same entry.</para>
 /// </remarks>
@@ -140,7 +146,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
     // ---- Block & remove ----
 
-    public async Task<RemediationResult> BlockAsync(IClientIdentity client, string entryId, CancellationToken cancellationToken = default)
+    public async Task<RemediationResult> BlockAsync(IClientIdentity client, string entryId, CancellationToken cancellationToken = default, bool confirmCritical = false)
     {
         ArgumentNullException.ThrowIfNull(client);
         if (!PersistenceEntryId.TryParse(entryId, out var kind, out bool machine))
@@ -165,7 +171,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
         try
         {
-            return await Task.Run(() => Block(store, client, entryId, kind, machine, cancellationToken), cancellationToken).ConfigureAwait(false);
+            return await Task.Run(() => Block(store, client, entryId, kind, machine, confirmCritical, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -173,7 +179,8 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         }
     }
 
-    private RemediationResult Block(IPersistenceBackupStore store, IClientIdentity client, string entryId, PersistenceKind kind, bool machine, CancellationToken ct)
+    private RemediationResult Block(
+        IPersistenceBackupStore store, IClientIdentity client, string entryId, PersistenceKind kind, bool machine, bool confirmCritical, CancellationToken ct)
     {
         var scopes = ScopesFor(kind, machine, client, ct);
         var collected = _collector.CollectScoped(scopes, ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget });
@@ -199,7 +206,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         _ledger.Hold(held);
         try
         {
-            var context = new BlockContext(store, client, entry, FilePersistenceBackupStore.NewId(), _time.GetUtcNow(), ct);
+            var context = new BlockContext(store, client, entry, FilePersistenceBackupStore.NewId(), _time.GetUtcNow(), ct) { ConfirmCritical = confirmCritical };
             var result = entry.Kind switch
             {
                 PersistenceKind.RunKey or PersistenceKind.RunOnceKey or PersistenceKind.IfeoDebugger or PersistenceKind.IfeoSilentProcessExit => BlockValue(context),
@@ -212,7 +219,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
             if (result is { Status: RemediationStatus.Blocked, Record: { } record })
             {
-                HandOver(scope, [scope], entry.Kind, entry.UserSid, entry.Location, ct);
+                HandOver(scope, collected, entry.Key, entry.Kind, entry.UserSid, entry.Location, ct);
                 Record(AlertType.PersistenceBlocked, record, client);
                 _logger.LogInformation("Block & remove: user {User} blocked autostart entry {Location} {Value} ({Kind}) as backup {Backup}: {Reason}",
                     client.User.Value, entry.Location, entry.ValueName, entry.Kind, record.Id, result.Reason);
@@ -235,6 +242,9 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     private sealed record BlockContext(
         IPersistenceBackupStore Store, IClientIdentity Client, PersistenceEntry Entry, string BackupId, DateTimeOffset Now, CancellationToken Cancellation)
     {
+        /// <summary>Review M3: the user confirmed a boot-critical or core service.</summary>
+        public bool ConfirmCritical { get; init; }
+
         public PersistenceBackupRecord NewRecord(PersistenceBackupAction action) => new()
         {
             Id = BackupId,
@@ -247,6 +257,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             Action = action,
             State = PersistenceBackupState.Active,
             BlockedBy = Client.User.Value,
+            BlockedByAdmin = Client.IsAdmin,
             BlockedAtUtc = Now,
         };
     }
@@ -298,11 +309,13 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         _ledger.Hold(held);
         try
         {
+            var scopes = ScopesFor(record.Kind, record.UserSid is null, client, ct, record.UserSid);
+            var before = HasNeighbours(record.Kind) ? _collector.CollectScoped(scopes, ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget }) : null;
             var result = record.Action switch
             {
                 PersistenceBackupAction.ValueDeleted or PersistenceBackupAction.ValueReset => RestoreValue(record, client),
                 PersistenceBackupAction.ServiceDisabled => RestoreService(record),
-                PersistenceBackupAction.TaskDisabled => RestoreTask(record),
+                PersistenceBackupAction.TaskDisabled => RestoreTask(record, client),
                 PersistenceBackupAction.FileQuarantined => RestoreStartupItem(record, client, ct),
                 _ => new(RemediationStatus.InvalidBackup, "Unknown backup action."),
             };
@@ -324,8 +337,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
                 _logger.LogError("Block & remove: backup {Backup} was restored but its record couldn't be updated ({Why}).", record.Id, ex.Message);
             }
 
-            var scopes = ScopesFor(record.Kind, record.UserSid is null, client, ct, record.UserSid);
-            HandOver(scopes[0], scopes, record.Kind, record.UserSid, record.Location, ct);
+            HandOver(scopes[0], before, record.EntryKey, record.Kind, record.UserSid, record.Location, ct);
             Record(AlertType.PersistenceRestored, restored, client);
             _logger.LogInformation("Block & remove: user {User} restored backup {Backup} ({Location} {Value}): {Reason}",
                 client.User.Value, record.Id, record.Location, record.ValueName, result.Reason);
@@ -377,7 +389,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             return [];
         }
 
-        return store.List().Select(r => r.Record).OfType<PersistenceBackupRecord>().Where(r => MayAct(client, r.UserSid))
+        return store.List().Select(r => r.Record).OfType<PersistenceBackupRecord>().Where(r => MayActOnRecord(client, r))
             .OrderByDescending(r => r.BlockedAtUtc).ToArray();
     }
 
@@ -389,6 +401,15 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         new(RemediationStatus.AccessDenied, "This autostart entry is machine-wide; only an administrator may block or restore it.");
 
     /// <summary>An administrator may act on anything; a standard user only on entries of their own scope.</summary>
+    /// <summary>
+    /// Review M2: a standard user may see, restore or purge only a record of their own scope that they created themselves; an
+    /// administrator's block (even of that user's entry) is undone only by an administrator.
+    /// </summary>
+    internal static bool MayActOnRecord(IClientIdentity client, PersistenceBackupRecord record) =>
+        client.IsAdmin
+        || (MayAct(client, record.UserSid) && !record.BlockedByAdmin
+            && string.Equals(record.BlockedBy, client.User.Value, StringComparison.OrdinalIgnoreCase));
+
     internal static bool MayAct(IClientIdentity client, string? entryUserSid) =>
         client.IsAdmin || (entryUserSid is not null && string.Equals(entryUserSid, client.User.Value, StringComparison.OrdinalIgnoreCase));
 
@@ -403,7 +424,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
                 : new(RemediationStatus.NotFound, "No such backup.");
         }
 
-        if (status == BackupLoadStatus.NotFound || !MayAct(client, record!.UserSid))
+        if (status == BackupLoadStatus.NotFound || !MayActOnRecord(client, record!))
         {
             return new(RemediationStatus.NotFound, "No such backup.");
         }
@@ -502,7 +523,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     private static string ServiceLocation(string location) =>
         location.EndsWith(@"\Parameters", StringComparison.OrdinalIgnoreCase) ? location[..^@"\Parameters".Length] : location;
 
-    /// <summary>Whether an entry collected after the action belongs to what the action changed.</summary>
+    /// <summary>Whether an entry is in the same place as the acted-on one (a neighbour candidate for <see cref="HasNeighbours"/> kinds).</summary>
     private static bool Touched(PersistenceEntry e, PersistenceKind kind, string? userSid, string location) =>
         e.Kind == kind && string.Equals(e.UserSid, userSid, StringComparison.OrdinalIgnoreCase)
         && (kind == PersistenceKind.Service
@@ -510,24 +531,48 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             : string.Equals(e.Location, location, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// Collects the scope again and hands each touched key's fingerprint to the ledger (D4 then marks exactly that state judged,
-    /// silently). For a value-type entry (Run, IFEO, Startup) only the entry's own key is touched; for the others, its neighbours.
+    /// Review H1: collects the scope again and hands the ledger what the action changed, nothing more. The entry's own key is
+    /// accepted in its new state. For a kind whose action also changes neighbours (Winlogon: the value's other programs;
+    /// services: ImagePath and ServiceDll; tasks: the task's other actions), a neighbour is accepted only if it existed in the
+    /// pre-action collection, and D4 then also requires its record to have been judged under exactly that pre-action state.
+    /// For value-type kinds (Run, RunOnce, IFEO, SilentProcessExit, Startup items) nothing but the entry's key is accepted, so
+    /// another value written into the same key or folder around the action is still judged and alerted.
     /// </summary>
-    private void HandOver(PersistenceScope scope, IReadOnlyCollection<PersistenceScope> scopes, PersistenceKind kind, string? userSid, string location, CancellationToken ct)
+    private void HandOver(
+        PersistenceScope scope, PersistenceScopedCollection? before, string entryKey, PersistenceKind kind, string? userSid, string location, CancellationToken ct)
     {
         try
         {
-            var after = _collector.CollectScoped(scopes, ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget });
-            var fingerprints = PersistenceBaseline.Groups(after)
-                .Where(g => g.Entries.Count > 0 && Touched(g.Entries[0], kind, userSid, location))
-                .ToDictionary(g => g.Key, g => PersistenceBaseline.Fingerprint(g.Entries), StringComparer.Ordinal);
-            _ledger.Accept(fingerprints, scope);
+            var was = HasNeighbours(kind) && before is not null
+                ? PersistenceBaseline.Groups(before).Where(g => g.Entries.Count > 0 && Touched(g.Entries[0], kind, userSid, location))
+                    .ToDictionary(g => g.Key, g => PersistenceBaseline.Fingerprint(g.Entries), StringComparer.Ordinal)
+                : [];
+            var after = _collector.CollectScoped([scope], ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget });
+            var accepted = new Dictionary<string, LedgerAcceptance>(StringComparer.Ordinal);
+            foreach (var (key, entries) in PersistenceBaseline.Groups(after))
+            {
+                string now = PersistenceBaseline.Fingerprint(entries);
+                if (string.Equals(key, entryKey, StringComparison.Ordinal))
+                {
+                    accepted[key] = new LedgerAcceptance(now);
+                }
+                else if (was.TryGetValue(key, out var previous) && entries.Count > 0 && Touched(entries[0], kind, userSid, location))
+                {
+                    accepted[key] = new LedgerAcceptance(now, JudgedAs: previous);
+                }
+            }
+
+            _ledger.Accept(accepted, scope);
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
             _logger.LogWarning(ex, "Block & remove: the change was made, but the scope couldn't be collected again for real-time monitoring; it may alert once.");
         }
     }
+
+    /// <summary>The kinds whose action changes more than the entry's own baseline key.</summary>
+    private static bool HasNeighbours(PersistenceKind kind) =>
+        kind is PersistenceKind.WinlogonShell or PersistenceKind.WinlogonUserinit or PersistenceKind.Service or PersistenceKind.ScheduledTask;
 
     /// <summary>The Event Log record of an action (3002 / 3003), against the requester's own alert budget.</summary>
     private void Record(AlertType type, PersistenceBackupRecord record, IClientIdentity client)
