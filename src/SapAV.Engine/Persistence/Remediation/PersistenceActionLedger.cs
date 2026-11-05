@@ -24,14 +24,14 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
     private const int MaxEntries = 4096;
 
     private readonly Lock _lock = new();
-    private readonly Dictionary<string, DateTimeOffset> _held = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (int Count, DateTimeOffset Until)> _held = new(StringComparer.Ordinal); // follow-up M1: reference-counted
     private readonly HashSet<string> _rejudge = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (LedgerAcceptance Acceptance, DateTimeOffset Until)> _accepted = new(StringComparer.Ordinal);
 
     /// <summary>Raised (on the acting thread) after <see cref="Accept"/> with the scope to look at again now.</summary>
     public event Action<PersistenceScope>? Accepted;
 
-    /// <summary>Holds every baseline key starting with one of <paramref name="prefixes"/> (an action runs on them).</summary>
+    /// <summary>Holds every baseline key starting with one of <paramref name="prefixes"/> (an action runs on them); counted, one <see cref="Release"/> each.</summary>
     public void Hold(IEnumerable<string> prefixes)
     {
         var until = time.GetUtcNow() + MaxHold;
@@ -42,7 +42,7 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
             {
                 if (_held.Count < MaxEntries)
                 {
-                    _held[prefix] = until;
+                    _held[prefix] = (_held.TryGetValue(prefix, out var held) ? held.Count + 1 : 1, until);
                 }
             }
         }
@@ -54,7 +54,15 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
         {
             foreach (var prefix in prefixes)
             {
-                _held.Remove(prefix);
+                // Follow-up M1: one release per hold; a key held by two actions stays held until both are done.
+                if (_held.TryGetValue(prefix, out var held) && held.Count > 1)
+                {
+                    _held[prefix] = held with { Count = held.Count - 1 };
+                }
+                else
+                {
+                    _held.Remove(prefix);
+                }
             }
         }
     }
@@ -117,7 +125,7 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
         var now = time.GetUtcNow();
         lock (_lock)
         {
-            foreach (var (prefix, end) in _held)
+            foreach (var (prefix, (_, end)) in _held)
             {
                 if (end > now && key.StartsWith(prefix, StringComparison.Ordinal))
                 {
@@ -154,7 +162,7 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
     private void Prune()
     {
         var now = time.GetUtcNow();
-        foreach (var key in _held.Where(h => h.Value <= now).Select(h => h.Key).ToArray())
+        foreach (var key in _held.Where(h => h.Value.Until <= now).Select(h => h.Key).ToArray())
         {
             _held.Remove(key);
         }

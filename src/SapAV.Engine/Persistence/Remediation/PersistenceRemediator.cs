@@ -88,7 +88,8 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     public const int MaxRecordsPerUser = 400;
 
     private static readonly TimeSpan CollectionBudget = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan LockWait = TimeSpan.FromSeconds(30);
+    /// <summary>How long a request waits for the action before it to end, then gets Busy.</summary>
+    internal TimeSpan LockWait { get; init; } = TimeSpan.FromSeconds(30);
 
     private readonly IScopedPersistenceCollector _collector;
     private readonly Lazy<IPersistenceBackupStore?> _lazyStore;
@@ -143,23 +144,34 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     internal string OwnServiceName { get; init; } = EngineHost.ServiceName;
 
     /// <summary>
-    /// Section D review H2: the longest one action may hold the lock. Its thread has a watchdog that cancels its synchronous I/O
-    /// from 3/4 of this on (an open stuck behind an oplock break); at this the caller gets Failed and the lock is released.
+    /// Section D review H2 / follow-up M1: the longest the caller waits for one action. Its thread has a watchdog that cancels its
+    /// synchronous I/O from 3/4 of this on (an open stuck behind an oplock break). At this the caller gets Failed, but the lock
+    /// stays held until the action's thread really ends, so a late action can't overlap the next one (they get Busy meanwhile).
     /// </summary>
     internal TimeSpan ActionTimeout { get; init; } = TimeSpan.FromMinutes(2);
 
-    /// <summary>Runs one action on its own background thread with an I/O watchdog, and waits at most <see cref="ActionTimeout"/>.</summary>
+    /// <summary>
+    /// Runs one action on its own background thread with an I/O watchdog, and waits at most <see cref="ActionTimeout"/>. The
+    /// caller holds <c>_one</c> and hands it over: it is released in the action thread's own <c>finally</c>, never before.
+    /// </summary>
     private async Task<RemediationResult> Guarded(Func<RemediationResult> action, CancellationToken cancellationToken)
     {
         var done = new TaskCompletionSource<RemediationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
-            using var watch = RealTime.ScanThreadWatch.ForCurrentThread();
-            using var timer = new Timer(_ => watch.CancelIfOverdue(Environment.TickCount64), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
-            watch.Arm("Block & remove", "action", ActionTimeout * 3 / 4);
             try
             {
-                done.TrySetResult(action());
+                using var watch = RealTime.ScanThreadWatch.ForCurrentThread();
+                using var timer = new Timer(_ => watch.CancelIfOverdue(Environment.TickCount64), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+                watch.Arm("Block & remove", "action", ActionTimeout * 3 / 4);
+                try
+                {
+                    done.TrySetResult(action());
+                }
+                finally
+                {
+                    watch.Disarm();
+                }
             }
             catch (Exception ex)
             {
@@ -167,24 +179,38 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             }
             finally
             {
-                watch.Disarm();
+                _one.Release(); // only now may the next action run
             }
         })
         {
             IsBackground = true,
             Name = "sap-AV Block & remove",
         };
-        thread.Start();
+        try
+        {
+            thread.Start();
+        }
+        catch
+        {
+            _one.Release();
+            throw;
+        }
+
         try
         {
             return await done.Task.WaitAsync(ActionTimeout, cancellationToken).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            _logger.LogError("Block & remove: an action didn't finish within {Limit}; the lock is released. It may still complete: check the backup list.", ActionTimeout);
+            _logger.LogError("Block & remove: an action didn't finish within {Limit}; it keeps the lock until it ends. It may still complete: check the backup list.", ActionTimeout);
             return new(RemediationStatus.Failed, "The action didn't finish in time (a file or key it needed was held). It may still complete; check the backups before trying again.");
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && !done.Task.IsCompleted)
+        {
+            return new(RemediationStatus.Failed, "The request was cancelled while the action ran. It may still complete; check the backups before trying again.");
+        }
     }
+
 
     public bool IsAvailable => _lazyStore.Value is not null;
 
@@ -214,14 +240,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             return new(RemediationStatus.Busy, "Another Block & remove or restore is running; try again.");
         }
 
-        try
-        {
-            return await Guarded(() => Block(store, client, entryId, kind, machine, confirmCritical, cancellationToken), cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _one.Release();
-        }
+        return await Guarded(() => Block(store, client, entryId, kind, machine, confirmCritical, cancellationToken), cancellationToken).ConfigureAwait(false); // Guarded releases _one
     }
 
     private RemediationResult Block(
@@ -339,14 +358,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             return new(RemediationStatus.Busy, "Another Block & remove or restore is running; try again.");
         }
 
-        try
-        {
-            return await Guarded(() => Restore(store, client, backupId, cancellationToken), cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _one.Release();
-        }
+        return await Guarded(() => Restore(store, client, backupId, cancellationToken), cancellationToken).ConfigureAwait(false); // Guarded releases _one
     }
 
     private RemediationResult Restore(IPersistenceBackupStore store, IClientIdentity client, string backupId, CancellationToken ct)
@@ -384,7 +396,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             {
                 store.Save(restored);
             }
-            catch (IOException ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException) // follow-up M1: the entry is back; never lose that
             {
                 _logger.LogError("Block & remove: backup {Backup} was restored but its record couldn't be updated ({Why}).", record.Id, ex.Message);
             }

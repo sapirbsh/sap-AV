@@ -72,13 +72,13 @@ public sealed class PersistenceOplockTests : IDisposable
     }
 
     [Fact]
-    public void AnActionThatHangs_TimesOut_AndReleasesTheLock()
+    public void AnActionThatHangs_TimesOutForTheCaller_ButHoldsTheLockUntilItReallyEnds()
     {
+        // Follow-up M1: the lock is released by the action's own thread, so a late action never overlaps the next one.
         using var hang = new ManualResetEventSlim();
-        HookedCollector? hooked = null;
-        using var h = new RemediationHarness(collector: null, actionTimeout: TimeSpan.FromSeconds(2));
-        hooked = new HookedCollector(h.Collector);
-        using var stuck = new RemediationHarness(collector: hooked, registry: h.Registry, actionTimeout: TimeSpan.FromSeconds(2));
+        using var h = new RemediationHarness();
+        var hooked = new HookedCollector(h.Collector);
+        using var stuck = new RemediationHarness(collector: hooked, registry: h.Registry, actionTimeout: TimeSpan.FromSeconds(1));
         h.UserRunKey(RemediationHarness.Alice).SetValue("Tool", @"C:\Tools\tool.exe");
         string id = h.IdOf("Tool");
         hooked.Before(1, () => hang.Wait(TimeSpan.FromSeconds(60)));
@@ -86,15 +86,38 @@ public sealed class PersistenceOplockTests : IDisposable
 
         try
         {
-            var first = Within(() => stuck.Block(alice, id));
-            var second = Within(() => stuck.Block(alice, id)); // the lock is free again
-
-            Assert.Equal(RemediationStatus.Failed, first.Status);
-            Assert.NotEqual(RemediationStatus.Busy, second.Status);
+            Assert.Equal(RemediationStatus.Failed, Within(() => stuck.Block(alice, id)).Status);
+            Assert.Equal(RemediationStatus.Busy, Within(() => stuck.Block(alice, id)).Status); // it still runs
         }
         finally
         {
             hang.Set();
         }
+
+        RemediationResult later;
+        var deadline = DateTime.UtcNow + Limit;
+        do
+        {
+            later = stuck.Block(alice, id);
+        }
+        while (later.Status == RemediationStatus.Busy && DateTime.UtcNow < deadline);
+
+        Assert.Equal(RemediationStatus.EntryChanged, later.Status); // the late block finished first: the value is gone
+        Assert.Single(stuck.Store.List(), r => r.Record?.State == SapAV.Core.Pipe.PersistenceBackupState.Active);
+        Assert.Null(h.UserRunKey(RemediationHarness.Alice).GetValue("Tool"));
+    }
+
+    [Fact]
+    public void LedgerHolds_AreCounted_AKeyHeldTwiceStaysHeldUntilBothRelease()
+    {
+        var ledger = new PersistenceActionLedger(new TestSupport.ManualTime());
+        string[] prefix = [@"RunKey|S-1-5-21-1|HKU\X\RUN|"];
+        ledger.Hold(prefix);
+        ledger.Hold(prefix);
+
+        ledger.Release(prefix);
+        Assert.True(ledger.IsHeld(@"RunKey|S-1-5-21-1|HKU\X\RUN|EVIL", out _));
+        ledger.Release(prefix);
+        Assert.False(ledger.IsHeld(@"RunKey|S-1-5-21-1|HKU\X\RUN|EVIL", out _));
     }
 }

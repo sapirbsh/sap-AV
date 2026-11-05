@@ -121,6 +121,7 @@ internal sealed class RemediationHarness : IDisposable
             Services, TaskScheduler, Quarantine.Manager, Ledger, Time, alerts: Alerts)
         {
             ActionTimeout = actionTimeout ?? TimeSpan.FromMinutes(2),
+            LockWait = actionTimeout is null ? TimeSpan.FromSeconds(30) : TimeSpan.FromMilliseconds(200),
         };
     }
 
