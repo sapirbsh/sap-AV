@@ -236,7 +236,7 @@ internal sealed class MonitorHarness : IDisposable
 
     public MonitorHarness(
         Action<PersistenceMonitorOptions>? configure = null, IPersistenceBaselineStore? store = null, bool realRegistryWatches = false,
-        PersistenceLimits? limits = null, Func<SafeFileHandle, string, bool>? trustedTask = null)
+        PersistenceLimits? limits = null, Func<SafeFileHandle, string, bool>? trustedTask = null, bool registryStartupFolders = false)
     {
         Startup = Directory.CreateDirectory(Path.Combine(_temp.Path, "Startup")).FullName;
         Tasks = Directory.CreateDirectory(Path.Combine(_temp.Path, "Tasks")).FullName;
@@ -254,7 +254,7 @@ internal sealed class MonitorHarness : IDisposable
         configure?.Invoke(Options);
         Store = store ?? new MemoryBaselineStore();
         Collector = new RecordingCollector(new PersistenceCollector(Registry.View, new SafePathProbe(),
-            [new RegistryAutorunSource(), new StartupFolderSource([(Startup, null)]), new ScheduledTaskSource(Tasks, trustedTask)], limits,
+            [new RegistryAutorunSource(), registryStartupFolders ? new StartupFolderSource() : new StartupFolderSource([(Startup, null)]), new ScheduledTaskSource(Tasks, trustedTask)], limits,
             parser: Parser, parsedFiles: new ParsedFileCache()));
         var judge = new PersistenceJudge(new PersistenceJudgeOptions { SystemRoot = @"C:\Windows" });
         Scanner = new RecordingScanner(new PersistenceScanner(Broker, Alerts, Time, NullLogger.Instance, judge, () => new AdminOnlyWritability()));

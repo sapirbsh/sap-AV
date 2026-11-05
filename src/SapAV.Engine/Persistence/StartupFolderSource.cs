@@ -16,11 +16,16 @@ namespace SapAV.Engine.Persistence;
 /// <remarks>
 /// The folder comes from <c>User Shell Folders</c> (<c>Common Startup</c> / the user's <c>Startup</c>) when set, else the
 /// default under ProgramData / the profile. A folder redirected to a network share is reported
-/// (<see cref="PersistenceIssueReason.NetworkLocation"/>) and not read. Profiles without a loaded hive use the default path.
+/// (section D review H4: <see cref="PersistenceIssueReason.UncheckableStartupFolder"/>, alerted once by D4) and never opened; so is a user's folder the
+/// user-folder policy refuses (outside their profile and not theirs). Profiles without a loaded hive use the default path.
 /// </remarks>
-internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? UserSid)>? folderOverride = null) : IPersistenceSource
+/// <param name="policy">Section D review H4 (review L2): the policy a user's Startup folder must pass; null = the default (inside the
+/// profile, or a local fixed-drive folder the user owns).</param>
+internal sealed class StartupFolderSource(
+    IReadOnlyList<(string Folder, string? UserSid)>? folderOverride = null, Scanning.Checks.UserFolderPolicy? policy = null) : IPersistenceSource
 {
     public const int MaxItems = 1000;
+    private readonly Scanning.Checks.UserFolderPolicy _policy = policy ?? new();
     private const string ShellFolders = @"Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders";
     private const string Approved = @"Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder";
     private const string DefaultSuffix = @"Microsoft\Windows\Start Menu\Programs\Startup";
@@ -52,7 +57,7 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
     {
         if (folderOverride is null && UserFolder(context, user) is { } folder)
         {
-            CollectOne(context, folder, user.Sid);
+            CollectOne(context, folder, user.Sid, user);
         }
     }
 
@@ -108,7 +113,7 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
         (user.HiveLoaded ? ShellFolder(context, RegistryRoot.Users, $@"{user.Sid}\Software\{ShellFolders}", "Startup", user.Environment) : null)
             ?? (user.ProfilePath is { } profile ? Path.Join(profile, @"AppData\Roaming", DefaultSuffix) : null);
 
-    private static void CollectOne(PersistenceContext context, string folder, string? sid)
+    private void CollectOne(PersistenceContext context, string folder, string? sid, UserProfile? user = null)
     {
         var environment = sid is null ? context.Machine : context.Users.FirstOrDefault(u => u.Sid == sid)?.Environment ?? context.Machine;
         using var approved = sid is null
@@ -116,7 +121,8 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
             : context.Users.Any(u => u.Sid == sid && u.HiveLoaded)
                 ? context.TryOpen(RegistryRoot.Users, $@"{sid}\Software\{Approved}", PersistenceKind.StartupFolder, sid, out _)
                 : null;
-        CollectFolder(context, folder, sid, environment, approved);
+        string? profile = user?.ProfilePath is { } path ? CorePersistenceText.NormalizeLocalPath(path) : null;
+        CollectFolder(context, folder, sid, environment, approved, user is null ? null : _policy, profile);
     }
 
     private static string? ShellFolder(PersistenceContext context, RegistryRoot root, string path, string name, EnvironmentBlock environment)
@@ -125,22 +131,42 @@ internal sealed class StartupFolderSource(IReadOnlyList<(string Folder, string? 
         return key is not null && PersistenceContext.ReadValue(key, name)?.AsString() is { Length: > 0 } raw ? environment.Expand(raw, out _) : null;
     }
 
-    private static void CollectFolder(PersistenceContext context, string folder, string? sid, EnvironmentBlock environment, IRegistryKeyReader? approved)
+    /// <summary>Section D review H4: a Startup folder sap-AV can't check (reported, alerted once by D4; the scope isn't complete).</summary>
+    private static void Uncheckable(PersistenceContext context, string folder, string? sid, string why) =>
+        context.AddIssue(PersistenceKind.StartupFolder, sid, folder, PersistenceIssueReason.UncheckableStartupFolder,
+            $"The {(sid is null ? "all-users" : "user's")} Startup folder {why}, so what Windows starts from it can't be checked.");
+
+    /// <param name="policy">Review L2 / section D H4: the user-folder policy applied to a user's (redirected) Startup folder; null = none.</param>
+    /// <param name="profile">The user's normalized profile folder (for <paramref name="policy"/>).</param>
+    private static void CollectFolder(
+        PersistenceContext context, string folder, string? sid, EnvironmentBlock environment, IRegistryKeyReader? approved,
+        Scanning.Checks.UserFolderPolicy? policy = null, string? profile = null)
     {
         if (folder.StartsWith(@"\\", StringComparison.Ordinal) && !folder.StartsWith(@"\\?\", StringComparison.Ordinal))
         {
-            context.AddIssue(PersistenceKind.StartupFolder, sid, folder, PersistenceIssueReason.NetworkLocation,
-                "The Startup folder is on a network share; the engine doesn't read network locations.");
+            Uncheckable(context, folder, sid, "is on a network (UNC or WebDAV) share"); // never opened
             return;
         }
 
         if (CorePersistenceText.NormalizeLocalPath(folder) is not { } display)
         {
-            context.AddIssue(PersistenceKind.StartupFolder, sid, folder, PersistenceIssueReason.Malformed, "The Startup folder path isn't a local path.");
+            Uncheckable(context, folder, sid, "isn't a local path");
+            return;
+        }
+
+        if (policy is not null && sid is not null && profile is not null && !policy.Accepts(display, profile, sid))
+        {
+            Uncheckable(context, display, sid, "is outside the user's profile, in a folder they don't own"); // review L2: not listed as SYSTEM
             return;
         }
 
         using var handle = SafeFolderReader.OpenFolder(display, out var failure);
+        if (handle is null && failure == PersistenceIssueReason.NetworkLocation)
+        {
+            Uncheckable(context, display, sid, "is on a network drive");
+            return;
+        }
+
         if (handle is null)
         {
             if (failure is { } reason)

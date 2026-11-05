@@ -39,6 +39,14 @@ public enum PersistenceIssueReason
 
     /// <summary>Any other failure (a source threw, an I/O error).</summary>
     Error,
+
+    /// <summary>
+    /// Section D review H4: a Startup folder (the user's <c>User Shell Folders\Startup</c>, the all-users <c>Common Startup</c>, or
+    /// a roaming profile) points off this machine (a UNC or WebDAV share, a network drive, anything not a local path), or to a
+    /// local folder outside the user's profile that they don't own. What Windows starts from there can't be checked (a remote
+    /// path is never opened), so it is a Suspicious finding of its own (T1547.001), and the scope is not complete.
+    /// </summary>
+    UncheckableStartupFolder,
 }
 
 /// <summary>Something that couldn't be collected. Location and message are sanitized and capped.</summary>

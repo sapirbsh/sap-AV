@@ -963,22 +963,23 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
 
     private void ReportHidden(PersistenceScopedCollection collected, DateTimeOffset now)
     {
-        if (!_reportHidden)
-        {
-            return;
-        }
-
         var issues = collected.Collection.Issues;
         var still = new Dictionary<PersistenceScope, HashSet<string>>();
         for (int i = 0; i < issues.Count; i++)
         {
-            if (collected.IssueScopes is not { } scopes || i >= scopes.Count || scopes[i] is not { } scope || !IsHiddenLocation(issues[i]))
+            if (collected.IssueScopes is not { } scopes || i >= scopes.Count || scopes[i] is not { } scope)
+            {
+                continue;
+            }
+
+            bool uncheckable = IsUncheckableStartupFolder(issues[i]); // section D review H4: reported even in a debug run
+            if (!uncheckable && !(_reportHidden && IsHiddenLocation(issues[i])))
             {
                 continue;
             }
 
             var issue = issues[i];
-            string id = $"{issue.Kind}|{issue.UserSid}|{issue.Location.ToUpperInvariant()}";
+            string id = $"{(uncheckable ? "uncheckable|" : string.Empty)}{issue.Kind}|{issue.UserSid}|{issue.Location.ToUpperInvariant()}";
             if (!still.TryGetValue(scope, out var set))
             {
                 still[scope] = set = new HashSet<string>(StringComparer.Ordinal);
@@ -988,7 +989,14 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             if (_baseline.ReportHidden(id, scope))
             {
                 _baselineDirty = true;
-                PostHidden(issue, now);
+                if (uncheckable)
+                {
+                    PostUncheckable(issue, now);
+                }
+                else
+                {
+                    PostHidden(issue, now);
+                }
             }
         }
 
@@ -998,6 +1006,38 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             {
                 _baselineDirty = true;
             }
+        }
+    }
+
+    /// <summary>Section D review H4: a Startup folder that points off the machine, or that the user-folder policy refuses.</summary>
+    internal static bool IsUncheckableStartupFolder(PersistenceIssue issue) => issue.Reason == PersistenceIssueReason.UncheckableStartupFolder;
+
+    /// <summary>
+    /// Section D review H4: a Suspicious finding (T1547.001) for a Startup folder sap-AV can't check, once per folder value
+    /// (until it is checkable again). The remote path itself is never opened.
+    /// </summary>
+    private void PostUncheckable(PersistenceIssue issue, DateTimeOffset now)
+    {
+        Interlocked.Increment(ref _hidden);
+        _logger.LogWarning("Persistence monitor: Startup folder can't be checked: {Location} ({Sid}).", issue.Location, issue.UserSid ?? "machine");
+        if (_alerts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            string reason = $"Uncheckable Startup folder: Windows starts what is in {issue.Location} at logon, but it is off this machine or outside the "
+                + "user's own folders, so sap-AV can't check it (a remote path is never opened). Point the Startup folder back to the default.";
+            var alert = new Alert(Alert.ComputeAlertId(AlertType.SuspiciousPersistence, now, issue.Location + "\nuncheckable", null, ScanTrigger.Persistence), now,
+                AlertType.SuspiciousPersistence, Verdict.Suspicious, issue.Location, null, null, null, Core.Mitre.MitreTechniqueIds.RegistryRunKeysStartupFolder,
+                [], [reason], null, AlertAction.None, ScanTrigger.Persistence, EngineInfo.Version,
+                new AlertAutostart(PersistenceKind.StartupFolder, issue.Location, issue.UserSid is null ? "Common Startup" : "Startup", issue.UserSid, true));
+            _alerts.Post(alert, OwnerBudget(issue.UserSid ?? string.Empty).Alerts);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger.LogWarning(ex, "Persistence monitor: the uncheckable-folder alert for {Location} couldn't be built.", issue.Location);
         }
     }
 
