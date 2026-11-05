@@ -662,6 +662,20 @@ Remaining after the fix round:
     would cost an open.
   - Flaky once: `PersistenceMonitorReviewTests.H4_KeysRewrittenOverAndOver` (registry UnauthorizedAccessException).
     Cause not found.
+- **Follow-up review of the fix round (no Critical/High).** H2, H3 (except M3), H4 and M4 are confirmed closed. Fixed in
+  the last round: M1 (D5 lock released while an action still ran), M2 (H1 window after the hand-over), M3 (H3 after
+  the owner map clears), L1. Remaining:
+  - **D1 follow-up (M4):** all machine-wide roots share one "machine" owner. A user churning Public plus Windows\Temp
+    fills that share, and other users' files in machine folders are dropped. Give each machine root a reserved minimum,
+    or charge files to the owner `probe.Owner` already read.
+  - **D1/D4 follow-up (L2):** the loop-restart failure count never resets, so one crash weeks later waits the full
+    5 min. Reset it after a healthy run.
+  - **F / docs (L3):** enterprise Folder Redirection of Startup to `\\server\…` raises one Suspicious T1547.001 per
+    user. Mention folder redirection in the alert text.
+  - **D5 follow-up (L4):** backup records from before `09712bb` have no `EntryId`, so their restores always report
+    EntryChanged. Fall back to the fingerprint check.
+  - **D1 follow-up (L5):** scan turns rotate per root, not per owner, so a user with about 12 roots gets about 12 turns
+    for each one a victim gets. This adds delay only; nothing is dropped.
 
 **Notes from D2 (VirusTotal client, cache, limiter, key store; built `d279fb7`…`cfc581f`).**
 - **What was decided:**

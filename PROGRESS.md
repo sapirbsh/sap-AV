@@ -9,12 +9,12 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1–D5 done, section tester + reviewer passes done; review fix round in progress) |
+| D — Real-time + VirusTotal | **Done** (D1–D5, section test + review, 5 High fixed + follow-up review) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after D5): Core 1431 passed + 1 skipped, Engine 754 passed + 16 skipped. Simulated clean machine: 0 failed.
+Tests (after section D): Core 1431 passed + 1 skipped, Engine 780 passed + 16 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`9628568`).
 
 ## Section A — Detection engine (done)
@@ -154,9 +154,36 @@ clean machine; three combined runs in a row green; 0 build warnings.
 - **Autostart judging is an arms race** (every launcher has its own argument tricks). The rule kept: if sap-AV can't see
   the real payload, the entry is Unverified, never Clean. Remaining launcher tricks are listed under E4.
 
-## Current status (2026-11-03)
+## Section D — Real-time + VirusTotal (done)
 
-**Section C is done**, including the task-parsing performance fix (see above).
+**Summary:**
+- **Real-time file protection:** each user's download, desktop, documents, temp and Startup folders, plus the
+  machine-wide ones, are watched in real time. New files are scanned in the sandbox and Malicious ones are
+  quarantined.
+- **VirusTotal:** optional; hash-only and off by default. It checks unsigned risky files, under a per-user daily
+  budget.
+- **Autostart monitoring:** Run keys, services, Winlogon, IFEO, Startup folders and tasks are watched in real time
+  against a protected baseline.
+- **Block & remove:** any autostart entry can be blocked by the user, with a backup and a restore.
+- **Protected rules and blocklist:** they live only in admin-only folders.
+- **Reviews:** every step got an immediate review; then a section tester pass, a section reviewer pass (5 High,
+  fixed), a follow-up review of the fixes (no Critical or High; 3 Medium fixed anyway), and a last fix round.
+- **Tests at the end of D:** Core 1431 passed + 1 skipped, Engine 780 passed + 16 skipped (from 600 + 12 at the end of
+  C). The clean-machine run is green, and CI is green.
+- **New event IDs:** 3002/3003 (block and restore), 9010/9011 (real-time or autostart monitor unavailable).
+- **Open:** the Medium/Low items are listed per step in ROADMAP ("Notes from D1…D5", "D… immediate review",
+  "Section D review", "Follow-up review of the fix round"). The main ones:
+  - byte-range-lock evasion (needs mapped-view reading in the worker);
+  - storm/overflow rescans trust timestamps the user controls (use the USN journal);
+  - a manifest for the shipped rules;
+  - releasing HKU handles at logoff;
+  - the per-owner VirusTotal budget for scans;
+  - one shared "machine" owner in the real-time queue.
+- **Never run yet:** the gated real-Task-Scheduler test. It needs an elevated run with `SAPAV_TEST_ALLOW_HKLM=1`.
+- **CI timing noise:** elevated collection on CI varies between 2.6 s and 17 s per run, depending on the runner.
+  Repeat collections with nothing changed take about 35–75 ms.
+
+### Per step
 
 **D1 (real-time file monitoring) is done** (`7de7442`…`5953ced`):
 - **Watched folders:** each user's Downloads, Desktop, Documents, Temp and Startup, plus the machine Temp, Public and
@@ -279,13 +306,21 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 - **H3:** fake task files in the user-writable Tasks folder could spend another user's (or the engine's) alert budget.
 - **H4:** a Startup folder pointed at a network or WebDAV share evaded both monitors.
 - **H5:** real-time fairness was per folder, not per user.
-- **Also being fixed:** missing health alerts when real-time or the autostart monitor dies, plus two small items. The
-  rest is in ROADMAP under "Section D review".
+- **Also fixed:** health alerts 9010/9011 when real-time or the autostart monitor dies (with automatic restart),
+  and two small items.
 
-**Fix round in progress:** H2, H3 and H4 are committed (`3db711f`…`707690e`, not pushed yet). H5 is half done; H1,
-the health alerts and the small items come next. The agent was paused by a usage limit and resumed at 17:06.
+**Fix rounds:**
+- `3db711f`…`ff2bec6`: all 5 High plus the health alerts.
+- A follow-up review confirmed them closed (no Critical or High).
+- `bce673b`…`78d25bb`: 3 Medium fixed anyway, because they touched reversibility and the H1/H3 fixes:
+  - a timed-out Block could still run after the user restored, so the backup was lost;
+  - a value re-created right after the post-action check;
+  - task budgets after a cache reset.
 
-**Next:** finish the fix round, verify, push, CI, then write the section D summary and start section E.
+## Current status (2026-11-05)
+
+**Sections A, B, C and D are done.** **Next:** section E, the cracked-software threat pack. It starts with E1
+(PUP/HackTool category) and E2 (YARA-Forge rules), both detection-dev.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -299,5 +334,7 @@ the health alerts and the small items come next. The agent was paused by a usage
 
 ## What's left
 
-- **D:** the section D tester + reviewer pass. (D1–D5 done.)
-- Then E → F → G, ending with the Phase 1 security review (G5).
+- **E:** cracked-software threat pack (E1–E12).
+- **F:** the GUI (F1–F8).
+- **G:** signature features (G1–G5), ending with the Phase 1 security review (G5).
+- **Progress:** 24 of 60 build steps done (about 40%).
