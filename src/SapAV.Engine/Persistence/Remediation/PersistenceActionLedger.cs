@@ -25,6 +25,7 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
 
     private readonly Lock _lock = new();
     private readonly Dictionary<string, DateTimeOffset> _held = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _rejudge = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (LedgerAcceptance Acceptance, DateTimeOffset Until)> _accepted = new(StringComparer.Ordinal);
 
     /// <summary>Raised (on the acting thread) after <see cref="Accept"/> with the scope to look at again now.</summary>
@@ -80,6 +81,34 @@ internal sealed class PersistenceActionLedger(TimeProvider time)
         }
 
         Accepted?.Invoke(scope);
+    }
+
+    /// <summary>
+    /// Section D review H1: the entry isn't in the state the action left (it came back, or changed right after a restore): D4
+    /// judges it again even if its content equals what it judged before (the user believes it is blocked).
+    /// </summary>
+    public void Rejudge(string key, PersistenceScope scope)
+    {
+        lock (_lock)
+        {
+            if (_rejudge.Count < MaxEntries)
+            {
+                _rejudge.Add(key);
+            }
+        }
+
+        Accepted?.Invoke(scope);
+    }
+
+    /// <summary>The keys to judge again (taken: each is returned once).</summary>
+    public IReadOnlyList<string> TakeRejudge()
+    {
+        lock (_lock)
+        {
+            var keys = _rejudge.ToArray();
+            _rejudge.Clear();
+            return keys;
+        }
     }
 
     /// <summary>The key is held now (the monitor leaves it unjudged); <paramref name="until"/> is when the hold runs out.</summary>

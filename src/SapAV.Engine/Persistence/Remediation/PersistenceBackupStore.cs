@@ -32,6 +32,9 @@ internal sealed record PersistenceBackupRecord
     /// <summary>The entry's <see cref="PersistenceEntry.Key"/> (real-time monitoring is told about the change by it).</summary>
     public required string EntryKey { get; init; }
 
+    /// <summary>Section D review H1: the entry's ID when it was blocked; a restore hands over only exactly that entry (null in older records).</summary>
+    public string? EntryId { get; init; }
+
     public required PersistenceBackupAction Action { get; init; }
 
     public PersistenceBackupState State { get; init; }

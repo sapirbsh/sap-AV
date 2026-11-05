@@ -159,7 +159,8 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             return Unavailable();
         }
 
-        if (machine && !client.IsAdmin)
+        // Section D review M1: kinds that are only ever machine-wide are refused before anything is collected.
+        if (!client.IsAdmin && (machine || kind is PersistenceKind.Service or PersistenceKind.IfeoDebugger or PersistenceKind.IfeoSilentProcessExit))
         {
             return MachineOnly();
         }
@@ -183,7 +184,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         IPersistenceBackupStore store, IClientIdentity client, string entryId, PersistenceKind kind, bool machine, bool confirmCritical, CancellationToken ct)
     {
         var scopes = ScopesFor(kind, machine, client, ct);
-        var collected = _collector.CollectScoped(scopes, ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget });
+        var collected = _collector.CollectScoped(scopes, ct, CollectOptions(client, scopes, kind));
         int at = Enumerable.Range(0, collected.Collection.Entries.Count).FirstOrDefault(i => PersistenceEntryId.Compute(collected.Collection.Entries[i]) == entryId, -1);
         if (at < 0)
         {
@@ -219,7 +220,13 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
 
             if (result is { Status: RemediationStatus.Blocked, Record: { } record })
             {
-                HandOver(scope, collected, entry.Key, entry.Kind, entry.UserSid, entry.Location, ct);
+                if (!HandOver(scope, collected, BlockPlan(entry), entry.Kind, entry.UserSid, entry.Location, client, ct))
+                {
+                    result = new(RemediationStatus.EntryChanged,
+                        $"The entry was blocked (backup {record.Id}), but it came back right away: something re-created or changed it. Real-time monitoring judges it again.",
+                        record);
+                }
+
                 Record(AlertType.PersistenceBlocked, record, client);
                 _logger.LogInformation("Block & remove: user {User} blocked autostart entry {Location} {Value} ({Kind}) as backup {Backup}: {Reason}",
                     client.User.Value, entry.Location, entry.ValueName, entry.Kind, record.Id, result.Reason);
@@ -254,6 +261,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             ValueName = Entry.ValueName,
             CommandLine = Entry.CommandLine,
             EntryKey = Entry.Key,
+            EntryId = PersistenceEntryId.Compute(Entry),
             Action = action,
             State = PersistenceBackupState.Active,
             BlockedBy = Client.User.Value,
@@ -310,7 +318,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
         try
         {
             var scopes = ScopesFor(record.Kind, record.UserSid is null, client, ct, record.UserSid);
-            var before = HasNeighbours(record.Kind) ? _collector.CollectScoped(scopes, ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget }) : null;
+            var before = HasNeighbours(record.Kind) ? _collector.CollectScoped(scopes, ct, CollectOptions(client, scopes, record.Kind)) : null;
             var result = record.Action switch
             {
                 PersistenceBackupAction.ValueDeleted or PersistenceBackupAction.ValueReset => RestoreValue(record, client),
@@ -337,11 +345,14 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
                 _logger.LogError("Block & remove: backup {Backup} was restored but its record couldn't be updated ({Why}).", record.Id, ex.Message);
             }
 
-            HandOver(scopes[0], before, record.EntryKey, record.Kind, record.UserSid, record.Location, ct);
+            bool asLeft = HandOver(scopes[0], before, RestorePlan(record), record.Kind, record.UserSid, record.Location, client, ct);
             Record(AlertType.PersistenceRestored, restored, client);
             _logger.LogInformation("Block & remove: user {User} restored backup {Backup} ({Location} {Value}): {Reason}",
                 client.User.Value, record.Id, record.Location, record.ValueName, result.Reason);
-            return result with { Record = restored };
+            return asLeft
+                ? result with { Record = restored }
+                : new(RemediationStatus.EntryChanged,
+                    "The entry was restored, but it changed again right away (or went); real-time monitoring judges what is there now.", restored);
         }
         finally
         {
@@ -442,7 +453,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     {
         var all = store.List();
         var mine = client.IsAdmin ? Array.Empty<PersistenceBackupRecord>() : all.Select(r => r.Record).OfType<PersistenceBackupRecord>()
-            .Where(r => string.Equals(r.UserSid, client.User.Value, StringComparison.OrdinalIgnoreCase)).ToArray();
+            .Where(r => !r.BlockedByAdmin && string.Equals(r.BlockedBy, client.User.Value, StringComparison.OrdinalIgnoreCase)).ToArray(); // L3: what this user made
         if (mine.Count(r => r.State == PersistenceBackupState.Active) >= MaxActivePerUser)
         {
             return new(RemediationStatus.QuotaExceeded, $"You already have {MaxActivePerUser} blocked autostart entries; restore or remove some backups first.");
@@ -530,45 +541,140 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             ? string.Equals(ServiceLocation(e.Location), ServiceLocation(location), StringComparison.OrdinalIgnoreCase)
             : string.Equals(e.Location, location, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>What a key looked like after the action, compared with the state the action should have left.</summary>
+    private enum AfterState
+    {
+        /// <summary>Not there, as expected (nothing to hand over).</summary>
+        Absent,
+
+        /// <summary>Exactly the state the action produced: handed over.</summary>
+        Expected,
+
+        /// <summary>Something else is there (it came back, or changed again): not handed over; D4 judges it.</summary>
+        Unexpected,
+    }
+
     /// <summary>
-    /// Review H1: collects the scope again and hands the ledger what the action changed, nothing more. The entry's own key is
-    /// accepted in its new state. For a kind whose action also changes neighbours (Winlogon: the value's other programs;
-    /// services: ImagePath and ServiceDll; tasks: the task's other actions), a neighbour is accepted only if it existed in the
-    /// pre-action collection, and D4 then also requires its record to have been judged under exactly that pre-action state.
-    /// For value-type kinds (Run, RunOnce, IFEO, SilentProcessExit, Startup items) nothing but the entry's key is accepted, so
-    /// another value written into the same key or folder around the action is still judged and alerted.
+    /// Section D review H1: what the action must have left, per key. <see cref="Own"/> judges the entry's own key (null when it
+    /// is gone); <see cref="Neighbour"/>, for the kinds that change neighbours, judges a neighbour against its pre-action entry.
     /// </summary>
-    private void HandOver(
-        PersistenceScope scope, PersistenceScopedCollection? before, string entryKey, PersistenceKind kind, string? userSid, string location, CancellationToken ct)
+    private sealed record HandOverPlan(string EntryKey, Func<PersistenceEntry?, AfterState> Own, Func<PersistenceEntry, PersistenceEntry, bool>? Neighbour);
+
+    /// <summary>
+    /// The plan after a block. Value-type kinds (Run, RunOnce, IFEO, SilentProcessExit, Startup items): the entry must be gone.
+    /// Winlogon: only the Windows default program may be there. Services and tasks: the entry and its neighbours must be the
+    /// pre-action entries, field by field, now disabled.
+    /// </summary>
+    private HandOverPlan BlockPlan(PersistenceEntry entry) => entry.Kind switch
+    {
+        PersistenceKind.WinlogonShell or PersistenceKind.WinlogonUserinit => new(entry.Key,
+            after => after is null ? AfterState.Absent : IsWinlogonDefault(after) ? AfterState.Expected : AfterState.Unexpected,
+            (_, after) => IsWinlogonDefault(after)),
+        PersistenceKind.Service or PersistenceKind.ScheduledTask => new(entry.Key,
+            after => after is null ? AfterState.Absent : DisabledFrom(entry, after) ? AfterState.Expected : AfterState.Unexpected,
+            DisabledFrom),
+        _ => new(entry.Key, after => after is null ? AfterState.Absent : AfterState.Unexpected, null),
+    };
+
+    /// <summary>The plan after a restore: the entry must be exactly the backed-up one (same entry ID); neighbours unchanged but for their state.</summary>
+    private static HandOverPlan RestorePlan(PersistenceBackupRecord record) => new(record.EntryKey,
+        after => after is not null && record.EntryId is { } id && PersistenceEntryId.Compute(after) == id ? AfterState.Expected : AfterState.Unexpected,
+        HasNeighbours(record.Kind) ? SameStored : null);
+
+    /// <summary>Everything an entry stores apart from its on / off state is what it was before.</summary>
+    private static bool SameStored(PersistenceEntry before, PersistenceEntry after) =>
+        before.Kind == after.Kind && string.Equals(before.UserSid, after.UserSid, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(before.Location, after.Location, StringComparison.Ordinal) && string.Equals(before.ValueName, after.ValueName, StringComparison.Ordinal)
+        && string.Equals(before.CommandLine, after.CommandLine, StringComparison.Ordinal) && before.ComClassId == after.ComClassId;
+
+    /// <summary>The pre-action entry, now switched off (a service also with Start = Disabled).</summary>
+    private static bool DisabledFrom(PersistenceEntry before, PersistenceEntry after) =>
+        SameStored(before, after) && !after.Enabled && (after.Kind != PersistenceKind.Service || after.ServiceStart == ServiceStartType.Disabled);
+
+    /// <summary>The first program of the value, and it is the Windows default.</summary>
+    private bool IsWinlogonDefault(PersistenceEntry e) =>
+        ProgramIndex(e.ValueName ?? string.Empty, e.Kind == PersistenceKind.WinlogonShell ? "Shell" : "Userinit") == 0
+        && string.Equals(e.CommandLine.Trim(), WinlogonDefault(e.Kind).TrimEnd(','), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Section D review H1: collects the scope again and hands the ledger only what is exactly in the state the action produced
+    /// (<paramref name="plan"/>): the entry's own key in that state, and (Winlogon, services, tasks) a neighbour that existed
+    /// before, passes the plan's check, and that D4 judged in exactly its pre-action state. A key that is there in any other
+    /// state (malware re-created its value right after the block, or changed it right after the restore) is not handed over:
+    /// D4 judges it as usual, and the caller reports <see cref="RemediationStatus.EntryChanged"/>.
+    /// </summary>
+    /// <returns>False when the entry's own key isn't as the action left it.</returns>
+    private bool HandOver(
+        PersistenceScope scope, PersistenceScopedCollection? before, HandOverPlan plan, PersistenceKind kind, string? userSid, string location,
+        IClientIdentity client, CancellationToken ct)
     {
         try
         {
-            var was = HasNeighbours(kind) && before is not null
-                ? PersistenceBaseline.Groups(before).Where(g => g.Entries.Count > 0 && Touched(g.Entries[0], kind, userSid, location))
-                    .ToDictionary(g => g.Key, g => PersistenceBaseline.Fingerprint(g.Entries), StringComparer.Ordinal)
-                : [];
-            var after = _collector.CollectScoped([scope], ct, new PersistenceCollectOptions { TimeBudget = CollectionBudget });
-            var accepted = new Dictionary<string, LedgerAcceptance>(StringComparer.Ordinal);
-            foreach (var (key, entries) in PersistenceBaseline.Groups(after))
+            var was = new Dictionary<string, (PersistenceEntry Entry, string Fingerprint)>(StringComparer.Ordinal);
+            if (plan.Neighbour is not null && before is not null)
             {
-                string now = PersistenceBaseline.Fingerprint(entries);
-                if (string.Equals(key, entryKey, StringComparison.Ordinal))
+                foreach (var (key, entries) in PersistenceBaseline.Groups(before))
                 {
-                    accepted[key] = new LedgerAcceptance(now);
-                }
-                else if (was.TryGetValue(key, out var previous) && entries.Count > 0 && Touched(entries[0], kind, userSid, location))
-                {
-                    accepted[key] = new LedgerAcceptance(now, JudgedAs: previous);
+                    if (entries.Count > 0 && Touched(entries[0], kind, userSid, location))
+                    {
+                        was[key] = (entries[0], PersistenceBaseline.Fingerprint(entries));
+                    }
                 }
             }
 
+            var after = _collector.CollectScoped([scope], ct, CollectOptions(client, [scope], kind));
+            var accepted = new Dictionary<string, LedgerAcceptance>(StringComparer.Ordinal);
+            var state = AfterState.Absent;
+            foreach (var (key, entries) in PersistenceBaseline.Groups(after))
+            {
+                if (entries.Count == 0)
+                {
+                    continue;
+                }
+
+                if (string.Equals(key, plan.EntryKey, StringComparison.Ordinal))
+                {
+                    state = entries.Count == 1 ? plan.Own(entries[0]) : AfterState.Unexpected;
+                    if (state == AfterState.Expected)
+                    {
+                        accepted[key] = new LedgerAcceptance(PersistenceBaseline.Fingerprint(entries));
+                    }
+                }
+                else if (plan.Neighbour is { } neighbour && was.TryGetValue(key, out var previous) && entries.Count == 1 && neighbour(previous.Entry, entries[0]))
+                {
+                    accepted[key] = new LedgerAcceptance(PersistenceBaseline.Fingerprint(entries), JudgedAs: previous.Fingerprint);
+                }
+            }
+
+            if (state == AfterState.Absent && plan.Own(null) == AfterState.Unexpected)
+            {
+                state = AfterState.Unexpected; // a restored entry that is gone again right away
+            }
+
             _ledger.Accept(accepted, scope);
+            if (state == AfterState.Unexpected)
+            {
+                _ledger.Rejudge(plan.EntryKey, scope); // judged again even if it equals what D4 judged before
+            }
+
+            return state != AfterState.Unexpected;
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
             _logger.LogWarning(ex, "Block & remove: the change was made, but the scope couldn't be collected again for real-time monitoring; it may alert once.");
+            return true;
         }
     }
+
+    /// <summary>
+    /// Section D review M1: a standard user's collections, and those of user-writable places (a user's own scope, the Tasks
+    /// folder), parse at Normal worker priority, behind the engine's own work.
+    /// </summary>
+    private static PersistenceCollectOptions CollectOptions(IClientIdentity client, IReadOnlyCollection<PersistenceScope> scopes, PersistenceKind kind) => new()
+    {
+        TimeBudget = CollectionBudget,
+        ParsePriority = !client.IsAdmin || kind == PersistenceKind.ScheduledTask || scopes.Any(s => s.UserSid is not null) ? Sandbox.ScanPriority.Normal : null,
+    };
 
     /// <summary>The kinds whose action changes more than the entry's own baseline key.</summary>
     private static bool HasNeighbours(PersistenceKind kind) =>

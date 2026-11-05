@@ -266,6 +266,18 @@ internal sealed class PersistenceBaseline
         return gone.Length;
     }
 
+    /// <summary>Section D review H1: the record is judged again as Changed (in line from now); false if there is none.</summary>
+    public bool Rejudge(string key)
+    {
+        if (!_records.TryGetValue(key, out var record))
+        {
+            return false;
+        }
+
+        _records[key] = record with { Judged = false, Change = BaselineChange.Changed, PendingSince = ++_sequence, NotBefore = null, Attempts = 0 };
+        return true;
+    }
+
     public bool HasUnjudged(PersistenceScope scope) => _records.Values.Any(r => r.Scope == scope && !r.Judged);
 
     /// <summary>SHA-256 over the entries' JSON (the model's own serialization, every field).</summary>

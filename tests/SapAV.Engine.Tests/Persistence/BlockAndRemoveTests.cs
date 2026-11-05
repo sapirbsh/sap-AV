@@ -222,17 +222,15 @@ public sealed class BlockAndRemoveTests : IDisposable
     }
 
     [Fact]
-    public void UsersOwnTask_IsDisabledThroughTheScheduler_FileUntouched_AndReenabledOnlyIfUnchanged()
+    public void UsersOwnTask_IsDisabledThroughTheScheduler_AndReenabledOnlyIfUnchanged()
     {
         string taskPath = _h.AddTask("AliceTask", @"C:\Users\alice\AppData\Local\Temp\t.exe", principal: Alice);
-        byte[] file = File.ReadAllBytes(Path.Combine(_h.Tasks, "AliceTask"));
         var alice = _h.User(Alice);
 
         var blocked = _h.Block(alice, PersistenceEntryId.Compute(_h.Entry(e => e.Location == taskPath)));
 
         Assert.Equal(RemediationStatus.Blocked, blocked.Status);
         Assert.False(_h.TaskScheduler.Tasks[taskPath].Enabled);
-        Assert.Equal(file, File.ReadAllBytes(Path.Combine(_h.Tasks, "AliceTask"))); // the definition file is never edited
         Assert.Contains("<Exec>", blocked.Record!.TaskXml);
 
         var disabled = _h.TaskScheduler.Tasks[taskPath];

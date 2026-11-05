@@ -16,6 +16,9 @@ internal sealed class FakeServiceControl : IServiceControl
 
     public List<string> Stopped { get; } = [];
 
+    /// <summary>Called after a start-type change (the harness writes it into the fake registry, as the real SCM does).</summary>
+    public Action<string, int>? Changed { get; set; }
+
     public ServiceControlStatus Query(string name, out ServiceState? state) =>
         (state = Services.GetValueOrDefault(name)) is null ? ServiceControlStatus.NotFound : ServiceControlStatus.Ok;
 
@@ -27,6 +30,7 @@ internal sealed class FakeServiceControl : IServiceControl
         }
 
         Services[name] = state with { StartType = startType };
+        Changed?.Invoke(name, startType); // the real SCM writes the Services key's Start too
         return ServiceControlStatus.Ok;
     }
 
@@ -47,6 +51,9 @@ internal sealed class FakeTaskScheduler : ITaskSchedulerControl
 {
     public Dictionary<string, ScheduledTaskState> Tasks { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Called after Enabled changed (task path, old and new Settings element); the harness rewrites the task file.</summary>
+    public Action<string, string, string>? Changed { get; set; }
+
     public TaskControlStatus Get(string taskPath, out ScheduledTaskState? state) =>
         (state = Tasks.GetValueOrDefault(taskPath)) is null ? TaskControlStatus.NotFound : TaskControlStatus.Ok;
 
@@ -59,6 +66,7 @@ internal sealed class FakeTaskScheduler : ITaskSchedulerControl
 
         string from = $"<Enabled>{(enabled ? "false" : "true")}</Enabled>", to = $"<Enabled>{(enabled ? "true" : "false")}</Enabled>";
         Tasks[taskPath] = state with { Enabled = enabled, Xml = state.Xml.Replace(from, to, StringComparison.Ordinal) };
+        Changed?.Invoke(taskPath, from, to); // the real Task Scheduler rewrites the task's file too
         return TaskControlStatus.Ok;
     }
 }
@@ -94,6 +102,20 @@ internal sealed class RemediationHarness : IDisposable
             [new RegistryAutorunSource(), new ServiceSource(), new StartupFolderSource(), new ScheduledTaskSource(Tasks, (_, _) => true)], parser: WireTestParser.Instance);
         Store = new FilePersistenceBackupStore(Directory.CreateDirectory(Path.Combine(_temp.Path, "backups")).FullName, RandomNumberGenerator.GetBytes(32));
         Ledger = ledger ?? new PersistenceActionLedger(Time);
+        Services.Changed = (name, start) =>
+        {
+            using var key = Registry.Machine($@"SYSTEM\CurrentControlSet\Services\{name}");
+            key.SetValue("Start", start, RegistryValueKind.DWord);
+        };
+        TaskScheduler.Changed = (taskPath, from, to) =>
+        {
+            string file = Path.Combine(Tasks, taskPath.TrimStart('\\'));
+            if (File.Exists(file))
+            {
+                string text = Encoding.Unicode.GetString(File.ReadAllBytes(file)[2..]);
+                File.WriteAllBytes(file, [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(text.Replace(from, to, StringComparison.Ordinal))]);
+            }
+        };
         Remediator = new PersistenceRemediator(collector ?? Collector, () => Store, new NoFollowRegistryEditor(Registry.MachineKey, Registry.UsersKey),
             Services, TaskScheduler, Quarantine.Manager, Ledger, Time, alerts: Alerts);
     }

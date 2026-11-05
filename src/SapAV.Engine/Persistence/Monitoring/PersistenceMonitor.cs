@@ -634,6 +634,11 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
             ReportHidden(collected, now);
             CheckTruncation(collected);
 
+            foreach (var key in _userActions?.TakeRejudge() ?? [])
+            {
+                _baselineDirty |= _baseline.Rejudge(key); // D5 (section D review H1): the entry came back after Block, or changed after a restore
+            }
+
             var pending = SkipUserActions(_baseline.Pending(collected, now), now);
             var batch = Cap(pending, _options.MaxJudgedPerPass);
             if (batch.Count > 0)
