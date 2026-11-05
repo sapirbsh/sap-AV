@@ -653,8 +653,15 @@ Remaining after the fix round:
   "hidden from SYSTEM" (T1222/T1564), or open with backup semantics.
 - **D1/D4 follow-up (L1):** the sequential 30 s joins at shutdown overrun the host timeout. Use one shared deadline,
   and don't dispose while threads are alive.
-- **D4 follow-up (L2):** a user's Startup folder redirection isn't checked with `UserFolderPolicy`. Apply it, and
-  flag refusals (ties in with H4).
+- **L2:** closed by the H4 fix (`707690e`).
+- **Fix-round notes (`3db711f`…`ff2bec6`):**
+  - After a D5 action times out (2 min), its lock is released while the action thread may still run, so a second
+    action could overlap. The watchdog's I/O cancel normally ends it first.
+  - The D4 thread watchdog has no direct test (`ScanThreadWatch` itself is covered).
+  - Machine-wide real-time folders share one "machine" owner in the per-owner queue share. Reading every file's owner
+    would cost an open.
+  - Flaky once: `PersistenceMonitorReviewTests.H4_KeysRewrittenOverAndOver` (registry UnauthorizedAccessException).
+    Cause not found.
 
 **Notes from D2 (VirusTotal client, cache, limiter, key store; built `d279fb7`…`cfc581f`).**
 - **What was decided:**
@@ -992,6 +999,8 @@ YARA rules may override with their own `mitre` meta value.
   | 9007 | PipeUnavailable | Error | The pipe name is taken or the server can't listen (section B) |
   | 9008 | EngineFolderUntrusted | Warning | An engine folder failed its ownership/ACL check, so it is scanned, not excluded (section B) |
   | 9009 | EventLogIntegrityDegraded | Error | The `sap-AV` log's CustomSD or message DLL location changed (section B) |
+  | 9010 | RealTimeUnavailable | Error | Real-time file monitoring can't start, a thread failed, or no folder can be watched (section D review M4) |
+  | 9011 | PersistenceMonitorUnavailable | Error | Persistence monitoring can't start, its thread failed, or its protected baseline store was refused (section D review M4) |
 
   `AlertAction.NeedsUserConfirmation` (B3) marks a Malicious file that auto-quarantine refused (protected location,
   SYSTEM/TrustedInstaller owner, or unknown owner).
