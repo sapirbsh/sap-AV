@@ -50,9 +50,10 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
     }
 
     /// <summary>
-    /// Section D review H3: the budget owner of each unregistered task file (not the system's, not in TaskCache) seen so far: its
-    /// file owner's SID, or <see cref="PersistenceEntry.UnregisteredBudget"/>. Kept across collections, so a file whose parse
-    /// result is reused unopened still gets it. Bounded.
+    /// Section D review H3 / follow-up M3: what the last open found about each task file: "" for the system's own (trusted owner
+    /// or in TaskCache), otherwise its budget owner (the file owner's SID, or <see cref="PersistenceEntry.UnregisteredBudget"/>).
+    /// A file's kept parse result is reused unopened only while its entry here exists, so a file whose entry was dropped
+    /// (bounded: the map starts over) is opened and checked again, never judged on the principal it names. Bounded.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _unregistered = new(StringComparer.OrdinalIgnoreCase);
 
@@ -275,9 +276,11 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
             {
                 try
                 {
-                    if (context.TryReuseUnchanged(WorkerParseKind.ScheduledTask, taskPath, out var kept))
+                    // Follow-up M3: reused unopened only when this file's trust is known (trusted: "", else its budget owner); on a miss
+                    // (never seen, or the map started over) it is opened, so an unregistered file never falls back to its own principal.
+                    if (_unregistered.TryGetValue(taskPath, out var known) && context.TryReuseUnchanged(WorkerParseKind.ScheduledTask, taskPath, out var kept))
                     {
-                        CollectTask(context, taskPath, kept, _unregistered.GetValueOrDefault(taskPath)); // D4 review H5: the folder watch reported no change
+                        CollectTask(context, taskPath, kept, known.Length == 0 ? null : known); // D4 review H5: the folder watch reported no change
                         continue;
                     }
 
@@ -285,7 +288,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
                     {
                         if ((trustedFile?.Invoke(file, taskPath) ?? IsTrustedOwner(file)) || InTaskCache(context, taskPath))
                         {
-                            _unregistered.TryRemove(taskPath, out _);
+                            Remember(taskPath, string.Empty); // trusted
                             opened.Add((file, taskPath));
                         }
                         else if (state.Deferred.Count < context.Limits.MaxUntrustedTaskFiles)
@@ -342,6 +345,9 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
         context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Error, $"The task can't be read ({ex.GetType().Name}).");
 
     /// <summary>Remembers an unregistered task file's budget owner (bounded: past the cap the map starts over).</summary>
+    /// <summary>Test seam (follow-up M3): as if the bounded trust map had started over.</summary>
+    internal void ForgetTrust() => _unregistered.Clear();
+
     private void Remember(string taskPath, string owner)
     {
         if (_unregistered.Count >= MaxUnregisteredKept)

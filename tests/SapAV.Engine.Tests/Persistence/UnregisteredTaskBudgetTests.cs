@@ -49,6 +49,23 @@ public sealed class UnregisteredTaskBudgetTests : IDisposable
     }
 
     [Fact]
+    public void AReusedUnchangedStrayTask_AfterTheTrustMapStartedOver_KeepsItsFileOwnersBudget()
+    {
+        // Follow-up M3: with a "nothing changed" hint the kept parse result is reused only while the file's trust is known;
+        // otherwise it is opened again, so it never falls back to the principal it names.
+        string file = WriteTask("ClaimsBob", MonitorHarness.Bob);
+        var source = new Engine.Persistence.ScheduledTaskSource(_m.Tasks, (_, _) => false);
+        var collector = new Engine.Persistence.PersistenceCollector(_m.Registry.View, new Engine.Persistence.SafePathProbe(), [source],
+            parser: WireTestParser.Instance, parsedFiles: new Engine.Persistence.ParsedFileCache());
+        collector.Collect();
+        source.ForgetTrust();
+
+        var again = collector.Collect(options: new Engine.Persistence.PersistenceCollectOptions { ChangedTaskFiles = new HashSet<string>() });
+
+        Assert.Equal(OwnerOf(file), Assert.Single(again.Entries).BudgetOwner);
+    }
+
+    [Fact]
     public void AStrayTaskWithNoUser_DoesntTouchTheEnginesBudget()
     {
         string file = WriteTask("NoUser", userId: null);
