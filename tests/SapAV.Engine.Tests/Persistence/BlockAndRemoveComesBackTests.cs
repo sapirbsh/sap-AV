@@ -104,6 +104,23 @@ public sealed class BlockAndRemoveComesBackTests : IDisposable
     }
 
     [Fact]
+    public void ARunValueRecreatedAfterTheHandOver_ButBeforeD4Looked_IsStillAlerted()
+    {
+        // Follow-up M2: the hand-over saw it gone; the watchdog puts it back before D4's next pass.
+        string evil = _m.Target("malware.exe");
+        _m.UserRunValue(Alice, "Evil", evil);
+        _m.Baseline();
+        int before = _m.PersistenceAlerts("Evil").Count();
+
+        var result = _h.Block(_h.User(Alice), IdOf("Evil"));
+        _m.UserRunValue(Alice, "Evil", evil);
+        _m.Monitor.RunDue();
+
+        Assert.Equal(RemediationStatus.Blocked, result.Status);
+        Assert.Equal(before + 1, _m.PersistenceAlerts("Evil").Count());
+    }
+
+    [Fact]
     public void ARunValueLeftGone_IsNotReported()
     {
         _m.UserRunValue(Alice, "Evil", _m.Target("malware.exe"));

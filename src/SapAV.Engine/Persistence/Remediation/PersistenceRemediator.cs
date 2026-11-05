@@ -614,7 +614,10 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     /// Section D review H1: what the action must have left, per key. <see cref="Own"/> judges the entry's own key (null when it
     /// is gone); <see cref="Neighbour"/>, for the kinds that change neighbours, judges a neighbour against its pre-action entry.
     /// </summary>
-    private sealed record HandOverPlan(string EntryKey, Func<PersistenceEntry?, AfterState> Own, Func<PersistenceEntry, PersistenceEntry, bool>? Neighbour);
+    /// <param name="RejudgeAlways">Follow-up M2 (Block): the key is queued for judging again whatever the hand-over saw, so a value re-created
+    /// after the hand-over but before D4's next pass is judged too (a no-op when D4 finds the record gone; an exact accepted state stays silent).</param>
+    private sealed record HandOverPlan(
+        string EntryKey, Func<PersistenceEntry?, AfterState> Own, Func<PersistenceEntry, PersistenceEntry, bool>? Neighbour, bool RejudgeAlways = false);
 
     /// <summary>
     /// The plan after a block. Value-type kinds (Run, RunOnce, IFEO, SilentProcessExit, Startup items): the entry must be gone.
@@ -625,11 +628,11 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
     {
         PersistenceKind.WinlogonShell or PersistenceKind.WinlogonUserinit => new(entry.Key,
             after => after is null ? AfterState.Absent : IsWinlogonDefault(after) ? AfterState.Expected : AfterState.Unexpected,
-            (_, after) => IsWinlogonDefault(after)),
+            (_, after) => IsWinlogonDefault(after), RejudgeAlways: true),
         PersistenceKind.Service or PersistenceKind.ScheduledTask => new(entry.Key,
             after => after is null ? AfterState.Absent : DisabledFrom(entry, after) ? AfterState.Expected : AfterState.Unexpected,
-            DisabledFrom),
-        _ => new(entry.Key, after => after is null ? AfterState.Absent : AfterState.Unexpected, null),
+            DisabledFrom, RejudgeAlways: true),
+        _ => new(entry.Key, after => after is null ? AfterState.Absent : AfterState.Unexpected, null, RejudgeAlways: true),
     };
 
     /// <summary>The plan after a restore: the entry must be exactly the backed-up one (same entry ID); neighbours unchanged but for their state.</summary>
@@ -708,7 +711,7 @@ internal sealed partial class PersistenceRemediator : IPersistenceRemediation
             }
 
             _ledger.Accept(accepted, scope);
-            if (state == AfterState.Unexpected)
+            if (state == AfterState.Unexpected || plan.RejudgeAlways)
             {
                 _ledger.Rejudge(plan.EntryKey, scope); // judged again even if it equals what D4 judged before
             }
