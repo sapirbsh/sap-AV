@@ -9,7 +9,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1–D5 built, immediate reviews fixed; section tester + reviewer pass next) |
+| D — Real-time + VirusTotal | In progress (D1–D5 done, section tester + reviewer passes done; review fix round in progress) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
@@ -259,7 +259,33 @@ request over the pipe, and everything is backed up first.
   - M3: an admin could disable boot-critical drivers in one click;
   - L2.
 
-**Next:** the section D tester + reviewer pass, then fix until clean.
+CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
+
+**Section D tester pass (done, `b0044c2`):**
+- 5 cross-step tests, all through the real broker, the real VirusTotal stack (fake HTTP only) and the real verdict
+  handler:
+  - real-time → VirusTotal → quarantine;
+  - VirusTotal offline means never Malicious;
+  - a VirusTotal-only hit on a protected file needs confirmation;
+  - a new Run value whose target VirusTotal calls malicious → alert;
+  - planted user-made data folders → everything fails safe.
+- Three timing-sensitive tests made tolerant of a loaded machine.
+- No product bugs found. 3 full runs, a clean-machine run, and the D test classes looped 5 times: all green.
+
+**Section D reviewer pass (done): no Critical, 5 High.** Mostly cross-step gaps the per-step reviews couldn't see:
+- **H1:** malware that re-creates its Run value right after Block & remove was accepted silently.
+- **H2:** a user's oplock could freeze the autostart monitor, Block & remove and Quick Scan. The D1 oplock fix covered
+  only real-time opens.
+- **H3:** fake task files in the user-writable Tasks folder could spend another user's (or the engine's) alert budget.
+- **H4:** a Startup folder pointed at a network or WebDAV share evaded both monitors.
+- **H5:** real-time fairness was per folder, not per user.
+- **Also being fixed:** missing health alerts when real-time or the autostart monitor dies, plus two small items. The
+  rest is in ROADMAP under "Section D review".
+
+**Fix round in progress:** H2, H3 and H4 are committed (`3db711f`…`707690e`, not pushed yet). H5 is half done; H1,
+the health alerts and the small items come next. The agent was paused by a usage limit and resumed at 17:06.
+
+**Next:** finish the fix round, verify, push, CI, then write the section D summary and start section E.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine

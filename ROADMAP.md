@@ -633,6 +633,29 @@ Deferred:
   the user" allowlist.
 - **F:** real-time status and per-file results on the pipe.
 
+**Section D review (no Critical; 5 High — fix round in progress, see PROGRESS).** To fix now:
+- H1: D5's own-key hand-over accepts whatever state is there after the action, so malware that re-creates its value
+  is accepted silently.
+- H2: oplocks freeze D4's thread, D5's lock and Quick Scan. Persistence parse, target and Startup opens lack
+  complete-if-oplocked; add a watchdog.
+- H3: the D4 budget owner comes from the attacker-written task XML `UserId`.
+- H4: a UNC/WebDAV Startup folder is "complete" with no finding.
+- H5: D1 fairness is per root, not per owner.
+- M4: no health alert when D1 or D4 dies (the Event Log logger is cleared).
+- The cheap parts of M1, plus L3.
+
+Remaining after the fix round:
+- **D5 follow-up (M1 rest):** every Block/Restore holds the global `_one` lock for up to two 30 s collections. Use a
+  per-requester lock with a short global section.
+- **D3 follow-up (M2):** VirusTotal per-owner shares apply to real time only. D4 targets and a standard user's Custom
+  scans draw on the global budget; apply `VirusTotalDayBudget` to every trigger.
+- **D1 follow-up (M3):** a file with a deny-SYSTEM DACL in a watched folder ends as Error with no alert. Raise
+  "hidden from SYSTEM" (T1222/T1564), or open with backup semantics.
+- **D1/D4 follow-up (L1):** the sequential 30 s joins at shutdown overrun the host timeout. Use one shared deadline,
+  and don't dispose while threads are alive.
+- **D4 follow-up (L2):** a user's Startup folder redirection isn't checked with `UserFolderPolicy`. Apply it, and
+  flag refusals (ties in with H4).
+
 **Notes from D2 (VirusTotal client, cache, limiter, key store; built `d279fb7`…`cfc581f`).**
 - **What was decided:**
   - **Package:** no new one. Machine DPAPI is called through `CryptProtectData` directly, like the quarantine key.
