@@ -511,7 +511,9 @@ public sealed record JobFindingsReply(
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// <param name="EntryId">A <see cref="Persistence.PersistenceEntryId"/> from an alert or a finding.</param>
-public sealed record PersistenceBlockRequest(string EntryId);
+/// <param name="ConfirmCritical">D5 review M3: the user confirmed (a second time) disabling a boot or system-start driver, a service whose
+/// failure Windows treats as critical, or a core Windows service; without it such a block is refused with NeedsConfirmation.</param>
+public sealed record PersistenceBlockRequest(string EntryId, bool ConfirmCritical = false);
 
 /// <param name="BackupId">A <see cref="PersistenceBackupInfo.BackupId"/>.</param>
 public sealed record PersistenceBackupRequest(string BackupId);
@@ -547,6 +549,9 @@ public enum PersistenceActionOutcome
 
     /// <summary>The user's backup quota is used up (restore or purge some first).</summary>
     QuotaExceeded,
+
+    /// <summary>Refused without the explicit confirmation the request can carry (e.g. ConfirmCritical for a critical service).</summary>
+    NeedsConfirmation,
 
     /// <summary>The change itself failed (see the reason); the earlier state is kept.</summary>
     Failed,

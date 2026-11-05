@@ -6,7 +6,8 @@ namespace SapAV.Engine.Persistence.Remediation;
 /// <param name="Xml">The task's definition (the Task Scheduler's own XML, not the file in System32\Tasks).</param>
 /// <param name="PrincipalUserId">The principal's UserId as registered (a SID or an account name), or null.</param>
 /// <param name="PrincipalGroupId">The principal's GroupId, or null.</param>
-internal sealed record ScheduledTaskState(bool Enabled, string Xml, string? PrincipalUserId, string? PrincipalGroupId);
+/// <param name="SecurityDescriptor">Review M1: the registered task's owner, group and DACL (SDDL), or null when unreadable.</param>
+internal sealed record ScheduledTaskState(bool Enabled, string Xml, string? PrincipalUserId, string? PrincipalGroupId, string? SecurityDescriptor = null);
 
 internal enum TaskControlStatus
 {
@@ -49,7 +50,7 @@ internal sealed class ComTaskSchedulerControl : ITaskSchedulerControl
             dynamic principal = definition.Principal;
             try
             {
-                found = new ScheduledTaskState((bool)task.Enabled, xml, Blank((string?)principal.UserId), Blank((string?)principal.GroupId));
+                found = new ScheduledTaskState((bool)task.Enabled, xml, Blank((string?)principal.UserId), Blank((string?)principal.GroupId), Security(task));
             }
             finally
             {
@@ -62,6 +63,19 @@ internal sealed class ComTaskSchedulerControl : ITaskSchedulerControl
     }
 
     public TaskControlStatus SetEnabled(string taskPath, bool enabled) => WithTask(taskPath, task => task.Enabled = enabled);
+
+    /// <summary>IRegisteredTask.GetSecurityDescriptor(OWNER | GROUP | DACL) as SDDL; null when it can't be read (callers deny).</summary>
+    private static string? Security(dynamic task)
+    {
+        try
+        {
+            return Blank((string?)task.GetSecurityDescriptor(0x1 | 0x2 | 0x4));
+        }
+        catch (Exception ex) when (ex is COMException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or InvalidCastException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 

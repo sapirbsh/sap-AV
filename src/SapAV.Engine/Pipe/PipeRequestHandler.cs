@@ -635,7 +635,7 @@ internal sealed class PipeRequestHandler : IDisposable
             return refused;
         }
 
-        var result = await _remediation!.BlockAsync(session.Identity, request.EntryId, cancellationToken).ConfigureAwait(false);
+        var result = await _remediation!.BlockAsync(session.Identity, request.EntryId, cancellationToken, request.ConfirmCritical).ConfigureAwait(false);
         return PersistenceReply(session, result);
     }
 

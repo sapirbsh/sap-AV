@@ -100,6 +100,18 @@ internal sealed partial class PersistenceRemediator
             return new(RemediationStatus.Unavailable, "The quarantine is not available.");
         }
 
+        // Review M2: the quarantine's own rule for who may see (and so restore) an item: an administrator, or a user who could
+        // read the original file (its recorded descriptor).
+        if (quarantine.Get(record.QuarantineItemId!) is not { Integrity: QuarantineEntryIntegrity.Valid } item)
+        {
+            return new(RemediationStatus.InvalidBackup, "The quarantine item is gone or invalid (it was restored or deleted from the quarantine screen).");
+        }
+
+        if (!client.IsAdmin && !ClientAccess.IsGrantedByStoredDescriptor(client, item.OriginalSecurityDescriptor, Pipe.Native.PipeNative.FileReadData))
+        {
+            return new(RemediationStatus.AccessDenied, "You may not restore this quarantine item; ask an administrator.");
+        }
+
         string path = record.OriginalPath!;
         using (var existing = ClientAccess.OpenForCheck(path, out var found))
         {

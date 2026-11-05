@@ -38,6 +38,9 @@ internal sealed record PersistenceBackupRecord
 
     public required string BlockedBy { get; init; }
 
+    /// <summary>Review M2: the block was an administrator's; only an administrator may restore or purge it.</summary>
+    public bool BlockedByAdmin { get; init; }
+
     public required DateTimeOffset BlockedAtUtc { get; init; }
 
     public DateTimeOffset? RestoredAtUtc { get; init; }

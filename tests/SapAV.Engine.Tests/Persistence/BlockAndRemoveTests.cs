@@ -101,7 +101,14 @@ public sealed class BlockAndRemoveTests : IDisposable
         Assert.Equal(RemediationStatus.NotFound, _h.Restore(alice, byAdmin.Record!.Id).Status);
         Assert.Equal(RemediationStatus.NotFound, _h.Remediator.Purge(alice, byAdmin.Record.Id).Status);
         Assert.Null(_h.UserRunKey(Bob).GetValue("BobsTool"));
-        Assert.Single(_h.Remediator.List(_h.User(Bob)));
+
+        // Review M2: an administrator's block of Bob's own entry is undone only by an administrator, not by Bob.
+        var bob = _h.User(Bob);
+        Assert.Empty(_h.Remediator.List(bob));
+        Assert.Equal(RemediationStatus.NotFound, _h.Restore(bob, byAdmin.Record.Id).Status);
+        Assert.Equal(RemediationStatus.NotFound, _h.Remediator.Purge(bob, byAdmin.Record.Id).Status);
+        Assert.Null(_h.UserRunKey(Bob).GetValue("BobsTool"));
+        Assert.True(byAdmin.Record.BlockedByAdmin);
     }
 
     [Fact]
@@ -239,16 +246,60 @@ public sealed class BlockAndRemoveTests : IDisposable
     }
 
     [Fact]
-    public void Task_WhoseRegisteredPrincipalIsSomeoneElse_IsRefusedToAStandardUser()
+    public void Task_TheUserCantChange_IsRefused_OnBlockAndOnRestore()
     {
-        string taskPath = _h.AddTask("Claimed", @"C:\Tools\t.exe", principal: Alice); // the file claims Alice...
-        _h.TaskScheduler.Tasks[taskPath] = _h.TaskScheduler.Tasks[taskPath] with { PrincipalUserId = Bob }; // ...the Task Scheduler says Bob
+        // Review M1: an administrator-deployed task that runs as Alice, but whose descriptor doesn't let her change it.
+        string deployed = _h.AddTask("Deployed", @"C:\Tools\t.exe", principal: Alice);
+        _h.TaskScheduler.Tasks[deployed] = _h.TaskScheduler.Tasks[deployed] with { SecurityDescriptor = RemediationHarness.SystemOnly };
+        var alice = _h.User(Alice);
 
-        var result = _h.Block(_h.User(Alice), PersistenceEntryId.Compute(_h.Entry(e => e.Location == taskPath)));
-
-        Assert.Equal(RemediationStatus.AccessDenied, result.Status);
-        Assert.True(_h.TaskScheduler.Tasks[taskPath].Enabled);
+        Assert.Equal(RemediationStatus.AccessDenied, _h.Block(alice, PersistenceEntryId.Compute(_h.Entry(e => e.Location == deployed))).Status);
+        Assert.True(_h.TaskScheduler.Tasks[deployed].Enabled);
         Assert.Empty(_h.Store.List());
+
+        string own = _h.AddTask("Own", @"C:\Tools\o.exe", principal: Alice);
+        var blocked = _h.Block(alice, PersistenceEntryId.Compute(_h.Entry(e => e.Location == own)));
+        Assert.Equal(RemediationStatus.Blocked, blocked.Status);
+        _h.TaskScheduler.Tasks[own] = _h.TaskScheduler.Tasks[own] with { SecurityDescriptor = RemediationHarness.SystemOnly }; // locked down since
+
+        Assert.Equal(RemediationStatus.AccessDenied, _h.Restore(alice, blocked.Record!.Id).Status);
+        Assert.False(_h.TaskScheduler.Tasks[own].Enabled);
+    }
+
+    [Fact]
+    public void Task_WhoseSecondBackupSaveFailed_IsStillReenabled_IfOnlyItsEnabledFlagDiffers()
+    {
+        string taskPath = _h.AddTask("Half", @"C:\Tools\t.exe", principal: Alice);
+        var alice = _h.User(Alice);
+        var record = _h.Block(alice, PersistenceEntryId.Compute(_h.Entry(e => e.Location == taskPath))).Record!;
+        _h.Store.Save(record with { DisabledXmlSha256 = new string('a', 64) }); // as if the post-disable hash never got saved
+
+        var disabled = _h.TaskScheduler.Tasks[taskPath];
+        _h.TaskScheduler.Tasks[taskPath] = disabled with { Xml = disabled.Xml.Replace(@"C:\Tools\t.exe", @"C:\Tools\x.exe", StringComparison.Ordinal) };
+        Assert.Equal(RemediationStatus.LocationChanged, _h.Restore(alice, record.Id).Status); // more than the flag changed
+
+        _h.TaskScheduler.Tasks[taskPath] = disabled;
+        Assert.Equal(RemediationStatus.Restored, _h.Restore(alice, record.Id).Status);
+        Assert.True(_h.TaskScheduler.Tasks[taskPath].Enabled);
+    }
+
+    [Theory]
+    [InlineData("BootDrv", 0, 1)]
+    [InlineData("CritSvc", 2, 3)]
+    [InlineData("RpcSs", 2, 1)]
+    public void CriticalServices_NeedAnExplicitConfirmation(string name, int start, int errorControl)
+    {
+        _h.AddService(name, @"C:\Windows\System32\svchost.exe -k x", start, running: true, errorControl);
+        var admin = _h.Admin();
+        string id = PersistenceEntryId.Compute(_h.Entry(e => e.Kind == PersistenceKind.Service));
+
+        var refused = _h.Block(admin, id);
+
+        Assert.Equal(RemediationStatus.NeedsConfirmation, refused.Status);
+        Assert.Equal(start, _h.Services.Services[name].StartType);
+        Assert.Empty(_h.Store.List());
+        Assert.Equal(RemediationStatus.Blocked, _h.Block(admin, id, confirmCritical: true).Status);
+        Assert.Equal(4, _h.Services.Services[name].StartType);
     }
 
     [Fact]

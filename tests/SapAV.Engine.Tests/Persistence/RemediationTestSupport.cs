@@ -143,9 +143,16 @@ internal sealed class RemediationHarness : IDisposable
 
     public string IdOf(string valueName) => PersistenceEntryId.Compute(Entry(valueName));
 
-    public RemediationResult Block(FakeClientIdentity client, string id) => Remediator.BlockAsync(client, id).GetAwaiter().GetResult();
+    public RemediationResult Block(FakeClientIdentity client, string id, bool confirmCritical = false) =>
+        Remediator.BlockAsync(client, id, confirmCritical: confirmCritical).GetAwaiter().GetResult();
 
     public RemediationResult Restore(FakeClientIdentity client, string backupId) => Remediator.RestoreAsync(client, backupId).GetAwaiter().GetResult();
+
+    /// <summary>A task descriptor (SDDL) that lets this test process's user change the task.</summary>
+    public static string WritableByMe { get; } = $"O:SYG:SYD:(A;;FA;;;SY)(A;;FA;;;{QuarantineTestContext.CurrentUser.Value})";
+
+    /// <summary>A task descriptor only SYSTEM may change (everyone may read it), like an administrator-deployed task.</summary>
+    public const string SystemOnly = "O:SYG:SYD:(A;;FA;;;SY)(A;;FR;;;WD)";
 
     /// <summary>A task definition file in the temp Tasks folder, and the same task registered in the fake Task Scheduler.</summary>
     public string AddTask(string name, string command, string principal, bool registered = true)
@@ -161,20 +168,20 @@ internal sealed class RemediationHarness : IDisposable
         File.WriteAllBytes(Path.Combine(Tasks, name), [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(xml)]);
         if (registered)
         {
-            TaskScheduler.Tasks[@"\" + name] = new ScheduledTaskState(true, xml, principal, null);
+            TaskScheduler.Tasks[@"\" + name] = new ScheduledTaskState(true, xml, principal, null, WritableByMe);
         }
 
         return @"\" + name;
     }
 
     /// <summary>A service key in the fake HKLM (what the collector reads) and the same service in the fake SCM.</summary>
-    public void AddService(string name, string imagePath, int start = 2, bool running = true)
+    public void AddService(string name, string imagePath, int start = 2, bool running = true, int errorControl = 1)
     {
         using var key = Registry.Machine($@"SYSTEM\CurrentControlSet\Services\{name}");
         key.SetValue("Type", 16, RegistryValueKind.DWord);
         key.SetValue("Start", start, RegistryValueKind.DWord);
         key.SetValue("ImagePath", imagePath, RegistryValueKind.ExpandString);
-        Services.Services[name] = new ServiceState(start, running);
+        Services.Services[name] = new ServiceState(start, running, errorControl);
     }
 
     public void Dispose()

@@ -229,8 +229,8 @@ public sealed class EnginePipeClient : IAsyncDisposable
         SendAsync<VirusTotalStatusInfo>(PipeRequestKind.VirusTotalSetEnabled, new VirusTotalSetEnabledRequest(enabled), cancellationToken);
 
     /// <summary>D5: Block &amp; remove of the autostart entry with this ID (from an alert or a finding); backed up first.</summary>
-    public Task<PersistenceActionReply> BlockPersistenceAsync(string entryId, CancellationToken cancellationToken = default) =>
-        SendAsync<PersistenceActionReply>(PipeRequestKind.PersistenceBlock, new PersistenceBlockRequest(entryId), cancellationToken);
+    public Task<PersistenceActionReply> BlockPersistenceAsync(string entryId, CancellationToken cancellationToken = default, bool confirmCritical = false) =>
+        SendAsync<PersistenceActionReply>(PipeRequestKind.PersistenceBlock, new PersistenceBlockRequest(entryId, confirmCritical), cancellationToken);
 
     /// <summary>D5: the Block &amp; remove backups the caller may act on.</summary>
     public Task<PersistenceBackupListReply> ListPersistenceBackupsAsync(CancellationToken cancellationToken = default) =>

@@ -1,8 +1,8 @@
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using SapAV.Core.Persistence;
 using SapAV.Core.Pipe;
+using SapAV.Engine.Pipe;
 
 namespace SapAV.Engine.Persistence.Remediation;
 
@@ -44,6 +44,12 @@ internal sealed partial class PersistenceRemediator
             return Changed(); // its start type changed since it was collected
         }
 
+        if (!context.ConfirmCritical && CriticalReason(name, state) is { } critical)
+        {
+            return new(RemediationStatus.NeedsConfirmation,
+                $"{critical} Disabling it can stop Windows from starting or working; confirm explicitly (ConfirmCritical) if you are sure.");
+        }
+
         var record = context.NewRecord(PersistenceBackupAction.ServiceDisabled) with { ServiceName = name, OldStartType = state.StartType, WasRunning = state.Running };
         if (SaveFirst(context, record) is { } failed)
         {
@@ -70,6 +76,26 @@ internal sealed partial class PersistenceRemediator
         TrySave(context.Store, record);
         return new(RemediationStatus.Blocked, $"The service was disabled and {note}. It was not deleted.", record);
     }
+
+    /// <summary>Review M3: core Windows services that are never disabled without an explicit confirmation.</summary>
+    internal static readonly HashSet<string> CoreServices = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "RpcSs", "RpcEptMapper", "DcomLaunch", "LSM", "SamSs", "EventLog", "Winmgmt", "CryptSvc", "BFE", "mpssvc", "Schedule", "ProfSvc",
+        "gpsvc", "Power", "BrokerInfrastructure", "CoreMessagingRegistrar", "SystemEventsBroker", "Dhcp", "Dnscache", "nsi", "LanmanWorkstation",
+        "WinDefend", "WdNisSvc", "WdNisDrv", "WdFilter", "WdBoot", "SecurityHealthService", "Sense", "MDCoreSvc",
+    };
+
+    private const int ErrorControlCritical = 3;
+
+    /// <summary>
+    /// Review M3: why disabling this service could break Windows (a boot or system-start driver, an ErrorControl of Critical,
+    /// a core service), or null.
+    /// </summary>
+    internal static string? CriticalReason(string name, ServiceState state) =>
+        state.StartType is 0 or 1 ? "This is a boot or system-start driver."
+        : state.ErrorControl == ErrorControlCritical ? "Windows treats a failure of this service as critical."
+        : CoreServices.Contains(name) ? "This is a core Windows service."
+        : null;
 
     /// <summary>The old start type comes back only while the service is still Disabled (no one changed it since). It isn't started.</summary>
     private RemediationResult RestoreService(PersistenceBackupRecord record)
@@ -109,9 +135,13 @@ internal sealed partial class PersistenceRemediator
 
     // ---- Scheduled tasks ----
 
+    /// <summary>FILE_WRITE_DATA: what changing a task needs in its security descriptor (task descriptors use file rights).</summary>
+    private const uint TaskWriteAccess = 0x0002;
+
     /// <summary>
     /// A scheduled task: its registered definition (the Task Scheduler's XML) is backed up and the task disabled through the
-    /// Task Scheduler API (never deleted, its file never edited). A standard user may block it only if its registered principal is them.
+    /// Task Scheduler API (never deleted, its file never edited). A standard user may block it only if the registered task's
+    /// own security descriptor lets them change it (review M1): who it runs as is not authorization.
     /// </summary>
     private RemediationResult BlockTask(BlockContext context)
     {
@@ -130,9 +160,9 @@ internal sealed partial class PersistenceRemediator
                 : new(RemediationStatus.Failed, $"The task can't be read from the Task Scheduler ({got}).");
         }
 
-        if (!context.Client.IsAdmin && !PrincipalIs(state!, context.Client.User))
+        if (ClientMayChangeTask(context.Client, state!) is { } denied)
         {
-            return new(RemediationStatus.AccessDenied, "This task doesn't run as you; only an administrator may block it.");
+            return denied;
         }
 
         if (!state!.Enabled)
@@ -158,7 +188,9 @@ internal sealed partial class PersistenceRemediator
             return new(RemediationStatus.Failed, $"The task couldn't be disabled ({set}); nothing was changed.");
         }
 
-        // Restore re-enables only the exact definition left here (the Task Scheduler rewrites it when disabling).
+        // Restore re-enables only the exact definition left here (the Task Scheduler rewrites it when disabling). Review L2: if
+        // this second save fails twice, restore still accepts a definition that differs from the backed-up one only in its
+        // Settings Enabled flag.
         if (_tasks.Get(path, out var after) == TaskControlStatus.Ok)
         {
             record = record with { DisabledXmlSha256 = Sha256(after!.Xml) };
@@ -168,8 +200,11 @@ internal sealed partial class PersistenceRemediator
         return new(RemediationStatus.Blocked, "The scheduled task was backed up and disabled. It was not deleted.", record);
     }
 
-    /// <summary>Re-enables the task only if its definition is still exactly what disabling left; otherwise nothing is changed.</summary>
-    private RemediationResult RestoreTask(PersistenceBackupRecord record)
+    /// <summary>
+    /// Re-enables the task only if it is still disabled with the definition disabling left (or, review L2, the backed-up
+    /// definition with only its Enabled flag changed); otherwise nothing is changed. Review M1: the same descriptor check as Block.
+    /// </summary>
+    private RemediationResult RestoreTask(PersistenceBackupRecord record, IClientIdentity client)
     {
         var got = _tasks.Get(record.TaskPath!, out var state);
         if (got != TaskControlStatus.Ok)
@@ -179,7 +214,15 @@ internal sealed partial class PersistenceRemediator
                 : new(RemediationStatus.Failed, $"The task can't be read from the Task Scheduler ({got}).");
         }
 
-        if (!string.Equals(Sha256(state!.Xml), record.DisabledXmlSha256, StringComparison.Ordinal))
+        if (ClientMayChangeTask(client, state!) is { } denied)
+        {
+            return denied;
+        }
+
+        bool unchanged = string.Equals(Sha256(state!.Xml), record.DisabledXmlSha256, StringComparison.Ordinal)
+            || (!state.Enabled && record.TaskXml is { } original
+                && string.Equals(WithoutSettingsEnabled(state.Xml), WithoutSettingsEnabled(original), StringComparison.Ordinal));
+        if (!unchanged)
         {
             return new(RemediationStatus.LocationChanged, "The task was changed since it was disabled; nothing was overwritten.");
         }
@@ -190,37 +233,55 @@ internal sealed partial class PersistenceRemediator
             : new(RemediationStatus.Failed, $"The task couldn't be enabled ({set}).");
     }
 
-    /// <summary>The task's registered principal is <paramref name="user"/> (a SID, or an account name that resolves to it); a group never is.</summary>
-    internal static bool PrincipalIs(ScheduledTaskState state, SecurityIdentifier user)
+    /// <summary>
+    /// Review M1: a standard user may change a task only if the registered task's own descriptor grants them write access
+    /// (AccessCheck with their token, file generic mapping); an unreadable descriptor denies. Administrators may change any task.
+    /// </summary>
+    private static RemediationResult? ClientMayChangeTask(IClientIdentity client, ScheduledTaskState state) =>
+        client.IsAdmin || ClientAccess.IsGrantedByStoredDescriptor(client, state.SecurityDescriptor, TaskWriteAccess)
+            ? null
+            : new(RemediationStatus.AccessDenied, "You may not change this task yourself; only an administrator may block or restore it.");
+
+    /// <summary>
+    /// The definition without the Settings-level <c>&lt;Enabled&gt;</c> element (the only thing disabling changes; triggers keep
+    /// theirs), for the review L2 comparison.
+    /// </summary>
+    internal static string WithoutSettingsEnabled(string xml)
     {
-        if (state.PrincipalUserId is not { } id)
+        int start = xml.IndexOf("<Settings>", StringComparison.Ordinal);
+        int end = start < 0 ? -1 : xml.IndexOf("</Settings>", start, StringComparison.Ordinal);
+        if (end < 0)
         {
-            return false;
+            return xml;
         }
 
-        try
-        {
-            var sid = PersistenceEntry.IsSid(id) ? new SecurityIdentifier(id) : (SecurityIdentifier)new NTAccount(id).Translate(typeof(SecurityIdentifier));
-            return sid == user;
-        }
-        catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException or SystemException)
-        {
-            return false;
-        }
+        string settings = SettingsEnabledRegex().Replace(xml[start..end], string.Empty);
+        return string.Concat(xml.AsSpan(0, start), settings, xml.AsSpan(end));
     }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"\s*<Enabled>\s*(true|false)\s*</Enabled>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex SettingsEnabledRegex();
 
     private static string Sha256(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
-    /// <summary>A later update of a record already written (a note, the final hash); a failure keeps the first version.</summary>
+    /// <summary>A later update of a record already written (a note, the final hash), tried twice (review L2); a failure keeps the first version.</summary>
     private void TrySave(IPersistenceBackupStore store, PersistenceBackupRecord record)
     {
-        try
+        for (int attempt = 1; ; attempt++)
         {
-            store.Save(record);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning("Block & remove: backup {Backup} couldn't be updated ({Why}).", record.Id, ex.Message);
+            try
+            {
+                store.Save(record);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= 2)
+                {
+                    _logger.LogWarning("Block & remove: backup {Backup} couldn't be updated ({Why}).", record.Id, ex.Message);
+                    return;
+                }
+            }
         }
     }
 }

@@ -5,7 +5,8 @@ namespace SapAV.Engine.Persistence.Remediation;
 /// <summary>A service as the Service Control Manager reports it.</summary>
 /// <param name="StartType">SERVICE_BOOT_START (0) … SERVICE_DISABLED (4).</param>
 /// <param name="Running">The service isn't stopped (running, starting, stopping, paused).</param>
-internal sealed record ServiceState(int StartType, bool Running);
+/// <param name="ErrorControl">Review M3: SERVICE_ERROR_IGNORE (0) … SERVICE_ERROR_CRITICAL (3).</param>
+internal sealed record ServiceState(int StartType, bool Running, int ErrorControl = 1);
 
 internal enum ServiceControlStatus
 {
@@ -75,13 +76,14 @@ internal sealed class ScmServiceControl : IServiceControl
                 return Map(Marshal.GetLastWin32Error());
             }
 
-            int startType = Marshal.ReadInt32(buffer, 4); // QUERY_SERVICE_CONFIGW: dwServiceType, dwStartType, ...
+            int startType = Marshal.ReadInt32(buffer, 4); // QUERY_SERVICE_CONFIGW: dwServiceType, dwStartType, dwErrorControl, ...
+            int errorControl = Marshal.ReadInt32(buffer, 8);
             if (!QueryServiceStatus(service, out var serviceStatus))
             {
                 return Map(Marshal.GetLastWin32Error());
             }
 
-            state = new ServiceState(startType, serviceStatus.CurrentState != ServiceStopped);
+            state = new ServiceState(startType, serviceStatus.CurrentState != ServiceStopped, errorControl);
             return ServiceControlStatus.Ok;
         }
         finally
