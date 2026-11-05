@@ -769,6 +769,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         finally
         {
             UpdateCounts();
+            _watch?.Disarm(); // follow-up L1: a cancelled write could leave a half-written temp file; the save isn't a pass's work
             SaveIfDirty();
         }
     }
