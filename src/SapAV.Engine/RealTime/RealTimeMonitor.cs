@@ -47,6 +47,10 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     private readonly Func<string, int> _driveType;
     private readonly ScanTreeWalker _walker;
     private readonly RealTimeQueue _queue;
+
+    /// <summary>Section D review M4: raises the "real-time unavailable" health alert (engine text); null in most tests.</summary>
+    private readonly Action<string>? _unavailable;
+    private int _nothingWatchedReported;
     private readonly QuickScanFileRules _rules = new(new QuickScanOptions());
     private readonly Counters _counters = new();
     private readonly int _scanThreads;
@@ -81,7 +85,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
     public RealTimeMonitor(
         RealTimeOptions options, IWatchedFolderSource folders, ScanFilePipeline pipeline, ExclusionSet excluded, TimeProvider time, ILogger logger,
         IDirectoryWatchFactory? watches = null, IRemoteFileProbe? remote = null, ISyncRootProbe? syncRoots = null, Func<string, int>? driveType = null,
-        int? workerCount = null)
+        int? workerCount = null, Action<string>? unavailable = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -97,6 +101,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         _walker = new ScanTreeWalker(excluded, remote: _remote, syncRoots: syncRoots);
         _queue = new RealTimeQueue(options);
         _scanThreads = workerCount is { } workers ? options.EffectiveScanThreads(workers) : options.ScanThreads;
+        _unavailable = unavailable;
     }
 
     /// <summary>Raised for every file handled (on a scan thread; handlers must be quick and must not throw).</summary>
@@ -160,14 +165,15 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         }
 
         Revalidate();
+        CheckSomethingWatched(); // section D review M4
         ScheduleRevalidation(_options.RevalidateInterval);
-        _threads.Add(BackgroundThread.Start("sap-AV real-time scheduler", () => Guarded(SchedulerLoop)));
+        _threads.Add(BackgroundThread.Start("sap-AV real-time scheduler", () => Guarded(SchedulerLoop, "scheduler")));
         for (int i = 0; i < _scanThreads; i++)
         {
-            _threads.Add(BackgroundThread.Start($"sap-AV real-time scan #{i}", () => Guarded(ScanLoop)));
+            _threads.Add(BackgroundThread.Start($"sap-AV real-time scan #{i}", () => Guarded(ScanLoop, "scan")));
         }
 
-        _threads.Add(BackgroundThread.Start("sap-AV real-time rescan", () => Guarded(RescanLoop)));
+        _threads.Add(BackgroundThread.Start("sap-AV real-time rescan", () => Guarded(RescanLoop, "rescan")));
         _logger.LogInformation("Real-time monitoring started: {Count} folder(s) watched, {Refused} refused.", Status.WatchedFolders, Status.RefusedFolders);
     }
 
@@ -438,18 +444,72 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
 
     // ---- Threads ----
 
-    private void Guarded(Action loop)
+    /// <summary>Section D review M4: the first restart delay of a failed thread; it doubles, up to <see cref="MaxRestartDelay"/>.</summary>
+    internal TimeSpan RestartDelay { get; init; } = TimeSpan.FromSeconds(5);
+
+    internal static readonly TimeSpan MaxRestartDelay = TimeSpan.FromMinutes(5);
+
+    /// <summary>Threads restarted after a failure (tests and the log).</summary>
+    internal int Restarts => Volatile.Read(ref _restarts);
+
+    private int _restarts;
+
+    /// <summary>
+    /// Runs one thread's loop; section D review M4: a loop that fails is reported (health alert 9010) and started again
+    /// after a backoff (5 s, doubling up to 5 min), so one bad file or bug can't leave real-time off until the engine restarts.
+    /// </summary>
+    private void Guarded(Action loop, string name)
+    {
+        for (int failures = 0; !_stop.IsCancellationRequested; )
+        {
+            try
+            {
+                loop();
+                return;
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                failures++;
+                var delay = TimeSpan.FromTicks(Math.Min(RestartDelay.Ticks * (1L << Math.Min(failures - 1, 16)), MaxRestartDelay.Ticks));
+                _logger.LogError(ex, "A real-time monitoring thread ({Thread}) failed; it restarts in {Delay}.", name, delay);
+                Report($"the real-time {name} thread failed ({ex.GetType().Name}); it restarts in {delay.TotalSeconds:0} s.");
+                if (_stop.Token.WaitHandle.WaitOne(delay))
+                {
+                    return;
+                }
+
+                Interlocked.Increment(ref _restarts);
+            }
+        }
+    }
+
+    private void Report(string problem)
     {
         try
         {
-            loop();
-        }
-        catch (OperationCanceledException) when (_stop.IsCancellationRequested)
-        {
+            _unavailable?.Invoke(problem);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            _logger.LogError(ex, "A real-time monitoring thread failed; real-time protection is degraded until the engine restarts.");
+            _logger.LogWarning(ex, "Real-time: the health alert couldn't be raised.");
+        }
+    }
+
+    /// <summary>Section D review M4: no folder is watched (all refused or failing): reported once, again after one was watched.</summary>
+    private void CheckSomethingWatched()
+    {
+        var status = Status;
+        if (status.WatchedFolders > 0)
+        {
+            Volatile.Write(ref _nothingWatchedReported, 0);
+        }
+        else if (Interlocked.Exchange(ref _nothingWatchedReported, 1) == 0)
+        {
+            Report($"no watched folder could be watched ({status.RefusedFolders} refused or failing).");
         }
     }
 
@@ -933,6 +993,8 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         {
             _logger.LogWarning(ex, "Real-time: re-checking the watched folders failed; the current watches stay.");
         }
+
+        CheckSomethingWatched(); // section D review M4
     }
 
     /// <summary>

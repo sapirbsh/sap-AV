@@ -299,7 +299,13 @@ internal sealed class MonitorHarness : IDisposable
     public PersistenceMonitor Monitor => _monitor ??= Create();
 
     public PersistenceMonitor Create() =>
-        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log, alerts: Alerts, userActions: UserActions);
+        new(Options, Collector, Scanner, Store, RegistryWatches, Folders, Time, Log, alerts: Alerts, userActions: UserActions, unavailable: Unavailable)
+        {
+            RestartDelay = TimeSpan.FromMilliseconds(50),
+        };
+
+    /// <summary>Section D review M4: the monitor's health-alert callback.</summary>
+    public Action<string>? Unavailable { get; set; }
 
     /// <summary>D5: the Block &amp; remove ledger the monitor consults (set before <see cref="Monitor"/> is first used).</summary>
     public SapAV.Engine.Persistence.Remediation.PersistenceActionLedger? UserActions { get; set; }

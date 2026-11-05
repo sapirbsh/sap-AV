@@ -117,6 +117,18 @@ public static class ScanAlerts
         Health(AlertType.EventLogIntegrityDegraded, Verdict.Suspicious, logName, EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
             "Log integrity degraded: " + problem + " Run the sap-AV installer (--install-eventlog-source) again to restore it.", AlertAction.None);
 
+    /// <summary>Section D review M4: real-time file monitoring (D1) can't protect; <paramref name="problem"/> is engine text.</summary>
+    public static Alert RealTimeUnavailable(string problem, DateTimeOffset now) =>
+        Health(AlertType.RealTimeUnavailable, Verdict.Suspicious, "real-time file monitoring", EngineTrigger, now, MitreTechniqueIds.DisableOrModifyTools,
+            "Real-time protection is degraded: " + problem + " New files are found only by scans until it recovers; see the engine log.", AlertAction.None);
+
+    /// <summary>Section D review M4: real-time persistence monitoring (D4) is down or degraded; <paramref name="problem"/> is engine text.</summary>
+    public static Alert PersistenceMonitorUnavailable(string problem, DateTimeOffset now) =>
+        Health(AlertType.PersistenceMonitorUnavailable, Verdict.Suspicious, "real-time persistence monitoring", ScanTrigger.Persistence, now,
+            MitreTechniqueIds.DisableOrModifyTools,
+            "Autostart monitoring is degraded: " + problem + " New autostart entries are found only by scans until it recovers; see the engine log.",
+            AlertAction.None);
+
     private static Alert Health(
         AlertType type, Verdict verdict, string path, ScanTrigger trigger, DateTimeOffset now, string technique, string reason, AlertAction action) =>
         new(Alert.ComputeAlertId(type, now, path, null, trigger), now, type, verdict, path, null, null, null, technique, [], [reason], null,

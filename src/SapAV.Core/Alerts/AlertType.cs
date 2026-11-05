@@ -79,4 +79,18 @@ public enum AlertType
 
     /// <summary>Information: a user restored an autostart entry from its Block &amp; remove backup.</summary>
     PersistenceRestored,
+
+    // Engine health, continued (section D review M4).
+
+    /// <summary>
+    /// Real-time file monitoring (D1) can't protect: it didn't start, one of its threads failed (it restarts with backoff), or
+    /// no watched folder could be watched. New files are found only by scans until it recovers.
+    /// </summary>
+    RealTimeUnavailable,
+
+    /// <summary>
+    /// Real-time persistence monitoring (D4) is down or degraded: it didn't start, its thread failed (it restarts with
+    /// backoff), or its protected baseline store was refused (the baseline is kept in memory only).
+    /// </summary>
+    PersistenceMonitorUnavailable,
 }

@@ -37,11 +37,24 @@ internal sealed class RealTimeService(IServiceProvider services, IOptions<RealTi
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             logger.LogError(ex, "Real-time monitoring could not start; files are scanned only by scan jobs.");
+            ReportUnavailable(services, $"it could not start ({ex.GetType().Name}).");
         }
         finally
         {
             Monitor?.Dispose();
             Monitor = null;
+        }
+    }
+
+    /// <summary>
+    /// Section D review M4: health alert 9010 (RealTimeUnavailable) through the dispatcher: as a service the engine's own
+    /// ILogger output reaches no event log, so this is how an administrator learns real-time protection is down.
+    /// </summary>
+    internal static void ReportUnavailable(IServiceProvider services, string problem)
+    {
+        if (services.GetService<Alerts.IAlertDispatcher>() is { } alerts)
+        {
+            alerts.Post(Alerts.ScanAlerts.RealTimeUnavailable(problem, services.GetRequiredService<TimeProvider>().GetUtcNow()), health: true);
         }
     }
 
@@ -60,6 +73,6 @@ internal sealed class RealTimeService(IServiceProvider services, IOptions<RealTi
         }
 
         return new RealTimeMonitor(options, folders, jobs.Pipeline, jobs.Excluded, services.GetRequiredService<TimeProvider>(), logger,
-            workerCount: workers);
+            workerCount: workers, unavailable: problem => ReportUnavailable(services, problem));
     }
 }

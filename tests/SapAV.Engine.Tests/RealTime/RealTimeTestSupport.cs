@@ -142,6 +142,9 @@ internal sealed class RealTimeHarness : IDisposable
 
     public Func<string, int>? DriveType { get; set; }
 
+    /// <summary>Section D review M4: the monitor's health-alert callback.</summary>
+    public Action<string>? Unavailable { get; set; }
+
     /// <summary>The monitor's clock (real time, optionally shifted so files written now count as "old" or "recent").</summary>
     public TimeProvider Time { get; set; } = TimeProvider.System;
 
@@ -164,7 +167,7 @@ internal sealed class RealTimeHarness : IDisposable
     {
         var pipeline = new ScanFilePipeline(RealBroker ?? Broker, ExclusionSet.Always(new FolderSet([])), Handler, TimeProvider.System, NullLogger.Instance);
         _monitor = new RealTimeMonitor(Options, Folders, pipeline, ExclusionSet.Always(new FolderSet([])), Time, LockedLog,
-            Watches ?? Events, Remote, driveType: DriveType);
+            Watches ?? Events, Remote, driveType: DriveType, unavailable: Unavailable);
         _monitor.FileHandled += result =>
         {
             lock (_results)

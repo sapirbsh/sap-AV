@@ -38,11 +38,21 @@ internal sealed class PersistenceMonitorService(IServiceProvider services, IOpti
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             logger.LogError(ex, "Real-time persistence monitoring could not start; autostart changes are found only by scans.");
+            ReportUnavailable(services, $"it could not start ({ex.GetType().Name}).");
         }
         finally
         {
             Monitor?.Dispose();
             Monitor = null;
+        }
+    }
+
+    /// <summary>Section D review M4: health alert 9011 (PersistenceMonitorUnavailable) through the dispatcher.</summary>
+    internal static void ReportUnavailable(IServiceProvider services, string problem)
+    {
+        if (services.GetService<Alerts.IAlertDispatcher>() is { } alerts)
+        {
+            alerts.Post(Alerts.ScanAlerts.PersistenceMonitorUnavailable(problem, services.GetRequiredService<TimeProvider>().GetUtcNow()), health: true);
         }
     }
 
@@ -57,6 +67,12 @@ internal sealed class PersistenceMonitorService(IServiceProvider services, IOpti
         IPersistenceBaselineStore? file = EngineAccount.IsProtected()
             ? FileBaselineStore.TryCreate(options.ResolvedFolder, services.GetRequiredService<IQuarantineKeyProvider>(), QuarantineAccessPolicy.Default, logger)
             : null;
+        if (file is null && EngineAccount.IsProtected())
+        {
+            // Section D review M4: the protected baseline folder was refused; monitoring runs, but baselines again at every start.
+            ReportUnavailable(services, "its protected baseline store can't be used (see the engine log), so the baseline is kept in memory only.");
+        }
+
         if (file is null && !EngineAccount.IsProtected())
         {
             logger.LogWarning("Persistence monitor: not running protected (service, SYSTEM or elevated); the baseline is kept in memory only.");
@@ -67,6 +83,7 @@ internal sealed class PersistenceMonitorService(IServiceProvider services, IOpti
             NativeDirectoryWatchFactory.Instance, services.GetRequiredService<TimeProvider>(), logger,
             alerts: services.GetRequiredService<Alerts.IAlertDispatcher>(),
             reportHidden: EngineAccount.IsProtected(), // review H3: a non-elevated debug run is denied other users' locations by design
-            userActions: services.GetService<Remediation.PersistenceActionLedger>()); // D5: the user's own Block & remove / restore isn't re-alerted
+            userActions: services.GetService<Remediation.PersistenceActionLedger>(), // D5: the user's own Block & remove / restore isn't re-alerted
+            unavailable: problem => ReportUnavailable(services, problem));
     }
 }

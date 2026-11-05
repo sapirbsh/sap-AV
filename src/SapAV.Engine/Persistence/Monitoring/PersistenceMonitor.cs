@@ -84,6 +84,9 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     /// <summary>D5: the user's own Block &amp; remove / restore changes (held while in progress, then accepted without an alert).</summary>
     private readonly Remediation.PersistenceActionLedger? _userActions;
 
+    /// <summary>Section D review M4: raises the "persistence monitoring unavailable" health alert (engine text); null in most tests.</summary>
+    private readonly Action<string>? _unavailable;
+
     private readonly Lock _lock = new();
     private readonly Dictionary<PersistenceScope, ScopeState> _scopes = [];
     private readonly HashSet<PersistenceScope> _known = [];
@@ -126,7 +129,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         PersistenceMonitorOptions options, IScopedPersistenceCollector collector, IPersistenceScanner scanner, IPersistenceBaselineStore store,
         IRegistryWatchFactory registryWatches, IDirectoryWatchFactory folderWatches, TimeProvider time, ILogger logger,
         Func<string, int>? driveType = null, IRemoteFileProbe? remote = null, IAlertDispatcher? alerts = null, bool reportHidden = true,
-        Remediation.PersistenceActionLedger? userActions = null)
+        Remediation.PersistenceActionLedger? userActions = null, Action<string>? unavailable = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -143,6 +146,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
         _alerts = alerts;
         _reportHidden = reportHidden;
         _userActions = userActions;
+        _unavailable = unavailable;
         if (userActions is not null)
         {
             userActions.Accepted += OnUserAction;
@@ -357,18 +361,56 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
 
     // ---- The monitor thread ----
 
+    /// <summary>Section D review M4: the first restart delay after the monitor thread failed; it doubles, up to 5 minutes.</summary>
+    internal TimeSpan RestartDelay { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Times the monitor loop was started again after a failure (tests and the log).</summary>
+    internal int Restarts => Volatile.Read(ref _restarts);
+
+    private int _restarts;
+
+    /// <summary>
+    /// Runs the monitor loop; section D review M4: a failed loop is reported (health alert 9011) and started again after a
+    /// backoff (5 s, doubling up to 5 min). The restarted loop loads the saved baseline again.
+    /// </summary>
     private void Guarded(Action body)
+    {
+        for (int failures = 0; !_stop.IsCancellationRequested; )
+        {
+            try
+            {
+                body();
+                return;
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                failures++;
+                var delay = TimeSpan.FromTicks(Math.Min(RestartDelay.Ticks * (1L << Math.Min(failures - 1, 16)), TimeSpan.FromMinutes(5).Ticks));
+                _logger.LogError(ex, "The persistence monitor failed; it restarts in {Delay}.", delay);
+                ReportUnavailable($"its thread failed ({ex.GetType().Name}); it restarts in {delay.TotalSeconds:0} s.");
+                if (_stop.Token.WaitHandle.WaitOne(delay))
+                {
+                    return;
+                }
+
+                Interlocked.Increment(ref _restarts);
+            }
+        }
+    }
+
+    private void ReportUnavailable(string problem)
     {
         try
         {
-            body();
-        }
-        catch (OperationCanceledException) when (_stop.IsCancellationRequested)
-        {
+            _unavailable?.Invoke(problem);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            _logger.LogError(ex, "The persistence monitor stopped; autostart changes are found only by scans until the engine restarts.");
+            _logger.LogWarning(ex, "Persistence monitor: the health alert couldn't be raised.");
         }
     }
 
