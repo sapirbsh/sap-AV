@@ -92,12 +92,18 @@ public sealed class RealTimeQueueTests : IDisposable
     public void TheQueue_IsCappedByFiles_AndByPathCharacters_AndFreesBothOnCompletion()
     {
         var byFiles = new RealTimeQueue(Options(maxPending: 4));
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 3; i++)
         {
             Assert.Equal(OfferResult.Queued, byFiles.Offer(_root, $"f{i}.bin", false, _time.Now));
         }
 
-        Assert.Equal(OfferResult.Dropped, byFiles.Offer(_root, "f4.bin", false, _time.Now));
+        // Section D review H5: the last quarter is kept for owners below half their share, so one owner can't fill the queue.
+        Assert.Equal(OfferResult.Dropped, byFiles.Offer(_root, "f3.bin", false, _time.Now));
+        using var handle = SafeTree.Open(_temp.Path, SafeTree.DirectoryAccess, SafeTree.ShareAll, 0, out _, out _)!;
+        using var userRoot = new WatchedRoot(2, new WatchedFolder(_temp.Path, WatchedFolderKind.Downloads, "S-1-5-21-1000-2000-3000-1001"),
+            Core.Hashing.ExactPath.ToExtended(_temp.Path)!, handle, 1, "2", _time.Now);
+        Assert.Equal(OfferResult.Queued, byFiles.Offer(userRoot, "u0.bin", false, _time.Now));
+        Assert.Equal(OfferResult.Dropped, byFiles.Offer(userRoot, "u1.bin", false, _time.Now)); // the global cap
         Assert.Equal(OfferResult.Coalesced, byFiles.Offer(_root, "f0.bin", false, _time.Now)); // a waiting file still merges
 
         var byChars = new RealTimeQueue(Options(maxChars: 1024));

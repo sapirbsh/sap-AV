@@ -70,7 +70,10 @@ internal enum OfferResult
 /// <summary>
 /// The real-time queue (D1): <b>bounded</b> globally (<see cref="RealTimeOptions.MaxPendingFiles"/> files,
 /// <see cref="RealTimeOptions.MaxPendingPathChars"/> path characters) and <b>per watched folder</b> (review D1 H2: an eighth of
-/// each by default, so one folder's storm, e.g. a user's churning TEMP, puts only that folder into "rescan later");
+/// each by default, so one folder's storm, e.g. a user's churning TEMP, puts only that folder into "rescan later") and <b>per
+/// owner</b> (section D review H5: all of one user's folders together, or all machine-wide folders together, at most a quarter,
+/// and the last quarter of the queue only for owners below half their share, so many flooded folders of one user can't
+/// crowd out another user's file);
 /// <b>coalescing</b> (one entry per file however many events arrive; an event during the scan marks it to be looked at once
 /// more afterwards); <b>debounced</b> (due <see cref="RealTimeOptions.SettleDelay"/> after its last event, at most
 /// <see cref="RealTimeOptions.MaxSettleDelay"/> after its first) with a <b>minimum re-scan interval</b> per file (a file
@@ -90,6 +93,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
     private readonly Dictionary<int, PriorityQueue<PendingFile, (int Rank, long Sequence)>> _ready = [];
     private readonly Queue<int> _turns = new();
     private readonly Dictionary<int, (int Files, long Chars)> _perRoot = [];
+    private readonly Dictionary<string, (int Files, long Chars)> _perOwner = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _recent = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<string> _recentOrder = new();
     private long _sequence;
@@ -157,7 +161,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
     {
         lock (_gate)
         {
-            return FitsLocked(root.Id, length + KeyOverhead);
+            return FitsLocked(root, length + KeyOverhead);
         }
     }
 
@@ -192,7 +196,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
                 return OfferResult.Coalesced;
             }
 
-            if (!FitsLocked(root.Id, key.Length))
+            if (!FitsLocked(root, key.Length))
             {
                 return OfferResult.Dropped;
             }
@@ -200,7 +204,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
             var notBefore = _recent.TryGetValue(key, out var scanned) ? scanned + options.MinRescanInterval : DateTimeOffset.MinValue;
             file = new PendingFile(root, relative, key, now) { MotwHint = motwHint, NotBefore = notBefore, Due = Max(now + options.SettleDelay, notBefore) };
             _items.Add(key, file);
-            Charge(root.Id, 1, key.Length);
+            Charge(root, 1, key.Length);
             PushSettlingLocked(file);
             return OfferResult.Queued;
         }
@@ -390,25 +394,74 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
     internal (int Files, long Chars) RootShare =>
         (Math.Max(4, options.MaxPendingFiles / options.FolderShareDivisor), Math.Max(4096, options.MaxPendingPathChars / options.FolderShareDivisor));
 
-    private bool FitsLocked(int rootId, long chars)
+    /// <summary>Section D review H5: an owner's share (all its folders together): a quarter of each cap by default.</summary>
+    internal (int Files, long Chars) OwnerShare =>
+        (Math.Max(4, options.MaxPendingFiles / options.OwnerShareDivisor), Math.Max(4096, options.MaxPendingPathChars / options.OwnerShareDivisor));
+
+    /// <summary>
+    /// Section D review H5: whose fair share a root's files count against: the user of a per-user folder (their SID), or one
+    /// shared "machine" owner for the machine-wide folders (reading each file's owner when it is queued would cost an open per event).
+    /// </summary>
+    internal static string OwnerOf(WatchedRoot root) => root.Folder.Sid ?? "machine";
+
+    /// <summary>
+    /// Section D review H5: the owner uses less than half its share and the queue isn't full, so its folders' rescans run even
+    /// while the queue is busy with other owners' files.
+    /// </summary>
+    public bool OwnerUnderQuota(WatchedRoot root)
     {
-        var share = RootShare;
-        var used = _perRoot.GetValueOrDefault(rootId);
-        return _items.Count < options.MaxPendingFiles && _chars + chars <= options.MaxPendingPathChars
-            && used.Files < share.Files && used.Chars + chars <= share.Chars;
+        lock (_gate)
+        {
+            var used = _perOwner.GetValueOrDefault(OwnerOf(root));
+            var share = OwnerShare;
+            return used.Files < share.Files / 2 && used.Chars < share.Chars / 2 && _items.Count < options.MaxPendingFiles;
+        }
     }
 
-    private void Charge(int rootId, int files, long chars)
+    private bool FitsLocked(WatchedRoot root, long chars)
     {
-        var used = _perRoot.GetValueOrDefault(rootId);
+        var share = RootShare;
+        var used = _perRoot.GetValueOrDefault(root.Id);
+        if (!(_items.Count < options.MaxPendingFiles && _chars + chars <= options.MaxPendingPathChars && used.Files < share.Files && used.Chars + chars <= share.Chars))
+        {
+            return false;
+        }
+
+        // Section D review H5: the owner's share too, and the last quarter of the queue only for owners below half their share.
+        var ownerShare = OwnerShare;
+        var owner = _perOwner.GetValueOrDefault(OwnerOf(root));
+        if (owner.Files >= ownerShare.Files || owner.Chars + chars > ownerShare.Chars)
+        {
+            return false;
+        }
+
+        bool heavy = owner.Files >= ownerShare.Files / 2 || owner.Chars >= ownerShare.Chars / 2;
+        return !heavy || (_items.Count < options.MaxPendingFiles / 4 * 3 && _chars + chars <= options.MaxPendingPathChars / 4 * 3);
+    }
+
+    private void Charge(WatchedRoot root, int files, long chars)
+    {
+        var used = _perRoot.GetValueOrDefault(root.Id);
         used = (used.Files + files, used.Chars + chars);
         if (used.Files <= 0)
         {
-            _perRoot.Remove(rootId);
+            _perRoot.Remove(root.Id);
         }
         else
         {
-            _perRoot[rootId] = used;
+            _perRoot[root.Id] = used;
+        }
+
+        string ownerKey = OwnerOf(root);
+        var owner = _perOwner.GetValueOrDefault(ownerKey);
+        owner = (owner.Files + files, owner.Chars + chars);
+        if (owner.Files <= 0)
+        {
+            _perOwner.Remove(ownerKey);
+        }
+        else
+        {
+            _perOwner[ownerKey] = owner;
         }
 
         _chars += chars;
@@ -439,7 +492,7 @@ internal sealed class RealTimeQueue(RealTimeOptions options)
         file.Removed = true;
         if (_items.Remove(file.Key))
         {
-            Charge(file.Root.Id, -1, -file.Key.Length);
+            Charge(file.Root, -1, -file.Key.Length);
         }
     }
 

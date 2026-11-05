@@ -311,12 +311,12 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         _wake.Set();
     }
 
-    private bool TryTakeRescan(out RescanRequest request)
+    private bool TryTakeRescan(Func<RescanRequest, bool> eligible, out RescanRequest request)
     {
         lock (_rescanLock)
         {
             // Folder rescans (new folders) before whole-folder ones; any order within.
-            var next = _rescans.OrderBy(r => r.Value.Folder.Length == 0 ? 1 : 0).Select(r => r.Key).FirstOrDefault();
+            var next = _rescans.Where(r => eligible(r.Value)).OrderBy(r => r.Value.Folder.Length == 0 ? 1 : 0).Select(r => r.Key).FirstOrDefault();
             if (next is null)
             {
                 request = null!;
@@ -497,7 +497,7 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
             RevalidateSafely();
         }
 
-        if (_queue.HasRoom && HasRescans())
+        if (HasRescans()) // the rescan thread decides which may run now (section D review H5)
         {
             _rescanSignal.Set();
         }
@@ -561,7 +561,8 @@ internal sealed class RealTimeMonitor : IDirectoryWatchSink, IDisposable
         while (!_stop.IsCancellationRequested)
         {
             WaitHandle.WaitAny(waits, TimeSpan.FromSeconds(1));
-            while (!_stop.IsCancellationRequested && _queue.HasRoom && TryTakeRescan(out var request))
+            // Section D review H5: while the queue is busy, rescans of owners below half their share still run.
+            while (!_stop.IsCancellationRequested && TryTakeRescan(r => _queue.HasRoom || _queue.OwnerUnderQuota(r.Root), out var request))
             {
                 try
                 {

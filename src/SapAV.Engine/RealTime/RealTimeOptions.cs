@@ -36,6 +36,13 @@ public sealed class RealTimeOptions
     /// </summary>
     public int FolderShareDivisor { get; set; } = 8;
 
+    /// <summary>
+    /// Section D review H5: the folders of one owner (a user's own folders by their SID; all machine-wide folders together) may
+    /// hold at most 1/<c>OwnerShareDivisor</c> of each cap, and an owner already at half its share can't take the last quarter of
+    /// the queue, which stays free for owners below that. So one user with many watched folders can't fill the queue for others.
+    /// </summary>
+    public int OwnerShareDivisor { get; set; } = 4;
+
     /// <summary>Review D1 H2: an event name longer than this isn't queued; its folder is rescanned later instead.</summary>
     public int MaxQueuedNameLength { get; set; } = 2048;
 
@@ -124,6 +131,8 @@ public sealed class RealTimeOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPendingPathChars, 1024, nameof(MaxPendingPathChars));
         ArgumentOutOfRangeException.ThrowIfLessThan(FolderShareDivisor, 1, nameof(FolderShareDivisor));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(FolderShareDivisor, 1024, nameof(FolderShareDivisor));
+        ArgumentOutOfRangeException.ThrowIfLessThan(OwnerShareDivisor, 1, nameof(OwnerShareDivisor));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(OwnerShareDivisor, 1024, nameof(OwnerShareDivisor));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxQueuedNameLength, 64, nameof(MaxQueuedNameLength));
         ArgumentOutOfRangeException.ThrowIfNegative(MinRescanInterval.Ticks, nameof(MinRescanInterval));
         ArgumentOutOfRangeException.ThrowIfNegative(SettleDelay.Ticks, nameof(SettleDelay));
