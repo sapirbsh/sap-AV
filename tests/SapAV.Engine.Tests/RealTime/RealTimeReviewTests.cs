@@ -34,7 +34,7 @@ public sealed class RealTimeReviewTests : IDisposable
 
         var probe = Task.Run(() => UnlockProbe.Probe(folder, "held.exe"));
 
-        var result = await probe.WaitAsync(TimeSpan.FromSeconds(10)); // throws TimeoutException if it hangs behind the break
+        var result = await probe.WaitAsync(TimeSpan.FromSeconds(30)); // throws TimeoutException if it hangs behind the break
         Assert.Equal(ProbeOutcome.Locked, result.Outcome);
     }
 

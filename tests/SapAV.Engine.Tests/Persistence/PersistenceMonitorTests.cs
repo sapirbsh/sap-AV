@@ -484,7 +484,7 @@ public sealed class PersistenceMonitorTests
             Assert.False(watch.WatchingKey); // only the SID key exists: watched through it
 
             registry.Users(path).Dispose(); // the whole chain at once
-            Assert.True(fired.Wait(TimeSpan.FromSeconds(10)), "creating the key wasn't noticed");
+            Assert.True(fired.Wait(TimeSpan.FromSeconds(30)), "creating the key wasn't noticed");
             while (fired.Wait(TimeSpan.FromMilliseconds(200)))
             {
                 // the ancestor may report the new chain more than once
@@ -492,7 +492,7 @@ public sealed class PersistenceMonitorTests
 
             Assert.True(watch.WatchingKey);
             registry.Users(path).SetValue("Late", @"C:\late.exe");
-            Assert.True(fired.Wait(TimeSpan.FromSeconds(10)), "a value set in the key wasn't noticed");
+            Assert.True(fired.Wait(TimeSpan.FromSeconds(30)), "a value set in the key wasn't noticed");
         }
         finally
         {

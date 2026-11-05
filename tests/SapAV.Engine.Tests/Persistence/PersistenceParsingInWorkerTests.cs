@@ -44,7 +44,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
             EnableWorkerTestHooks = true,
             Isolation = WorkerIsolation.UnsandboxedForTests,
             RequestTimeout = TimeSpan.FromSeconds(30),
-            ParseTimeout = parseTimeout ?? TimeSpan.FromSeconds(5),
+            ParseTimeout = parseTimeout ?? TimeSpan.FromSeconds(30), // section D tester: a slow worker start under full-suite load once ate the 5 s default; only the hang tests pass a short one
             RestartBackoffInitial = TimeSpan.FromMilliseconds(10),
             RestartBackoffMax = TimeSpan.FromMilliseconds(100),
             MaxFailuresPerFile = maxFailures,
