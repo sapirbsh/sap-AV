@@ -825,7 +825,7 @@ internal sealed class PersistenceMonitor : IDirectoryWatchSink, IDisposable
     {
         int logged = 0, initial = 0, initialFlagged = 0;
         var all = new List<PersistenceFinding>();
-        foreach (var group in batch.GroupBy(p => (Sid: p.Entries[0].UserSid ?? p.Record.Scope.UserSid,
+        foreach (var group in batch.GroupBy(p => (Sid: p.Entries[0].BudgetOwner ?? p.Entries[0].UserSid ?? p.Record.Scope.UserSid, // section D review H3: an unregistered task file: its file owner
             UserWritable: p.Record.Scope.UserSid is not null || p.Record.Scope == TasksScope || p.Entries[0].UserSid is not null)))
         {
             var items = group.ToArray();

@@ -49,6 +49,15 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
         public int OverCap { get; set; }
     }
 
+    /// <summary>
+    /// Section D review H3: the budget owner of each unregistered task file (not the system's, not in TaskCache) seen so far: its
+    /// file owner's SID, or <see cref="PersistenceEntry.UnregisteredBudget"/>. Kept across collections, so a file whose parse
+    /// result is reused unopened still gets it. Bounded.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _unregistered = new(StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxUnregisteredKept = 20_000;
+
     public string Name => "scheduled tasks";
 
     /// <summary>D4: the Tasks folder and its subfolders (a new, changed or deleted definition file).</summary>
@@ -97,7 +106,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
                 }
             }
 
-            CollectDeferred(context, state);
+            CollectDeferred(context, state, path => _unregistered.GetValueOrDefault(path) ?? PersistenceEntry.UnregisteredBudget);
         }
         finally
         {
@@ -114,7 +123,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
     }
 
     /// <summary>D4 review H5: the untrusted task files, after all the others, then one issue for those over the cap.</summary>
-    private static void CollectDeferred(PersistenceContext context, WalkState state)
+    private static void CollectDeferred(PersistenceContext context, WalkState state, Func<string, string?> budgetOwner)
     {
         foreach (var chunk in state.Deferred.Chunk(WorkerLimits.MaxParseBatch))
         {
@@ -128,7 +137,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
             {
                 try
                 {
-                    CollectTask(context, chunk[i].TaskPath, results[i]);
+                    CollectTask(context, chunk[i].TaskPath, results[i], budgetOwner(chunk[i].TaskPath));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
                 {
@@ -146,16 +155,19 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
     }
 
     /// <summary>The file's owner is SYSTEM, Administrators or TrustedInstaller (the Task Scheduler writes registered tasks as SYSTEM).</summary>
-    private static bool IsTrustedOwner(SafeFileHandle file)
+    private static bool IsTrustedOwner(SafeFileHandle file) => OwnerSid(file) is { } owner && TrustedOwners.Contains(owner);
+
+    /// <summary>The file owner's SID, or null when it can't be read.</summary>
+    private static string? OwnerSid(SafeFileHandle file)
     {
         var sd = Quarantine.Native.QuarantineNative.TryGetSecurity(file, Quarantine.Native.QuarantineNative.OwnerSecurityInformation, out _);
         try
         {
-            return sd is not null && new System.Security.AccessControl.RawSecurityDescriptor(sd, 0).Owner is { } owner && TrustedOwners.Contains(owner.Value);
+            return sd is null ? null : new System.Security.AccessControl.RawSecurityDescriptor(sd, 0).Owner?.Value;
         }
         catch (ArgumentException)
         {
-            return false;
+            return null;
         }
     }
 
@@ -265,7 +277,7 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
                 {
                     if (context.TryReuseUnchanged(WorkerParseKind.ScheduledTask, taskPath, out var kept))
                     {
-                        CollectTask(context, taskPath, kept); // D4 review H5: the folder watch reported no change
+                        CollectTask(context, taskPath, kept, _unregistered.GetValueOrDefault(taskPath)); // D4 review H5: the folder watch reported no change
                         continue;
                     }
 
@@ -273,10 +285,13 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
                     {
                         if ((trustedFile?.Invoke(file, taskPath) ?? IsTrustedOwner(file)) || InTaskCache(context, taskPath))
                         {
+                            _unregistered.TryRemove(taskPath, out _);
                             opened.Add((file, taskPath));
                         }
                         else if (state.Deferred.Count < context.Limits.MaxUntrustedTaskFiles)
                         {
+                            // Section D review H3: judged on the file owner's budget, never the principal it names or the engine's.
+                            Remember(taskPath, OwnerSid(file) ?? PersistenceEntry.UnregisteredBudget);
                             state.Deferred.Add((file, taskPath)); // D4 review H5: after the system's own tasks
                         }
                         else
@@ -326,7 +341,19 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
     private static void TaskUnreadable(PersistenceContext context, string taskPath, Exception ex) =>
         context.AddIssue(PersistenceKind.ScheduledTask, null, taskPath, PersistenceIssueReason.Error, $"The task can't be read ({ex.GetType().Name}).");
 
-    private static void CollectTask(PersistenceContext context, string taskPath, PersistenceParseResult parsed)
+    /// <summary>Remembers an unregistered task file's budget owner (bounded: past the cap the map starts over).</summary>
+    private void Remember(string taskPath, string owner)
+    {
+        if (_unregistered.Count >= MaxUnregisteredKept)
+        {
+            _unregistered.Clear();
+        }
+
+        _unregistered[taskPath] = owner;
+    }
+
+    /// <param name="budgetOwner">Section D review H3: set for an unregistered task file (see <see cref="PersistenceEntry.BudgetOwner"/>).</param>
+    private static void CollectTask(PersistenceContext context, string taskPath, PersistenceParseResult parsed, string? budgetOwner = null)
     {
         if (parsed.Status == PersistenceParseStatus.Malformed)
         {
@@ -357,13 +384,13 @@ internal sealed class ScheduledTaskSource(string? tasksRoot = null, Func<SafeFil
                     ? ResolveSessionComHandler(context, clsid, environment)
                     : ResolveComHandler(context, clsid, user, profile?.HiveLoaded == true, environment);
                 context.Add(new PersistenceEntry(PersistenceKind.ScheduledTask, user, taskPath, $"ComHandler[{i}]",
-                    $"{clsid:B} {action.ComData}".TrimEnd(), resolution, task.Enabled, comClassId: clsid));
+                    $"{clsid:B} {action.ComData}".TrimEnd(), resolution, task.Enabled, comClassId: clsid) { BudgetOwner = budgetOwner });
             }
             else
             {
                 string command = $"{action.Command} {action.Arguments}".Trim();
                 context.Add(new PersistenceEntry(PersistenceKind.ScheduledTask, user, taskPath, $"Exec[{i}]", command,
-                    context.Resolver.ResolveProgram(action.Command, action.Arguments, environment, action.WorkingDirectory), task.Enabled));
+                    context.Resolver.ResolveProgram(action.Command, action.Arguments, environment, action.WorkingDirectory), task.Enabled) { BudgetOwner = budgetOwner });
             }
         }
     }

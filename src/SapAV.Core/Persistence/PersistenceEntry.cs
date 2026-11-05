@@ -116,6 +116,19 @@ public sealed partial record PersistenceEntry
     /// <summary>Scheduled-task COM handler actions only: the handler's CLSID.</summary>
     public Guid? ComClassId { get; }
 
+    /// <summary>
+    /// Section D review H3: whose fair share judging this entry counts against when that isn't <see cref="UserSid"/>. Set for a
+    /// scheduled task from a definition file the system didn't write (not owned by SYSTEM / Administrators / TrustedInstaller, not
+    /// in the Task Scheduler's TaskCache): its <see cref="UserSid"/> comes from the attacker-written principal, so the budget is the
+    /// file owner's SID (or <see cref="UnregisteredBudget"/> when the owner can't be read), never the principal's or the engine's.
+    /// Engine bookkeeping only: not serialized, not part of the entry ID or fingerprint.
+    /// </summary>
+    [JsonIgnore]
+    public string? BudgetOwner { get; init; }
+
+    /// <summary>The shared budget of unregistered task files whose owner can't be read.</summary>
+    public const string UnregisteredBudget = "unregistered";
+
     /// <summary>The primary MITRE technique of <see cref="Kind"/> (X1).</summary>
     public string TechniqueId => PersistenceKinds.TechniqueId(Kind);
 
