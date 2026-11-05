@@ -756,6 +756,42 @@ Remaining:
   and record the worker generation.
 - **D4 follow-up (L6):** one owner's pass can hold the single thread for about 90 s. Cap scan time per owner per round.
 
+**Notes from D5 (Block & remove, built `55097f0`…`bfe6fed`).**
+- **What each type does:**
+  - Registry values are backed up exactly, then deleted by compare-and-delete.
+  - Winlogon Shell/Userinit are reset to the Windows default.
+  - Services are disabled through the SCM and stopped, never deleted.
+  - Tasks are disabled through the Task Scheduler API, with their XML backed up.
+  - Startup items are moved into quarantine.
+- **Rules:** entry IDs are re-verified by a fresh collection. Machine entries are admin-only; a user acts only where
+  their own token could make the change. Backups are HMAC'd in `%ProgramData%\sap-AV\PersistenceBackups`. Event IDs
+  3002/3003 (X2 table).
+- **Deferred:**
+  - **F5:** an admin can disable a Boot or System-start driver, which can leave the machine unbootable. Refuse it, or ask
+    for an extra confirmation.
+  - **D5 follow-up:**
+    - A task deleted after blocking can't be re-registered from the backed-up XML; restore only re-enables.
+    - Service restore doesn't start the service again.
+    - The registry compare-and-delete isn't atomic (a tiny window under the same handle).
+    - If the backup folder can't be created once, Block & remove stays unavailable until the engine restarts.
+    - `PersistenceBackupList` reads every record and isn't rate-limited.
+    - Translating a task principal name may contact a DC.
+    - Startup names ending in a dot or space fail in the quarantine.
+    - Restoring a deleted value is refused even when a value with the same bytes is back.
+    - Judging other values in the same key can be delayed up to 2 min during an action.
+  - **Not covered yet:** RunOnceEx and TaskCache-only tasks can't be blocked, because C2 doesn't collect them.
+  - **D5 immediate review (no Critical).** Fixed in the D5 fix round: H1 (the ledger accepted every value in the
+    acted-on key), M1 (task authorization by principal only), M2 (a user could undo an admin's block; `BlockedBy`
+    added), M3 (boot-critical services are refused without `ConfirmCritical`), L2. Remaining:
+    - **L1:** `ClientMaySet` checks access on a different open than the later change. Both refuse links; do the check on
+      the same handle.
+    - **L3:** the service hold prefix has no trailing separator (`FOO` also holds `FOOBAR`).
+    - **L4:** service restore doesn't check that it's the same service (deleted and recreated under the same name).
+    - **For the section review:** the SID-to-scope mapping in the scoped collector, `ClientAccess.Check` /
+      `CanAddFileNextTo`, and requester handling in `QuarantineHandleAsync` weren't fully reviewed.
+  - **Never run:** the gated real-Task-Scheduler round trip (`RealTaskSchedulerTests`). It needs an elevated run with
+    `SAPAV_TEST_ALLOW_HKLM=1`.
+
 **D1 immediate review (no Critical).** Fixed in the D1 fix round:
 - H1: oplock holders stalled the real-time threads.
 - H2: no per-root queue quota or fairness.
@@ -922,6 +958,8 @@ YARA rules may override with their own `mitre` meta value.
   | 2001 | MaliciousPersistence | Error | Autostart entry whose target is Malicious (C3) |
   | 2002 | SuspiciousPersistence | Warning | Suspicious autostart entry (C3 rules) |
   | 3001 | QuarantineRestored | Information | User restored an item from quarantine (B2) |
+  | 3002 | PersistenceBlocked | Information | User's Block & remove of an autostart entry, backed up first (D5) |
+  | 3003 | PersistenceRestored | Information | User restored an autostart entry from its D5 backup |
   | 9001 | AlertsSuppressed | Warning | Summary of alerts held back by aggregation/rate limits (B3) |
   | 9002 | AutoQuarantineBurst | Warning | Auto-quarantine rate limit hit (B3) |
   | 9003 | ScanRulesDegraded | Warning | Zero rules loaded, rule-file errors or a failed rule load (B3; counts only, no worker text) |

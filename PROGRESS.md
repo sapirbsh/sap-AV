@@ -9,12 +9,12 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | A — Detection engine | **Done** (A1–A7, section test + review, High fixes) |
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
-| D — Real-time + VirusTotal | In progress (D1–D4 done, immediate reviews fixed; next D5) |
+| D — Real-time + VirusTotal | In progress (D1–D5 built, immediate reviews fixed; section tester + reviewer pass next) |
 | E — Cracked-software threat pack | Not started |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
-Tests (after D4): Core 1423 passed + 1 skipped, Engine 722 passed + 15 skipped. Simulated clean machine: 0 failed.
+Tests (after D5): Core 1431 passed + 1 skipped, Engine 754 passed + 16 skipped. Simulated clean machine: 0 failed.
 Build: 0 warnings (Debug and Release). CI on windows-latest: green (`9628568`).
 
 ## Section A — Detection engine (done)
@@ -238,7 +238,28 @@ be 34 s.
   - flooding the user-writable Tasks folder.
 - **Also fixed:** M4 (dead watches) and M5 (budgets per entry user). The rest is in ROADMAP under D4.
 
-**Next:** D5 (Block & remove), then the section D tester + reviewer pass.
+**D5 (Block & remove) is done** (`55097f0`…`6a93fa7`). Nothing happens automatically; every action is an explicit
+request over the pipe, and everything is backed up first.
+- **What each type does:**
+  - **Registry autostarts:** the exact value is backed up and deleted.
+  - **Winlogon Shell/Userinit:** reset to the Windows default.
+  - **Services:** disabled and stopped, never deleted. Boot or critical services need an explicit confirmation.
+  - **Scheduled tasks:** disabled through the Task Scheduler.
+  - **Startup items:** moved into quarantine.
+- **Restore:** puts back exactly what was removed, and refuses if something else is there now.
+- **Who may do what:**
+  - Machine-wide entries are admin-only.
+  - A standard user may act only on their own entries, and only where their own account could make the change.
+  - A user can't undo an administrator's block.
+- **Event IDs:** 3002 (blocked) and 3003 (restored).
+- **Immediate review:** no Critical. Fixed:
+  - H1: blocking one Run value silently accepted the other values in the same key;
+  - M1: task authorization went by "runs as" instead of the task's own permissions;
+  - M2: a user could undo an admin's block;
+  - M3: an admin could disable boot-critical drivers in one click;
+  - L2.
+
+**Next:** the section D tester + reviewer pass, then fix until clean.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -252,5 +273,5 @@ be 34 s.
 
 ## What's left
 
-- **D:** Block & remove (D5), then the section D tester + reviewer pass. (D1–D4 done.)
+- **D:** the section D tester + reviewer pass. (D1–D5 done.)
 - Then E → F → G, ending with the Phase 1 security review (G5).
