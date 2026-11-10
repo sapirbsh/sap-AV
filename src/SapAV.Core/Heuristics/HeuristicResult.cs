@@ -34,6 +34,15 @@ public enum HeuristicKind
 
     /// <summary>An executable with plain Offline set (<c>attrib +O</c>): scanned anyway; a weak sign it was hidden on purpose (review C H3).</summary>
     PlainOfflineAttribute,
+
+    /// <summary>E3: an unsigned (or badly signed) PE in a user's AppData with a machine-generated name (infostealer / dropper copies).</summary>
+    RandomNameAppDataExecutable,
+
+    /// <summary>E3: an untrusted executable named like a known cryptominer (<c>xmrig.exe</c>, <c>nbminer.exe</c>).</summary>
+    MinerProgramName,
+
+    /// <summary>E3: a small script whose text starts a cryptominer (pool URL, <c>--donate-level</c>, a Monero wallet, ...).</summary>
+    MinerScript,
 }
 
 /// <summary>One heuristic that fired, with its score contribution.</summary>
@@ -41,7 +50,19 @@ public enum HeuristicKind
 /// <param name="Score">Points added to <see cref="HeuristicResult.Score"/>.</param>
 /// <param name="Reason">Human-readable reason, e.g. "double extension .pdf.exe".</param>
 /// <param name="TechniqueId">MITRE technique for this finding.</param>
-public sealed record HeuristicFinding(HeuristicKind Kind, int Score, string Reason, string TechniqueId);
+public sealed record HeuristicFinding(HeuristicKind Kind, int Score, string Reason, string TechniqueId)
+{
+    /// <summary>E3: the threat category this kind of finding points to (Infostealer, Miner), or null for the general ones.</summary>
+    public ThreatCategory? Category => CategoryOf(Kind);
+
+    /// <summary>The category of a heuristic kind (fixed per kind, so nothing extra crosses the worker wire).</summary>
+    public static ThreatCategory? CategoryOf(HeuristicKind kind) => kind switch
+    {
+        HeuristicKind.RandomNameAppDataExecutable => ThreatCategory.Infostealer,
+        HeuristicKind.MinerProgramName or HeuristicKind.MinerScript => ThreatCategory.Miner,
+        _ => null,
+    };
+}
 
 /// <summary>Facts from earlier pipeline steps that heuristics use.</summary>
 /// <param name="Signature">The Authenticode result (A3), or null if it wasn't checked.</param>
@@ -104,6 +125,8 @@ public sealed record HeuristicResult
         string primary = ordered[0].TechniqueId;
         var secondaries = ordered.Select(f => f.TechniqueId).Distinct(StringComparer.Ordinal).Where(t => t != primary).ToArray();
         string reason = $"Heuristic score {Score} (threshold {Threshold}): " + string.Join("; ", Findings.Select(f => f.Reason));
-        return new Detection(Verdict.Suspicious, reason, primary, DetectionSource.Heuristic, secondaries);
+        // E3: the category of the strongest finding that names one (a random-named AppData program, a miner); Malware otherwise.
+        var category = ordered.FirstOrDefault(f => f.Category is not null)?.Category ?? ThreatCategory.Malware;
+        return new Detection(Verdict.Suspicious, reason, primary, DetectionSource.Heuristic, secondaries, category);
     }
 }

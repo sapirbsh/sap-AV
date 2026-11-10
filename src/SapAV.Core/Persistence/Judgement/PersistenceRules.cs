@@ -65,7 +65,7 @@ public static class PersistenceRules
     public static IReadOnlyList<IPersistenceRule> Default { get; } =
     [
         new TargetScanRule(), new LocationRule(), new SignatureRule(), new IfeoRule(), new WinlogonRule(), new MissingTargetRule(),
-        new UnquotedPathRule(), new HostRule(), new ComOverrideRule(), new ShortcutMismatchRule(),
+        new UnquotedPathRule(), new HostRule(), new ComOverrideRule(), new ShortcutMismatchRule(), new MinerCommandLineRule(),
     ];
 
     /// <summary>
@@ -448,6 +448,38 @@ public static class PersistenceRules
             {
                 context.Add(PersistenceRuleIds.ShortcutTargetMismatch, 60,
                     "The shortcut's target differs between its sources, so what it shows may not be what it runs", MitreTechniqueIds.ShortcutModification, S.Strong);
+            }
+        }
+    }
+
+    /// <summary>
+    /// E3: an autostart that starts a cryptominer (<see cref="Heuristics.MinerRules.AnalyzeCommandLine"/> on the stored command, plus
+    /// a known miner program as any target): 70 (strong, T1496.001, category Miner). Some miner signs short of that: 20.
+    /// </summary>
+    public sealed class MinerCommandLineRule : IPersistenceRule
+    {
+        public void Evaluate(PersistenceRuleContext context)
+        {
+            var analysis = Heuristics.MinerRules.AnalyzeCommandLine(context.Entry.CommandLine);
+            var reasons = analysis.Reasons.ToList();
+            int score = analysis.Score;
+            const string program = "a known cryptominer program";
+            if (!reasons.Contains(program)
+                && context.Entry.Resolution.AllCommands.Any(c => c.TargetPath is { } path && Heuristics.MinerRules.IsMinerName(path)))
+            {
+                score += 45;
+                reasons.Add(program);
+            }
+
+            if (score >= Heuristics.MinerRules.CommandLineThreshold)
+            {
+                context.Add(PersistenceRuleIds.MinerCommandLine, 70, $"The autostart starts a cryptominer ({string.Join(", ", reasons)})",
+                    MitreTechniqueIds.ComputeHijacking, S.Strong, ThreatCategory.Miner);
+            }
+            else if (score >= 30)
+            {
+                context.Add(PersistenceRuleIds.MinerCommandLine, 20, $"The autostart's command line has cryptominer signs ({string.Join(", ", reasons)})",
+                    MitreTechniqueIds.ComputeHijacking, S.Normal, ThreatCategory.Miner);
             }
         }
     }

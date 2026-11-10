@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Frozen;
 using Microsoft.Win32.SafeHandles;
 using SapAV.Core.Hashing;
 using SapAV.Core.Mitre;
@@ -40,6 +41,9 @@ public interface IFileHeuristics
 /// <item><term>Unsigned PE</term><description><see cref="UnsignedScore"/>, T1204.002</description></item>
 /// <item><term>Executable/script in Temp, Downloads or AppData</term><description><see cref="RiskyFolderScore"/>, T1204.002</description></item>
 /// <item><term>Executable/script with an Internet/Restricted-zone Mark-of-the-Web</term><description><see cref="InternetOriginScore"/>, T1204.002</description></item>
+/// <item><term>E3: unsigned PE in AppData with a machine-generated name</term><description><see cref="RandomNameScore"/>, T1204.002, Infostealer</description></item>
+/// <item><term>E3: untrusted executable named like a known miner</term><description><see cref="MinerNameScore"/>, T1496.001, Miner</description></item>
+/// <item><term>E3: script whose text starts a miner</term><description><see cref="MinerScriptScore"/>, T1496.001, Miner</description></item>
 /// </list>
 /// <para>
 /// To keep false positives low, a file with a <b>trusted</b> signature (Microsoft or OtherTrusted) gets no
@@ -70,6 +74,25 @@ public sealed class FileHeuristics : IFileHeuristics
 
     /// <summary>Plain Offline on an executable (<c>attrib +O</c>): weak. Hidden from naive scanners, but also set by old HSM software.</summary>
     public const int PlainOfflineScore = 10;
+
+    /// <summary>
+    /// E3: a machine-generated name on an unsigned PE in AppData. Fires only together with the unsigned (15) and AppData (15)
+    /// findings, so all three make exactly the threshold (60); signed programs never get it.
+    /// </summary>
+    public const int RandomNameScore = 30;
+
+    /// <summary>E3: an untrusted executable named like a known miner; with "unsigned" (15) it reaches the threshold.</summary>
+    public const int MinerNameScore = 45;
+
+    /// <summary>E3: a script that starts a miner (<see cref="MinerRules.AnalyzeCommandLine"/> says miner): strong on its own.</summary>
+    public const int MinerScriptScore = 60;
+
+    /// <summary>E3: scripts up to this size are read for miner command lines (only the first bytes of larger ones).</summary>
+    public const int MaxScriptBytes = 64 * 1024;
+
+    /// <summary>Script extensions whose text is checked for miner command lines.</summary>
+    private static readonly FrozenSet<string> MinerScriptExtensions =
+        new[] { ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".wsf" }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Section-data entropy (bits/byte) at or above which a PE counts as packed or encrypted.</summary>
     public const double HighEntropyBitsPerByte = 7.2;
@@ -225,6 +248,27 @@ public sealed class FileHeuristics : IFileHeuristics
                 $"executable in a {folder} folder", MitreTechniqueIds.MaliciousFile));
         }
 
+        // E3: random-named unsigned program in AppData (infostealer / dropper copies). Only with a checked, untrusted signature:
+        // legitimate per-user installs (Discord, Teams, VS Code) are signed and never get it.
+        if (pe is not null && context.Signature is { IsChecked: true, IsTrusted: false }
+            && FileNameRules.ClassifyFolder(path) == RiskyFolder.AppData && FileNameRules.RandomNameReason(path) is { } random)
+        {
+            findings.Add(new(HeuristicKind.RandomNameAppDataExecutable, RandomNameScore,
+                $"unsigned program in AppData whose name looks machine-generated ({random})", MitreTechniqueIds.MaliciousFile));
+        }
+
+        // E3: known miner programs, and scripts that start one.
+        if (isExecutable && !trusted && MinerRules.IsMinerName(path))
+        {
+            findings.Add(new(HeuristicKind.MinerProgramName, MinerNameScore, "executable named like a known cryptominer", MitreTechniqueIds.ComputeHijacking));
+        }
+
+        if (!trusted && MinerScriptExtensions.Contains(Path.GetExtension(path)) && MinerScript(content, length) is { IsMiner: true } miner)
+        {
+            findings.Add(new(HeuristicKind.MinerScript, MinerScriptScore,
+                $"script starts a cryptominer ({string.Join(", ", miner.Reasons)})", MitreTechniqueIds.ComputeHijacking));
+        }
+
         if (isExecutable && !trusted && plainOffline)
         {
             findings.Add(new(HeuristicKind.PlainOfflineAttribute, PlainOfflineScore, "executable with the Offline attribute set by hand (no cloud or HSM provider behind it)",
@@ -237,6 +281,21 @@ public sealed class FileHeuristics : IFileHeuristics
                 mark.HostUrl is { } url ? $"executable downloaded from the internet ({url})" : "executable downloaded from the internet",
                 MitreTechniqueIds.MaliciousFile));
         }
+    }
+
+    /// <summary>
+    /// E3: the miner analysis of a script's first <see cref="MaxScriptBytes"/> bytes (UTF-16 with a BOM, else UTF-8 / ANSI). Only
+    /// the text is looked at; nothing is run.
+    /// </summary>
+    private static MinerAnalysis MinerScript(Content content, long length)
+    {
+        var bytes = new byte[(int)Math.Min(length, MaxScriptBytes)];
+        int read = ReadFully(content, bytes, 0);
+        var span = bytes.AsSpan(0, read);
+        string text = span.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE]) ? System.Text.Encoding.Unicode.GetString(span[2..])
+            : span.StartsWith((ReadOnlySpan<byte>)[0xFE, 0xFF]) ? System.Text.Encoding.BigEndianUnicode.GetString(span[2..])
+            : System.Text.Encoding.UTF8.GetString(span);
+        return MinerRules.AnalyzeCommandLine(text);
     }
 
     /// <summary>Entropy of the PE section data (not headers or overlay), or null if there is too little.</summary>

@@ -95,6 +95,7 @@ public static class PersistenceRuleIds
     public const string InlineCommand = "inline-command";
     public const string RemotePayload = "remote-payload";
     public const string UserComOverride = "user-com-override";
+    public const string MinerCommandLine = "miner-command-line";
     public const string RuleFailed = "rule-failed";
 }
 
