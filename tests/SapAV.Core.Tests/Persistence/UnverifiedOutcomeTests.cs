@@ -265,14 +265,13 @@ public class UnverifiedOutcomeTests
         Assert.Equal((Verdict.Suspicious, PersistencePriority.High), (judgement.Verdict, judgement.Priority));
     }
 
-    [Theory]
-    [InlineData(@"powershell -enc AAAA")]
-    [InlineData(@"powershell -w hidden -Command Get-Date")]
-    public void EncodedOrHiddenAlone_StaysBelowTheThreshold_ButIsUnverified(string command)
+    [Fact]
+    public void HiddenAlone_StaysBelowTheThreshold_ButIsUnverified_WhileEncodedAloneIsSuspiciousSinceE4()
     {
-        var judgement = JudgeScanned(Resolve(command));
+        Assert.Equal(PersistenceOutcome.Unverified, JudgeScanned(Resolve(@"powershell -w hidden -Command Get-Date")).Outcome);
 
-        Assert.Equal(PersistenceOutcome.Unverified, judgement.Outcome);
+        // E4: an encoded command is script persistence in itself (decoded for display).
+        Assert.Equal(PersistenceOutcome.Suspicious, JudgeScanned(Resolve(@"powershell -enc AAAA")).Outcome);
     }
 
     [Theory]

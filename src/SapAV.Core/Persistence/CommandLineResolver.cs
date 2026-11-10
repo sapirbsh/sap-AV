@@ -28,8 +28,15 @@ namespace SapAV.Core.Persistence;
 /// <see cref="TargetUnresolvedReason.HostArgumentsNotUnderstood"/>; the command is resolved again with cmd's <c>^</c> escapes removed; <c>start</c> and
 /// <c>call</c> skipped; other built-ins are <see cref="ResolutionFlag.InlineCommand"/>; every command of a <c>&amp;</c> / <c>|</c> chain is resolved),
 /// <c>powershell|pwsh -File &lt;script&gt;</c> (<c>-Command</c>, <c>-EncodedCommand</c> and their prefixes are inline),
-/// <c>wscript|cscript &lt;script&gt;</c>, <c>mshta &lt;hta|url|javascript:&gt;</c>. A host elsewhere (a copied
-/// "rundll32.exe" in Temp) is not a host: it is the target itself. Nesting is followed <see cref="MaxDepth"/> levels.</item>
+/// <c>wscript|cscript &lt;script&gt;</c>, <c>mshta &lt;hta|url|javascript:&gt;</c>. E4 (review C follow-up M4, review C M9):
+/// payloads Microsoft binaries start from their arguments are extracted and flagged <see cref="ResolutionFlag.LauncherPayload"/>:
+/// <c>rundll32 url.dll,FileProtocolHandler|OpenURL</c>, <c>shell32.dll,ShellExec_RunDLL</c>, <c>zipfldr.dll,RouteTheCall</c>,
+/// <c>pcwutl.dll,LaunchApplication</c>, <c>advpack / setupapi</c> INF installs; <c>shell32.dll,Control_RunDLL &lt;cpl&gt;</c> adds the
+/// <c>.cpl</c> as another command; <c>regsvr32</c> judges every DLL and a local <c>/i:</c> scriptlet; <c>conhost [--headless] &lt;command&gt;</c>,
+/// <c>forfiles /c &lt;command&gt;</c>, <c>pcalua -a &lt;program&gt;</c>, <c>explorer &lt;program&gt;</c> (explorer.exe in the Windows folder),
+/// <c>msiexec /i|/package &lt;msi&gt;</c> and <c>/y|/z &lt;dll&gt;</c>. What can't be extracted is unresolved (so Unverified), never the
+/// launcher itself. A host elsewhere (a copied "rundll32.exe" in Temp) is not a host: it is the target itself. Nesting is followed
+/// <see cref="MaxDepth"/> levels.</item>
 /// <item>The result is normalized with ExactPath (exact names, trailing dots/spaces kept).</item>
 /// </list>
 /// Bounded: input over <see cref="EnvironmentBlock.MaxExpandedLength"/> is <see cref="TargetUnresolvedReason.TooLong"/>,
@@ -464,13 +471,18 @@ public sealed class CommandLineResolver(IPathProbe probe)
 
         return host switch
         {
-            "rundll32.exe" => Rundll32(program, args, state),
+            "rundll32.exe" => Rundll32(program, args, state, depth),
             "regsvr32.exe" => Regsvr32(program, args, state),
             "cmd.exe" => Cmd(program, args, state, depth),
             "powershell.exe" => PowerShell(program, args, state, positionalIsFile: false),
             "pwsh.exe" => PowerShell(program, args, state, positionalIsFile: true),
             "wscript.exe" or "cscript.exe" => ScriptHost(program, args, state),
             "mshta.exe" => Mshta(program, args, state),
+            "conhost.exe" => Conhost(program, args, state, depth),
+            "forfiles.exe" => Forfiles(program, args, state, depth),
+            "pcalua.exe" => Pcalua(program, args, state, depth),
+            "explorer.exe" => Explorer(program, args, state),
+            "msiexec.exe" => Msiexec(program, args, state),
             _ => state.Resolved(program, args),
         };
     }
@@ -479,7 +491,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
     {
         string name = Path.GetFileName(program).ToLowerInvariant();
         if (name is not ("rundll32.exe" or "regsvr32.exe" or "cmd.exe" or "powershell.exe" or "pwsh.exe" or "wscript.exe"
-            or "cscript.exe" or "mshta.exe"))
+            or "cscript.exe" or "mshta.exe" or "conhost.exe" or "forfiles.exe" or "pcalua.exe" or "explorer.exe" or "msiexec.exe"))
         {
             return null;
         }
@@ -492,7 +504,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
                 Path.Join(systemRoot, "System32"), Path.Join(systemRoot, "SysWOW64"),
                 Path.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0"), Path.Join(systemRoot, "SysWOW64", "WindowsPowerShell", "v1.0"),
             ];
-            if (systemFolders.Any(f => string.Equals(f, folder, StringComparison.OrdinalIgnoreCase)))
+            if (systemFolders.Any(f => string.Equals(f, folder, StringComparison.OrdinalIgnoreCase))
+                || (name == "explorer.exe" && string.Equals(systemRoot.TrimEnd('\\'), folder.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)))
             {
                 return name;
             }
@@ -508,7 +521,7 @@ public sealed class CommandLineResolver(IPathProbe probe)
         return null;
     }
 
-    private ResolvedCommand Rundll32(string host, string args, State state)
+    private ResolvedCommand Rundll32(string host, string args, State state, int depth)
     {
         state.Flags.Add(ResolutionFlag.InterpreterHost);
         string rest = args.TrimStart();
@@ -543,9 +556,148 @@ public sealed class CommandLineResolver(IPathProbe probe)
             after = stop < 0 ? string.Empty : rest[stop..];
         }
 
-        return LibraryPayload(host, dll, after.TrimStart(',', ' ', '\t').Trim(), state);
+        string entryAndArgs = after.TrimStart(',', ' ', '\t').Trim();
+        var library = LibraryPayload(host, dll, entryAndArgs, state);
+        return LauncherDll(library, state.Environment) is { } launcher
+            ? Rundll32Launcher(host, library, launcher, entryAndArgs, state, depth)
+            : library;
     }
 
+    /// <summary>What a Microsoft DLL's rundll32 entry point does with the rest of the command line (E4, review C follow-up M4).</summary>
+    private enum LauncherEntry
+    {
+        /// <summary>Runs the rest as a program or opens it like a double-click (ShellExecute).</summary>
+        CommandLine,
+
+        /// <summary>Loads the first argument as a Control Panel library (<c>.cpl</c>).</summary>
+        ControlPanel,
+
+        /// <summary>Installs an INF file named in the arguments.</summary>
+        Inf,
+
+        /// <summary>Registers the first argument as a library.</summary>
+        Library,
+    }
+
+    /// <summary>The launcher DLL's file name (lower case) when <paramref name="library"/> is one in System32 / SysWOW64; otherwise null.</summary>
+    private static string? LauncherDll(ResolvedCommand library, EnvironmentBlock environment)
+    {
+        if (library.TargetPath is not { } path || environment.SystemRoot is not { } root || PersistenceText.NormalizeLocalPath(root) is not { } systemRoot)
+        {
+            return null;
+        }
+
+        string folder = Path.GetDirectoryName(path) ?? string.Empty;
+        bool system = string.Equals(folder, Path.Join(systemRoot, "System32"), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(folder, Path.Join(systemRoot, "SysWOW64"), StringComparison.OrdinalIgnoreCase);
+        string name = Path.GetFileName(path).ToLowerInvariant();
+        return system && name is "url.dll" or "shell32.dll" or "zipfldr.dll" or "ieframe.dll" or "shdocvw.dll" or "pcwutl.dll" or "advpack.dll"
+            or "ieadvpack.dll" or "setupapi.dll" or "syssetup.dll"
+            ? name
+            : null;
+    }
+
+    private static LauncherEntry? EntryKind(string dll, string entry)
+    {
+        string e = entry.ToLowerInvariant();
+        return (dll, e) switch
+        {
+            ("url.dll", "fileprotocolhandler" or "fileprotocolhandlera" or "openurl" or "openurla") => LauncherEntry.CommandLine,
+            ("shell32.dll", "shellexec_rundll" or "shellexec_rundlla" or "shellexec_rundllw") => LauncherEntry.CommandLine,
+            ("shell32.dll", "control_rundll" or "control_rundlla" or "control_rundllw" or "control_rundllasuser" or "control_rundllasuserw"
+                or "control_rundllnofallback") => LauncherEntry.ControlPanel,
+            ("zipfldr.dll", "routethecall") => LauncherEntry.CommandLine,
+            ("ieframe.dll" or "shdocvw.dll", "openurl") => LauncherEntry.CommandLine,
+            ("pcwutl.dll", "launchapplication") => LauncherEntry.CommandLine,
+            ("advpack.dll" or "ieadvpack.dll", "launchinfsection" or "launchinfsectionex") => LauncherEntry.Inf,
+            ("advpack.dll" or "ieadvpack.dll", "registerocx") => LauncherEntry.Library,
+            ("setupapi.dll", "installhinfsection" or "installhinfsectiona" or "installhinfsectionw") => LauncherEntry.Inf,
+            ("syssetup.dll", "setupinfobjectinstallaction") => LauncherEntry.Inf,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// E4 (review C follow-up M4): a Microsoft DLL whose rundll32 entry point starts something named in its arguments
+    /// (<c>url.dll,FileProtocolHandler &lt;exe&gt;</c>, <c>shell32.dll,ShellExec_RunDLL &lt;exe&gt;</c>, <c>advpack.dll,LaunchINFSection
+    /// &lt;inf&gt;</c>, ...). The payload is extracted and becomes the target (flagged <see cref="ResolutionFlag.LauncherPayload"/>), or
+    /// the entry is Unverified when it can't be (a relative path, an <c>@</c> variable, ...). Control Panel libraries are loaded, not
+    /// launched: the DLL stays the target and a <c>.cpl</c> with a path (or one found on the search path) is judged as well.
+    /// </summary>
+    private ResolvedCommand Rundll32Launcher(string host, ResolvedCommand library, string dll, string entryAndArgs, State state, int depth)
+    {
+        state.Further = false; // how the launcher DLL was found says nothing about how its payload is found
+        int split = entryAndArgs.IndexOfAny([' ', '\t']);
+        string entry = (split < 0 ? entryAndArgs : entryAndArgs[..split]).TrimEnd(',');
+        string rest = split < 0 ? string.Empty : entryAndArgs[split..].Trim();
+        switch (EntryKind(dll, entry))
+        {
+            case LauncherEntry.CommandLine:
+                if (rest.Length == 0)
+                {
+                    return library;
+                }
+
+                if (rest.StartsWith('?') && rest.IndexOf('?', 1) is var close and > 0)
+                {
+                    rest = rest[(close + 1)..].TrimStart(); // ShellExec_RunDLL's optional "?flags?" prefix
+                }
+
+                if (IsRemote(rest.Trim('"')))
+                {
+                    state.Flags.Add(ResolutionFlag.RemotePayload);
+                    return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, rest).WithFlags(ResolutionFlag.LauncherPayload);
+                }
+
+                return Launched(host, rest, state, depth);
+
+            case LauncherEntry.ControlPanel:
+                var tokens = Tokenize(rest.Replace(',', ' '));
+                if (tokens.Count == 0)
+                {
+                    return library;
+                }
+
+                string cpl = tokens[0].Value;
+                var applet = LibraryPayload(host, cpl, rest, state.ForChainCommand());
+                bool qualified = !IsBareName(cpl);
+                return qualified || (applet.TargetPath is not null && !applet.HasFlag(ResolutionFlag.TargetNotFound))
+                    ? library.WithAdditional([applet])
+                    : library;
+
+            case LauncherEntry.Inf:
+                var inf = Tokenize(rest.Replace(',', ' ')).Select(t => t.Value).FirstOrDefault(t => t.EndsWith(".inf", StringComparison.OrdinalIgnoreCase));
+                return inf is null
+                    ? state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, rest)
+                    : ScriptPayload(host, inf, rest, state).WithFlags(ResolutionFlag.LauncherPayload);
+
+            case LauncherEntry.Library:
+                var first = Tokenize(rest).FirstOrDefault().Value;
+                return string.IsNullOrEmpty(first)
+                    ? library
+                    : LibraryPayload(host, first, rest, state).WithFlags(ResolutionFlag.LauncherPayload);
+
+            default:
+                return library;
+        }
+    }
+
+    /// <summary>
+    /// A program a launcher starts from its arguments: resolved as a command line one level deeper (so nesting stays bounded),
+    /// with the launcher as host unless the payload has its own, and flagged <see cref="ResolutionFlag.LauncherPayload"/>.
+    /// </summary>
+    private ResolvedCommand Launched(string host, string commandLine, State state, int depth)
+    {
+        state.Flags.Add(ResolutionFlag.InterpreterHost);
+        state.Flags.Add(ResolutionFlag.LauncherPayload);
+        return ResolveNested(host, commandLine, state, depth).WithFlags(ResolutionFlag.LauncherPayload);
+    }
+
+    /// <summary>
+    /// <c>regsvr32 [/s /u /n /i:x] dll [dll ...]</c>: every DLL is registered, so each is judged (E4, review C follow-up M4: the
+    /// last one alone was kept, so <c>regsvr32 /s evil.dll scrobj.dll</c> hid evil.dll). A local <c>/i:</c> scriptlet that
+    /// scrobj.dll (or any DllInstall) is handed, when it looks like a file, becomes the target; a URL there is a remote payload.
+    /// </summary>
     private ResolvedCommand Regsvr32(string host, string args, State state)
     {
         state.Flags.Add(ResolutionFlag.InterpreterHost);
@@ -555,30 +707,274 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host, args); // the DLL is the last name: past the cap it's unknown
         }
 
-        int dllIndex = -1;
+        var dlls = new List<int>();
+        string? install = null;
         for (int i = 0; i < tokens.Count; i++)
         {
             string value = tokens[i].Value;
             if (value.Length > 1 && value[0] is '/' or '-')
             {
-                if (value.Length > 2 && char.ToLowerInvariant(value[1]) == 'i' && value[2] == ':' && IsRemote(value[3..].Trim('"')))
+                if (value.Length > 2 && char.ToLowerInvariant(value[1]) == 'i' && value[2] == ':')
                 {
-                    state.Flags.Add(ResolutionFlag.RemotePayload);
+                    string argument = value[3..].Trim('"').Trim();
+                    if (IsRemote(argument))
+                    {
+                        state.Flags.Add(ResolutionFlag.RemotePayload);
+                    }
+                    else if (argument.Length > 0)
+                    {
+                        install = argument;
+                    }
                 }
 
                 continue;
             }
 
-            dllIndex = i;
+            dlls.Add(i);
         }
 
-        if (dllIndex < 0)
+        if (dlls.Count == 0)
         {
             return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
         }
 
-        string remaining = string.Join(' ', tokens.Where((_, i) => i != dllIndex).Select(t => t.Raw));
-        return LibraryPayload(host, tokens[dllIndex].Value, remaining, state);
+        string remaining = string.Join(' ', tokens.Where((_, i) => !dlls.Contains(i)).Select(t => t.Raw));
+        var libraries = dlls.Select((index, n) => LibraryPayload(host, tokens[index].Value, remaining, n == 0 ? state : state.ForChainCommand())).ToList();
+        bool scrobj = dlls.Any(i => Path.GetFileName(tokens[i].Value).Equals("scrobj.dll", StringComparison.OrdinalIgnoreCase)
+            || Path.GetFileName(tokens[i].Value).Equals("scrobj", StringComparison.OrdinalIgnoreCase));
+        if (install is not null && (scrobj || !IsBareName(install) || Path.GetExtension(install).ToLowerInvariant() is ".sct" or ".xml" or ".txt"))
+        {
+            var scriptlet = ScriptPayload(host, install, remaining, state.ForChainCommand()).WithFlags(ResolutionFlag.LauncherPayload);
+            return scriptlet.WithAdditional(libraries);
+        }
+
+        return libraries[0].WithAdditional(libraries.Skip(1));
+    }
+
+    /// <summary>
+    /// <c>conhost.exe [--headless] [--width n] ... [--] &lt;command&gt;</c> (E4, M4): the command is what runs. Only conhost's own
+    /// options are skipped; anything else before the command is not understood (never "conhost itself").
+    /// </summary>
+    private ResolvedCommand Conhost(string host, string args, State state, int depth)
+    {
+        var tokens = Tokenize(args);
+        int i = 0;
+        while (i < tokens.Count)
+        {
+            string value = tokens[i].Value;
+            string lower = value.ToLowerInvariant();
+            if (lower == "--")
+            {
+                i++;
+                break;
+            }
+
+            if (lower.StartsWith("--", StringComparison.Ordinal))
+            {
+                string name = lower[2..];
+                if (name is "width" or "height" or "signal" or "server" or "feature" or "vtmode")
+                {
+                    i += 2;
+                }
+                else if (name is "headless" or "inheritcursor" or "textmode")
+                {
+                    i++;
+                }
+                else
+                {
+                    state.Flags.Add(ResolutionFlag.InterpreterHost);
+                    return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+                }
+
+                continue;
+            }
+
+            if ((i == 0 && lower.StartsWith("0x", StringComparison.Ordinal)) || lower == "-forcev1")
+            {
+                i++;
+                continue;
+            }
+
+            break;
+        }
+
+        return i >= tokens.Count ? state.Resolved(host, args) : Launched(host, args[tokens[i].Start..], state, depth);
+    }
+
+    /// <summary>
+    /// <c>forfiles [/p dir] [/m mask] [/s] [/d date] /c "command"</c> (E4, M4): the <c>/c</c> command runs once per file (its
+    /// <c>0xHH</c> escapes decoded). Without <c>/c</c> it only echoes names. A command whose program is an <c>@</c> variable can't be known.
+    /// </summary>
+    private ResolvedCommand Forfiles(string host, string args, State state, int depth)
+    {
+        state.Flags.Add(ResolutionFlag.InterpreterHost);
+        var tokens = Tokenize(args);
+        string? command = null;
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            string value = tokens[i].Value;
+            if (value.Length < 2 || value[0] is not ('/' or '-'))
+            {
+                return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+            }
+
+            switch (value[1..].ToLowerInvariant())
+            {
+                case "c":
+                    command = i + 1 < tokens.Count ? tokens[++i].Value : string.Empty;
+                    break;
+                case "p" or "m" or "d":
+                    i++;
+                    break;
+                case "s":
+                    break;
+                default:
+                    return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+            }
+        }
+
+        if (command is null)
+        {
+            state.Flags.Add(ResolutionFlag.InlineCommand);
+            return state.Unresolved(TargetUnresolvedReason.InlineCommand, host, args); // the default: cmd /c echo @file
+        }
+
+        command = HexUnescape(command).Trim();
+        if (command.Length == 0)
+        {
+            return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
+        }
+
+        return command.TrimStart('"').StartsWith('@')
+            ? state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args)
+            : Launched(host, command, state, depth);
+    }
+
+    /// <summary>forfiles' <c>0xHH</c> escapes (<c>0x22</c> is a quote).</summary>
+    private static string HexUnescape(string text)
+    {
+        if (!text.Contains("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return text;
+        }
+
+        var result = new System.Text.StringBuilder(text.Length);
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (i + 3 < text.Length && text[i] == '0' && text[i + 1] is 'x' or 'X' && char.IsAsciiHexDigit(text[i + 2]) && char.IsAsciiHexDigit(text[i + 3]))
+            {
+                result.Append((char)Convert.ToInt32(text.Substring(i + 2, 2), 16));
+                i += 3;
+            }
+            else
+            {
+                result.Append(text[i]);
+            }
+        }
+
+        return result.ToString();
+    }
+
+    /// <summary><c>pcalua.exe -a &lt;program&gt; [-c &lt;arguments&gt;] [-d &lt;folder&gt;]</c> (E4, review C M9): the program is what runs.</summary>
+    private ResolvedCommand Pcalua(string host, string args, State state, int depth)
+    {
+        state.Flags.Add(ResolutionFlag.InterpreterHost);
+        var tokens = Tokenize(args);
+        string? program = null, arguments = null;
+        for (int i = 0; i + 1 < tokens.Count; i++)
+        {
+            string name = tokens[i].Value.ToLowerInvariant();
+            if (name is "-a" or "/a")
+            {
+                program = tokens[++i].Value;
+            }
+            else if (name is "-c" or "/c")
+            {
+                arguments = tokens[++i].Value;
+            }
+        }
+
+        if (program is null)
+        {
+            return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
+        }
+
+        state.Flags.Add(ResolutionFlag.LauncherPayload);
+        var file = ResolveFile(program, FileRole.Program, state);
+        var nested = file.Path is { } path ? Unwrap(path, arguments ?? string.Empty, state, depth + 1) : state.Unresolved(file.Reason!.Value, host, arguments ?? string.Empty);
+        return (nested.HostPath is not null ? nested : new ResolvedCommand(nested.TargetPath, nested.UnresolvedReason, host, nested.Arguments, nested.Flags, nested.Additional))
+            .WithFlags(ResolutionFlag.LauncherPayload);
+    }
+
+    /// <summary>Extensions explorer.exe would run (not open in another program) when given the file.</summary>
+    private static readonly HashSet<string> LaunchableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".msi", ".ps1", ".cpl", ".jar",
+    };
+
+    /// <summary>
+    /// <c>explorer.exe &lt;file&gt;</c> opens the file like a double-click (E4, review C M9): a program or script given to it is the
+    /// target. A folder, a <c>shell:</c> location, a document or explorer's own switches leave explorer itself as the target.
+    /// </summary>
+    private ResolvedCommand Explorer(string host, string args, State state)
+    {
+        var tokens = Tokenize(args);
+        if (tokens.Count == 0 || tokens.Any(t => t.Value.StartsWith('/')))
+        {
+            return state.Resolved(host, args);
+        }
+
+        string first = tokens[0].Value;
+        if (IsRemote(first))
+        {
+            state.Flags.Add(ResolutionFlag.InterpreterHost);
+            state.Flags.Add(ResolutionFlag.RemotePayload);
+            return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, args).WithFlags(ResolutionFlag.LauncherPayload);
+        }
+
+        if (!LaunchableExtensions.Contains(Path.GetExtension(first)))
+        {
+            return state.Resolved(host, args);
+        }
+
+        state.Flags.Add(ResolutionFlag.InterpreterHost);
+        state.Flags.Add(ResolutionFlag.LauncherPayload);
+        var file = ResolveFile(first, FileRole.Script, state);
+        string rest = args[tokens[0].End..].Trim();
+        return file.Path is { } path ? state.Resolved(path, rest, host) : state.Unresolved(file.Reason!.Value, host, rest);
+    }
+
+    /// <summary>
+    /// <c>msiexec /i|/package &lt;msi|url&gt;</c> installs a package (the <c>.msi</c> is the target; a URL is a remote payload), and
+    /// <c>msiexec /y|/z &lt;dll&gt;</c> registers a library (E4, review C M9). Anything else (an uninstall by product code, ...) is msiexec.
+    /// </summary>
+    private ResolvedCommand Msiexec(string host, string args, State state)
+    {
+        var tokens = Tokenize(args);
+        for (int i = 0; i + 1 < tokens.Count; i++)
+        {
+            string name = tokens[i].Value.ToLowerInvariant();
+            string value = tokens[i + 1].Value;
+            bool package = name is "/i" or "-i" or "/package" or "-package" or "/a" or "-a" or "/j" or "-j";
+            bool library = name is "/y" or "-y" or "/z" or "-z";
+            if ((!package && !library) || value.StartsWith('{') || value.StartsWith('/'))
+            {
+                continue;
+            }
+
+            state.Flags.Add(ResolutionFlag.InterpreterHost);
+            state.Flags.Add(ResolutionFlag.LauncherPayload);
+            string rest = args[tokens[i + 1].End..].Trim();
+            if (IsRemote(value))
+            {
+                state.Flags.Add(ResolutionFlag.RemotePayload);
+                return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, rest);
+            }
+
+            return library ? LibraryPayload(host, value, rest, state) : ScriptPayload(host, value, rest, state);
+        }
+
+        return state.Resolved(host, args);
     }
 
     private ResolvedCommand LibraryPayload(string host, string dll, string remaining, State state)

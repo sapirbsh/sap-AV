@@ -71,4 +71,12 @@ public enum ResolutionFlag
     /// confirmed missing (section C follow-up review H-B).
     /// </summary>
     LaterCandidates,
+
+    /// <summary>
+    /// E4 (review C follow-up M4 / M9): the target was taken from the arguments of a Microsoft binary that starts it indirectly:
+    /// <c>rundll32 url.dll,FileProtocolHandler &lt;exe&gt;</c>, <c>rundll32 shell32.dll,ShellExec_RunDLL &lt;exe&gt;</c>, <c>regsvr32
+    /// /i:&lt;scriptlet&gt; scrobj.dll</c>, <c>conhost --headless &lt;exe&gt;</c>, <c>forfiles /c</c>, <c>pcalua -a</c>, <c>explorer
+    /// &lt;exe&gt;</c>, <c>msiexec /i|/y</c>.
+    /// </summary>
+    LauncherPayload,
 }

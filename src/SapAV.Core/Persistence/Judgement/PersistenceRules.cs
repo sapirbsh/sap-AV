@@ -66,6 +66,7 @@ public static class PersistenceRules
     [
         new TargetScanRule(), new LocationRule(), new SignatureRule(), new IfeoRule(), new WinlogonRule(), new MissingTargetRule(),
         new UnquotedPathRule(), new HostRule(), new ComOverrideRule(), new ShortcutMismatchRule(), new MinerCommandLineRule(),
+        .. ScriptPersistenceRules.All, // E4
     ];
 
     /// <summary>
@@ -401,6 +402,8 @@ public static class PersistenceRules
                 "mshta.exe" => MitreTechniqueIds.Mshta,
                 "powershell.exe" or "pwsh.exe" => MitreTechniqueIds.PowerShell,
                 "cmd.exe" => MitreTechniqueIds.WindowsCommandShell,
+                "conhost.exe" or "forfiles.exe" or "pcalua.exe" or "explorer.exe" => MitreTechniqueIds.IndirectCommandExecution, // E4
+                "msiexec.exe" => MitreTechniqueIds.Msiexec,
                 "wscript.exe" or "cscript.exe" => context.TargetPath is { } script
                     && Path.GetExtension(script).ToLowerInvariant() is ".js" or ".jse" ? MitreTechniqueIds.JavaScript : MitreTechniqueIds.VisualBasic,
                 _ => null,
@@ -410,7 +413,7 @@ public static class PersistenceRules
             {
                 int points = host switch
                 {
-                    "rundll32.exe" or "cmd.exe" => 10,
+                    "rundll32.exe" or "cmd.exe" or "explorer.exe" or "msiexec.exe" => 10,
                     "mshta.exe" => 40,
                     _ => 20,
                 };
