@@ -586,13 +586,65 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
             metaHandle.Free();
         }
 
+        var (verdict, category) = InterpretVerdictAndCategory(file, identifier,
+            meta.TryGetValue("verdict", out var v) ? v : null, meta.TryGetValue("category", out var c) ? c : null, warnings);
         return new YaraRuleInfo(
             file,
             identifier,
             tags.AsReadOnly(),
-            InterpretVerdict(file, identifier, meta.TryGetValue("verdict", out var v) ? v : null, warnings),
+            verdict,
             InterpretMitre(file, identifier, meta.TryGetValue("mitre", out var m) ? m : null, warnings),
-            meta.TryGetValue("description", out var d) ? d.Text : null);
+            meta.TryGetValue("description", out var d) ? d.Text : null,
+            category);
+    }
+
+    /// <summary>
+    /// E1: the verdict and category of a rule (see <see cref="YaraRuleInfo"/>). A pup / hacktool verdict or category is always
+    /// PotentiallyUnwanted with that category (never Malicious); a Malicious verdict with a pup / hacktool category is capped
+    /// with a warning.
+    /// </summary>
+    internal static (Verdict Verdict, ThreatCategory Category) InterpretVerdictAndCategory(
+        string file, string rule, MetaValue? verdictMeta, MetaValue? categoryMeta, List<YaraRuleWarning> warnings)
+    {
+        string? verdictText = verdictMeta?.Text?.Trim().ToLowerInvariant();
+        ThreatCategory? fromVerdict = verdictText switch
+        {
+            "pup" => ThreatCategory.Pup,
+            "hacktool" => ThreatCategory.HackTool,
+            _ => null,
+        };
+
+        var verdict = fromVerdict is not null ? Verdict.PotentiallyUnwanted : InterpretVerdict(file, rule, verdictMeta, warnings);
+        var category = fromVerdict ?? ThreatCategory.Malware;
+        if (categoryMeta is { } meta)
+        {
+            string key = new((meta.Text ?? string.Empty).Where(ch => ch is not ('-' or '_' or ' ')).ToArray());
+            // Exact names only (Enum.TryParse would also take numbers and comma-combined names).
+            if (Enum.GetValues<ThreatCategory>().FirstOrDefault(x => string.Equals(x.ToString(), key, StringComparison.OrdinalIgnoreCase)) is var parsed
+                && string.Equals(parsed.ToString(), key, StringComparison.OrdinalIgnoreCase))
+            {
+                category = parsed;
+            }
+            else
+            {
+                warnings.Add(new YaraRuleWarning(file, rule, YaraWarningKind.Category, meta.Display,
+                    $"YARA rule {rule} ({file}): unknown category meta {meta.Display}; using {category}."));
+            }
+        }
+
+        if (ThreatCategories.IsPotentiallyUnwanted(category))
+        {
+            if (verdict == Verdict.Malicious && verdictMeta is not null)
+            {
+                warnings.Add(new YaraRuleWarning(file, rule, YaraWarningKind.Category, categoryMeta?.Display,
+                    $"YARA rule {rule} ({file}): category {category} is never Malicious; using PotentiallyUnwanted."));
+            }
+
+            return (Verdict.PotentiallyUnwanted, category);
+        }
+
+        // A non-PUP category on a pup / hacktool verdict: the verdict's own category wins (it can't be PotentiallyUnwanted otherwise).
+        return verdict == Verdict.PotentiallyUnwanted ? (verdict, fromVerdict!.Value) : (verdict, category);
     }
 
     internal static MitreTechniqueSelection InterpretMitre(string file, string rule, MetaValue? meta, List<YaraRuleWarning> warnings)
@@ -639,8 +691,10 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
         {
             case "malicious":
                 return Verdict.Malicious;
-            case "suspicious" or "pup" or "hacktool":
+            case "suspicious":
                 return Verdict.Suspicious;
+            case "pup" or "hacktool":
+                return Verdict.PotentiallyUnwanted; // E1; the category comes with it (InterpretVerdictAndCategory)
             default:
                 string raw = meta.Value.Display;
                 warnings.Add(new YaraRuleWarning(file, rule, YaraWarningKind.Verdict, raw,

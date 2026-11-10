@@ -41,6 +41,20 @@ public static class MitreCatalog
         new(MitreTechniqueIds.Mshta, "System Binary Proxy Execution: Mshta"),
         new(MitreTechniqueIds.Regsvr32, "System Binary Proxy Execution: Regsvr32"),
         new(MitreTechniqueIds.Rundll32, "System Binary Proxy Execution: Rundll32"),
+        new(MitreTechniqueIds.CredentialsFromWebBrowsers, "Credentials from Password Stores: Credentials from Web Browsers"),
+        new(MitreTechniqueIds.StealWebSessionCookie, "Steal Web Session Cookie"),
+        new(MitreTechniqueIds.CredentialsInFiles, "Unsecured Credentials: Credentials In Files"),
+        new(MitreTechniqueIds.DataFromLocalSystem, "Data from Local System"),
+        new(MitreTechniqueIds.ComputeHijacking, "Resource Hijacking: Compute Hijacking"),
+        new(MitreTechniqueIds.CommandObfuscation, "Obfuscated Files or Information: Command Obfuscation"),
+        new(MitreTechniqueIds.AdversaryInTheMiddle, "Adversary-in-the-Middle"),
+        new(MitreTechniqueIds.IndirectCommandExecution, "Indirect Command Execution"),
+        new(MitreTechniqueIds.Msiexec, "System Binary Proxy Execution: Msiexec"),
+        new(MitreTechniqueIds.DebuggerEvasion, "Debugger Evasion"),
+        new(MitreTechniqueIds.ProcessInjection, "Process Injection"),
+        new(MitreTechniqueIds.Keylogging, "Input Capture: Keylogging"),
+        new(MitreTechniqueIds.CredentialsFromPasswordStores, "Credentials from Password Stores"),
+        new(MitreTechniqueIds.ApplicationLayerProtocol, "Application Layer Protocol"),
     }.ToFrozenDictionary(t => t.Id, StringComparer.Ordinal);
 
     /// <summary>All techniques in the catalog.</summary>

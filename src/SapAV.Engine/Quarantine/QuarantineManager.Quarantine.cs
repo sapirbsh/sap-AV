@@ -75,7 +75,7 @@ public sealed partial class QuarantineManager
 
         string? why =
             result.Status != ScanStatus.Scanned ? $"the file was not scanned ({result.Status})"
-            : result.Verdict is not (Verdict.Suspicious or Verdict.Malicious) ? "the verdict is Clean"
+            : result.Verdict is not (Verdict.Suspicious or Verdict.PotentiallyUnwanted or Verdict.Malicious) ? "the verdict is Clean"
             : result.Sha256 is null || report.Hash.Sha256 is null || report.Hash.Length is null ? "the scan has no SHA-256 / size"
             : !string.Equals(result.Sha256, report.Hash.Sha256, StringComparison.OrdinalIgnoreCase) ? "the scan result and hash disagree"
             : report.Identity?.FinalPath is null ? "the scan has no file identity (file ID and final path)"

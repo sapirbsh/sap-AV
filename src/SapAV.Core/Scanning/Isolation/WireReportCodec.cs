@@ -96,6 +96,7 @@ public static class WireReportCodec
             Identifier = Clip(m.Identifier, WorkerLimits.MaxIdentifierLength),
             Tags = m.Tags.Take(WorkerLimits.MaxTags).Select(t => Clip(t, WorkerLimits.MaxTagLength)).ToArray(),
             Verdict = m.Verdict,
+            Category = m.Category,
             TechniqueId = m.Mitre.PrimaryId,
             SecondaryTechniqueIds = m.Mitre.SecondaryIds.Take(WorkerLimits.MaxSecondaryTechniques).ToArray(),
             Description = ClipOrNull(m.Description, WorkerLimits.MaxTextLength),
@@ -296,7 +297,9 @@ public static class WireReportCodec
     private static YaraRuleInfo FromWire(WireYaraMatch wire)
     {
         Require(wire is not null, "a null YARA match");
-        Require(wire!.Verdict is Verdict.Suspicious or Verdict.Malicious, "a YARA match must be Suspicious or Malicious");
+        Require(wire!.Verdict is Verdict.Suspicious or Verdict.PotentiallyUnwanted or Verdict.Malicious,
+            "a YARA match must be Suspicious, PotentiallyUnwanted or Malicious");
+        Require(Enum.IsDefined(wire.Category), "undefined YARA match category");
         var tags = Required(wire.Tags, "Tags");
         Require(tags.Count <= WorkerLimits.MaxTags && tags.All(t => t is not null && t.Length <= WorkerLimits.MaxTagLength), "bad tags");
         var secondary = Required(wire.SecondaryTechniqueIds, "SecondaryTechniqueIds");
@@ -307,7 +310,8 @@ public static class WireReportCodec
             tags.Select(t => SafeText.SingleLine(t, WorkerLimits.MaxTagLength)).ToArray(),
             wire.Verdict,
             new MitreTechniqueSelection(Required(wire.TechniqueId, "TechniqueId"), secondary.ToArray()),
-            Text(wire.Description, WorkerLimits.MaxTextLength));
+            Text(wire.Description, WorkerLimits.MaxTextLength),
+            wire.Category);
     }
 
     private static MarkOfTheWebResult FromWire(WireMarkOfTheWeb wire)

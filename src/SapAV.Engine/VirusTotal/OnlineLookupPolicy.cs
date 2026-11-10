@@ -18,7 +18,7 @@ public enum OnlineLookupDecision
     /// <summary>Real time: not one of the risky extensions.</summary>
     NotRiskyExtension,
 
-    /// <summary>Scans: only files the local engine rated Suspicious are looked up.</summary>
+    /// <summary>Scans: only files the local engine rated Suspicious or PotentiallyUnwanted are looked up.</summary>
     NotSuspicious,
 }
 
@@ -31,7 +31,7 @@ public enum OnlineLookupDecision
 /// <item>Real time (new files in watched folders): only the risky extensions <c>.exe .dll .msi .ps1 .js .vbs .bat .cmd .zip
 /// .docm .xlsm</c> (trailing dots and spaces ignored, so <c>evil.exe.</c> counts as <c>.exe</c>).</item>
 /// <item>Scan jobs (Quick, Full, Custom) and autostart targets (Persistence): only files the local engine rated
-/// Suspicious.</item>
+/// Suspicious or PotentiallyUnwanted (E1).</item>
 /// <item>Never when the local verdict is already Malicious.</item>
 /// </list>
 /// </summary>
@@ -61,7 +61,8 @@ public static class OnlineLookupPolicy
             return IsRiskyExtension(request.Item.Path) ? OnlineLookupDecision.Query : OnlineLookupDecision.NotRiskyExtension;
         }
 
-        return request.LocalVerdict == Verdict.Suspicious ? OnlineLookupDecision.Query : OnlineLookupDecision.NotSuspicious;
+        // E1: a local PUP / hack tool is looked up too: a trojanized keygen should come out Malicious, not just unwanted.
+        return request.LocalVerdict is Verdict.Suspicious or Verdict.PotentiallyUnwanted ? OnlineLookupDecision.Query : OnlineLookupDecision.NotSuspicious;
     }
 
     /// <summary>True if the file name ends in a risky extension (trailing dots / spaces ignored).</summary>

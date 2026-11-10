@@ -145,7 +145,8 @@ public sealed record QuarantineMetadata
         Check(SecurityDescriptor is null || (SecurityDescriptor.Length <= MaxSddlLength && !SecurityDescriptor.Contains('\0')),
             "Invalid security descriptor.");
         Check(ZoneIdentifier is null || ZoneIdentifier.Length <= MaxZoneIdentifierBytes, "Zone.Identifier too large.");
-        Check(Verdict is Verdict.Suspicious or Verdict.Malicious, "The verdict must be Suspicious or Malicious.");
+        Check(Verdict is Verdict.Suspicious or Verdict.PotentiallyUnwanted or Verdict.Malicious,
+            "The verdict must be Suspicious, PotentiallyUnwanted or Malicious."); // E1: a PUP the user chose to quarantine
         Check(Reasons is not null && Reasons.Count <= MaxReasons
             && Reasons.All(r => r is not null && r.Length is > 0 and <= Detection.MaxReasonLength), "Invalid reasons.");
         Check(TechniqueIds is not null && TechniqueIds.Count <= MaxReasons * 4

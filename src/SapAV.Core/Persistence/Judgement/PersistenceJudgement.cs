@@ -46,6 +46,9 @@ public enum PersistenceOutcome
 
     Suspicious,
     Malicious,
+
+    /// <summary>E1: what it runs is a PUP or hack tool (a carried PotentiallyUnwanted target detection). Never removed automatically.</summary>
+    PotentiallyUnwanted,
 }
 
 /// <summary>
@@ -104,8 +107,18 @@ public sealed record PersistenceSignal
     /// <param name="score">Points added to the entry's score (0 = information only).</param>
     /// <param name="reason">Engine text; entry values in it are sanitized here (one line, capped).</param>
     /// <param name="techniqueId">The MITRE technique this signal adds (secondary to the entry kind's), or null.</param>
-    public PersistenceSignal(string rule, int score, string reason, string? techniqueId = null, PersistenceSignalStrength strength = PersistenceSignalStrength.Normal)
+    /// <param name="category">E3/E4: the threat category this signal points to (Miner, ...), or null. The entry's own detection takes
+    /// the category of its strongest signal that has one (never Pup / HackTool: the entry rules give Suspicious only).</param>
+    public PersistenceSignal(
+        string rule, int score, string reason, string? techniqueId = null, PersistenceSignalStrength strength = PersistenceSignalStrength.Normal,
+        ThreatCategory? category = null)
     {
+        if (category is { } c && !Enum.IsDefined(c))
+        {
+            throw new ArgumentOutOfRangeException(nameof(category), c, "Undefined threat category.");
+        }
+
+        Category = category;
         ArgumentException.ThrowIfNullOrWhiteSpace(rule);
         ArgumentOutOfRangeException.ThrowIfNegative(score);
         ArgumentNullException.ThrowIfNull(reason);
@@ -136,6 +149,8 @@ public sealed record PersistenceSignal
     public string? TechniqueId { get; }
 
     public PersistenceSignalStrength Strength { get; }
+
+    public ThreatCategory? Category { get; }
 }
 
 /// <summary>
@@ -209,6 +224,7 @@ public sealed record PersistenceJudgement
     public PersistenceOutcome Outcome => Verdict switch
     {
         Verdict.Malicious => PersistenceOutcome.Malicious,
+        Verdict.PotentiallyUnwanted => PersistenceOutcome.PotentiallyUnwanted,
         Verdict.Suspicious => PersistenceOutcome.Suspicious,
         _ => IsUnverified ? PersistenceOutcome.Unverified : PersistenceOutcome.Clean,
     };
@@ -234,8 +250,8 @@ public sealed record PersistenceJudgement
     public IReadOnlyList<PersistenceSignal> Signals { get; }
 
     /// <summary>
-    /// Worst first: carried Malicious target / host detections, then the entry's own (source Persistence) when the score
-    /// reaches the threshold, then carried Suspicious ones. Empty when Clean.
+    /// Worst first: carried Malicious target / host detections, then carried PotentiallyUnwanted ones (E1), then the entry's own
+    /// (source Persistence) when the score reaches the threshold, then carried Suspicious ones. Empty when Clean.
     /// </summary>
     public IReadOnlyList<Detection> Detections { get; }
 

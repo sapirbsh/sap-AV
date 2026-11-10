@@ -122,7 +122,7 @@ public sealed class AlertTests
         Assert.Equal("MaliciousFile", (string?)node["Type"]);
         Assert.Equal("Quarantined", (string?)node["Action"]);
         Assert.Equal("UnsignedOrInvalid", (string?)node["SignatureStatus"]);
-        Assert.Equal(1, (int?)node["SchemaVersion"]);
+        Assert.Equal(2, (int?)node["SchemaVersion"]); // E1: Category + PotentiallyUnwanted added
         Assert.EndsWith("+00:00", (string?)node["Timestamp"]);
     }
 

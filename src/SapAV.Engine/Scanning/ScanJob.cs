@@ -60,7 +60,7 @@ public sealed partial class ScanJob : IDisposable
     private bool _timedOut;
     private Exception? _failure;
     private long _filesFound, _filesDone, _bytesFound, _bytesDone;
-    private long _clean, _suspicious, _malicious, _notScanned, _excluded, _quarantined, _needsConfirmation, _quarantineFailed;
+    private long _clean, _suspicious, _potentiallyUnwanted, _malicious, _notScanned, _excluded, _quarantined, _needsConfirmation, _quarantineFailed;
     private long _skippedLinks, _unreadableFolders, _resultsOmitted, _cached;
     private bool _progressPending;
     private TimeSpan _runningBefore;
@@ -579,6 +579,10 @@ public sealed partial class ScanJob : IDisposable
         {
             _malicious++;
         }
+        else if (result.Verdict == Verdict.PotentiallyUnwanted)
+        {
+            _potentiallyUnwanted++; // E1: never counted as clean (and never auto-quarantined)
+        }
         else if (result.Verdict == Verdict.Suspicious)
         {
             _suspicious++;
@@ -788,7 +792,7 @@ public sealed partial class ScanJob : IDisposable
         return new ScanJobProgress(Id, _state, _filesFound, filesTotal, _filesDone, _bytesDone, bytesTotal,
             _current.FirstOrDefault(c => c is not null), eta, ElapsedLocked(),
             new ScanJobCounters(_clean, _suspicious, _malicious, _notScanned, _excluded, _quarantined,
-                _needsConfirmation, _quarantineFailed) { Cached = _cached })
+                _needsConfirmation, _quarantineFailed) { Cached = _cached, PotentiallyUnwanted = _potentiallyUnwanted })
         {
             Phase = CurrentPhaseLocked(),
             PercentDone = PercentLocked(),

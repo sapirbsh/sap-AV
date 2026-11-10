@@ -6,11 +6,14 @@ using SapAV.Core.VirusTotal;
 namespace SapAV.Engine.VirusTotal;
 
 /// <summary>
-/// Turns a VirusTotal answer into what the scan gets (D3):
+/// Turns a VirusTotal answer into what the scan gets (D3, E1):
 /// <list type="bullet">
 /// <item>Found, at least <see cref="VirusTotalOptions.MaliciousThreshold"/> (5) engines say malicious → <b>Malicious</b>, unless
-/// the threat label is PUP-like (<see cref="IsPotentiallyUnwanted"/>): PUP / HackTool findings are never auto-quarantined
-/// (CLAUDE.md), so those are Suspicious at most (review D3 L2).</item>
+/// the threat label is PUP-like (<see cref="IsPotentiallyUnwanted"/>).</item>
+/// <item>Found with a PUP-like label and at least <see cref="VirusTotalOptions.SuspiciousThreshold"/> (3) engines →
+/// <b>PotentiallyUnwanted</b>, category <see cref="ThreatCategory.HackTool"/> when the label says hacktool, else
+/// <see cref="ThreatCategory.Pup"/> (E1; review D3 L2 had capped these at Suspicious). PUP / HackTool findings are never
+/// auto-quarantined (CLAUDE.md): the verdict handler quarantines Malicious only.</item>
 /// <item>Found, at least <see cref="VirusTotalOptions.SuspiciousThreshold"/> (3) engines say malicious → <b>Suspicious</b>.
 /// Engines that only say "suspicious" don't count.</item>
 /// <item>Found with fewer, or NotFound → no detection, an information note.</item>
@@ -38,10 +41,11 @@ public static class VirusTotalVerdict
             return new(null, new ScanNote(ScanNoteLevel.Information, result.Detail));
         }
 
-        bool unwanted = IsPotentiallyUnwanted(report.ThreatLabel);
-        var verdict = report.Malicious >= options.MaliciousThreshold && !unwanted ? Verdict.Malicious
-            : report.Malicious >= options.SuspiciousThreshold ? Verdict.Suspicious
-            : (Verdict?)null;
+        var unwanted = UnwantedCategory(report.ThreatLabel);
+        var verdict = report.Malicious < options.SuspiciousThreshold ? (Verdict?)null
+            : unwanted is not null ? Verdict.PotentiallyUnwanted
+            : report.Malicious >= options.MaliciousThreshold ? Verdict.Malicious
+            : Verdict.Suspicious;
         if (verdict is null)
         {
             return new(null, new ScanNote(ScanNoteLevel.Information,
@@ -49,9 +53,16 @@ public static class VirusTotalVerdict
         }
 
         string label = report.ThreatLabel is { Length: > 0 } threat ? $", labelled {threat}" : string.Empty;
+        string what = unwanted switch
+        {
+            ThreatCategory.HackTool => " (a hack tool: never quarantined automatically)",
+            ThreatCategory.Pup => " (potentially unwanted: never quarantined automatically)",
+            _ => string.Empty,
+        };
         string reason = $"VirusTotal: {report.Malicious} of {report.TotalEngines} engines detect this file as malicious" +
-            $" ({report.DetectionRatio} flagged it{label}).";
-        return new(new Detection(verdict.Value, reason, MitreTechniqueIds.MaliciousFile, DetectionSource.VirusTotal),
+            $" ({report.DetectionRatio} flagged it{label}){what}.";
+        return new(new Detection(verdict.Value, reason, MitreTechniqueIds.MaliciousFile, DetectionSource.VirusTotal, null,
+                unwanted ?? ThreatCategory.Malware),
             new ScanNote(ScanNoteLevel.Information, result.Detail));
     }
 
@@ -60,6 +71,16 @@ public static class VirusTotalVerdict
         ["hacktool", "pua", "pup", "riskware", "not-a-virus", "adware", "potentially unwanted", "potentiallyunwanted"];
 
     /// <summary>True if VirusTotal's threat label names a PUP / HackTool category (case-insensitive).</summary>
-    public static bool IsPotentiallyUnwanted(string? threatLabel) =>
-        threatLabel is { Length: > 0 } label && UnwantedLabelWords.Any(w => label.Contains(w, StringComparison.OrdinalIgnoreCase));
+    public static bool IsPotentiallyUnwanted(string? threatLabel) => UnwantedCategory(threatLabel) is not null;
+
+    /// <summary>E1: HackTool when the label says hacktool, Pup for the other unwanted words, null for anything else.</summary>
+    public static ThreatCategory? UnwantedCategory(string? threatLabel)
+    {
+        if (threatLabel is not { Length: > 0 } label || !UnwantedLabelWords.Any(w => label.Contains(w, StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+
+        return label.Contains("hacktool", StringComparison.OrdinalIgnoreCase) ? ThreatCategory.HackTool : ThreatCategory.Pup;
+    }
 }

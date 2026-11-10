@@ -9,9 +9,14 @@ namespace SapAV.Core.Yara;
 /// <remarks>
 /// Meta fields read (identifiers are matched case-insensitively):
 /// <list type="bullet">
-/// <item><c>verdict</c>: <c>"malicious"</c> (also the default when missing) → Malicious; <c>"suspicious"</c>,
-/// <c>"pup"</c> or <c>"hacktool"</c> → Suspicious; anything else → Suspicious plus a
-/// <see cref="YaraWarningKind.Verdict"/> warning (unknown values err on the side of fewer false Malicious).</item>
+/// <item><c>verdict</c>: <c>"malicious"</c> (also the default when missing) → Malicious; <c>"suspicious"</c> → Suspicious;
+/// <c>"pup"</c> → PotentiallyUnwanted, category Pup; <c>"hacktool"</c> → PotentiallyUnwanted, category HackTool (E1: never
+/// quarantined automatically); anything else → Suspicious plus a <see cref="YaraWarningKind.Verdict"/> warning (unknown values
+/// err on the side of fewer false Malicious).</item>
+/// <item><c>category</c> (E1, optional): <c>malware</c>, <c>pup</c>, <c>hacktool</c>, <c>infostealer</c>, <c>miner</c>,
+/// <c>defendertampering</c>, <c>browserhijack</c> (case, <c>-</c>, <c>_</c> and spaces ignored). <c>pup</c> / <c>hacktool</c> make
+/// the rule PotentiallyUnwanted whatever its verdict says (a Malicious one is capped, with a warning). Unknown → Malware plus a
+/// <see cref="YaraWarningKind.Category"/> warning.</item>
 /// <item><c>mitre</c>: technique IDs via <see cref="MitreTechniqueIdFormat.SelectOrDefault"/>, fallback
 /// <see cref="MitreTechniqueIds.MaliciousFile"/>.</item>
 /// <item><c>description</c>: optional, kept for display.</item>
@@ -19,9 +24,10 @@ namespace SapAV.Core.Yara;
 /// </remarks>
 public sealed record YaraRuleInfo
 {
+    /// <exception cref="ArgumentException">The verdict and category don't fit (see <see cref="Detection"/>).</exception>
     internal YaraRuleInfo(
         string file, string identifier, IReadOnlyList<string> tags, Verdict verdict,
-        MitreTechniqueSelection mitre, string? description)
+        MitreTechniqueSelection mitre, string? description, ThreatCategory category = ThreatCategory.Malware)
     {
         File = file;
         Identifier = identifier;
@@ -29,6 +35,8 @@ public sealed record YaraRuleInfo
         Verdict = verdict;
         Mitre = mitre;
         Description = description;
+        Category = category;
+        _ = ToDetection(); // the verdict / category rules of Detection, checked once here
     }
 
     /// <summary>The rule file relative to the rules directory, which is also the rule's YARA namespace.</summary>
@@ -38,8 +46,11 @@ public sealed record YaraRuleInfo
 
     public IReadOnlyList<string> Tags { get; }
 
-    /// <summary>Suspicious or Malicious.</summary>
+    /// <summary>Suspicious, PotentiallyUnwanted or Malicious.</summary>
     public Verdict Verdict { get; }
+
+    /// <summary>E1: the threat category (Malware unless the rule's meta says otherwise).</summary>
+    public ThreatCategory Category { get; }
 
     public MitreTechniqueSelection Mitre { get; }
 
@@ -47,7 +58,7 @@ public sealed record YaraRuleInfo
 
     /// <summary>The detection a match on this rule produces (source Yara, reason = rule name + file).</summary>
     public Detection ToDetection() =>
-        new(Verdict, $"YARA rule {Identifier} matched ({File})", Mitre.PrimaryId, DetectionSource.Yara, Mitre.SecondaryIds);
+        new(Verdict, $"YARA rule {Identifier} matched ({File})", Mitre.PrimaryId, DetectionSource.Yara, Mitre.SecondaryIds, Category);
 }
 
 /// <summary>Rule text to compile, named like a file (the name becomes the YARA namespace).</summary>

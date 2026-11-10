@@ -147,11 +147,35 @@ public sealed class ScanVerdictHandlerTests : IDisposable
         var item = new ScanItem(@"C:\x\f.exe", ScanTrigger.RealTime);
         foreach (var verdict in Enum.GetValues<Verdict>())
         {
-            var detections = verdict == Verdict.Clean ? [] : new[] { new Detection(verdict, "r", "T1204.002", DetectionSource.Yara) };
+            var category = verdict == Verdict.PotentiallyUnwanted ? ThreatCategory.Pup : ThreatCategory.Malware;
+            var detections = verdict == Verdict.Clean ? [] : new[] { new Detection(verdict, "r", "T1204.002", DetectionSource.Yara, null, category) };
             var report = new FileScanReport(new ScanResult(item, detections, DateTimeOffset.UnixEpoch, SampleAlerts.Sha),
                 HashResult.Hashed(SampleAlerts.Sha, 1), null, null, null, null, []);
             Assert.Equal(verdict == Verdict.Malicious, AutoQuarantinePolicy.IsEligibleVerdict(report));
         }
+    }
+
+    [Fact]
+    public async Task PotentiallyUnwanted_IsAlertedWithItsCategory_NeverQuarantined_AndCountedApart()
+    {
+        UseHandler();
+        var path = _jobs.Write("pup-keygen.exe.txt", "synthetic keygen marker"); // E1: the fake broker calls "pup*" a HackTool
+
+        var job = await RunAsync();
+
+        var result = Assert.Single(job.Results);
+        Assert.Equal((ScanFileAction.None, Verdict.PotentiallyUnwanted), (result.Action, result.Verdict));
+        Assert.True(File.Exists(path));
+        Assert.Empty(_quarantine.Manager.List());
+        var alert = Assert.Single(_sink.Alerts);
+        Assert.Equal((AlertType.PotentiallyUnwantedFile, AlertAction.None, ThreatCategory.HackTool), (alert.Type, alert.Action, alert.Category));
+        var counters = job.GetProgress().Counters;
+        Assert.Equal((1L, 0L, 0L, 0L), (counters.PotentiallyUnwanted, counters.Clean, counters.Suspicious, counters.Quarantined));
+
+        // The pipe: the counter and the category go out; the user may still quarantine it by hand.
+        var info = Engine.Pipe.PipeMapping.Result(0, result, forAdmin: false);
+        Assert.Equal((Verdict.PotentiallyUnwanted, ThreatCategory.HackTool, true), (info.Verdict, info.ThreatCategory, info.CanQuarantine));
+        Assert.Equal(1, Engine.Pipe.PipeMapping.Progress(job.GetProgress()).Counters.PotentiallyUnwanted);
     }
 
     [Fact]

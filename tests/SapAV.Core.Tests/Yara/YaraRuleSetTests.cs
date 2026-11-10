@@ -188,7 +188,7 @@ public sealed class YaraRuleSetTests : IDisposable
     [InlineData("", Verdict.Malicious, false)]
     [InlineData("verdict = \"malicious\"", Verdict.Malicious, false)]
     [InlineData("verdict = \" Suspicious \"", Verdict.Suspicious, false)]
-    [InlineData("verdict = \"pup\"", Verdict.Suspicious, false)]
+    [InlineData("verdict = \"pup\"", Verdict.PotentiallyUnwanted, false)]
     [InlineData("verdict = \"bad-ish\"", Verdict.Suspicious, true)]
     [InlineData("verdict = 2", Verdict.Suspicious, true)]
     public void VerdictMeta_IsInterpreted(string meta, Verdict expected, bool warns)

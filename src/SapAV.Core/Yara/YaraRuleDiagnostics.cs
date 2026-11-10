@@ -23,6 +23,12 @@ public enum YaraWarningKind
 
     /// <summary>A warning from the YARA compiler itself (e.g. a rule that may slow down scanning).</summary>
     Compiler,
+
+    /// <summary>
+    /// E1: the rule's <c>category</c> meta is not a known value (the rule reports Malware), or it says pup / hacktool while the
+    /// verdict says malicious (the rule is capped at PotentiallyUnwanted).
+    /// </summary>
+    Category,
 }
 
 /// <summary>

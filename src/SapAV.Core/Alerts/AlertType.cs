@@ -18,8 +18,8 @@ public enum AlertType
     SuspiciousFile,
 
     /// <summary>
-    /// A potentially unwanted program or hack tool (ROADMAP feature 11). Verdict Suspicious. Produced once the
-    /// threat-pack categories exist (section E); the event ID is fixed now.
+    /// A potentially unwanted program or hack tool (ROADMAP feature 11, E1): a scanned file whose worst verdict is
+    /// PotentiallyUnwanted (category Pup or HackTool). Never quarantined automatically: the user decides.
     /// </summary>
     PotentiallyUnwantedFile,
 

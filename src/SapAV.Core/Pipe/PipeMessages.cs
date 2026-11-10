@@ -341,9 +341,10 @@ public sealed record ScanGetRequest(Guid JobId, int ResultsOffset = 0, int Resul
 /// <param name="OwnedByCaller">The caller created the job (admins also see other jobs).</param>
 public sealed record JobSummary(Guid JobId, JobState State, ScanTrigger Trigger, DateTimeOffset CreatedAt, IReadOnlyList<WirePath> Paths, bool OwnedByCaller);
 
+/// <param name="PotentiallyUnwanted">E1: files whose verdict is PotentiallyUnwanted (PUP / hack tool). Absent in older messages (0).</param>
 public sealed record JobCountersInfo(
     long Clean, long Suspicious, long Malicious, long NotScanned, long Excluded, long Quarantined, long NeedsUserConfirmation, long QuarantineFailed,
-    long Cached = 0);
+    long Cached = 0, long PotentiallyUnwanted = 0);
 
 public sealed record JobProgressInfo(
     Guid JobId, JobState State, long FilesFound, long? FilesTotal, long FilesDone, long BytesDone, long? BytesTotal,
@@ -384,11 +385,12 @@ public enum NotScannedReason
 /// Everyone else: only the download host (punycode, lowercase, a-z 0-9 . -), or absent.</param>
 /// <param name="NotScannedReason">Why the file wasn't scanned; null when it was.</param>
 /// <param name="FromCache">C5: the verdict came from the scan cache (the file was unchanged since an earlier scan).</param>
+/// <param name="ThreatCategory">E1: the worst detection's threat category (Malware, Pup, HackTool, Infostealer, Miner, ...); null when Clean or not scanned.</param>
 public sealed record JobFileResultInfo(
     int ResultId, WirePath Path, ScanStatus Status, Verdict? Verdict, FileAction Action, string? Detail, string? Sha256,
     string? QuarantineItemId, Guid? AlertId, bool CanQuarantine, IReadOnlyList<string>? Reasons = null,
     IReadOnlyList<string>? TechniqueIds = null, Signatures.SignatureStatus? SignatureStatus = null, string? Signer = null,
-    string? SourceUrl = null, NotScannedReason? NotScannedReason = null, bool FromCache = false)
+    string? SourceUrl = null, NotScannedReason? NotScannedReason = null, bool FromCache = false, ThreatCategory? ThreatCategory = null)
 {
     public IReadOnlyList<string> Reasons { get; init; } = Reasons ?? [];
 
@@ -494,10 +496,11 @@ public sealed record PersistenceFindingInfo(
 /// <param name="FindingId">Stable index of the finding in its job (findings are only appended).</param>
 /// <param name="Verdict">Null when there is no verdict: an Unverified autostart entry (see <see cref="PersistenceFindingInfo.Outcome"/>).</param>
 /// <param name="Reasons">At most 8. Administrators: the judgement's own text (sanitised, capped); everyone else: engine templates.</param>
+/// <param name="ThreatCategory">E1: the worst detection's threat category; null without a detection.</param>
 /// <param name="TechniqueIds">MITRE ATT&amp;CK technique IDs, primary first, distinct, format-checked (at most 8).</param>
 public sealed record ScanFindingInfo(
     int FindingId, FindingCategory Category, Verdict? Verdict, IReadOnlyList<string> TechniqueIds, IReadOnlyList<string> Reasons, Guid? AlertId,
-    PersistenceFindingInfo? Persistence);
+    PersistenceFindingInfo? Persistence, ThreatCategory? ThreatCategory = null);
 
 /// <param name="Complete">The job Completed and every phase covered everything it should.</param>
 /// <param name="Duplicates">Files not scanned again because the job already had them.</param>

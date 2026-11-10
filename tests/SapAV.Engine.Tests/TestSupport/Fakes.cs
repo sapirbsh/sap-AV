@@ -192,7 +192,12 @@ internal static class SampleAlerts
         IReadOnlyList<string>? secondaries = null,
         string? sourceUrl = "https://cdn.test/invoice.pdf.exe")
     {
-        var verdict = type == AlertType.MaliciousFile ? Verdict.Malicious : Verdict.Suspicious;
+        var verdict = type switch
+        {
+            AlertType.MaliciousFile => Verdict.Malicious,
+            AlertType.PotentiallyUnwantedFile => Verdict.PotentiallyUnwanted,
+            _ => Verdict.Suspicious,
+        };
         return new Alert(
             Alert.ComputeAlertId(type, new DateTimeOffset(2026, 10, 21, 12, 0, 0, TimeSpan.Zero), path, Sha, ScanTrigger.RealTime),
             new DateTimeOffset(2026, 10, 21, 12, 0, 0, TimeSpan.Zero), type, verdict, path, Sha, null, null,

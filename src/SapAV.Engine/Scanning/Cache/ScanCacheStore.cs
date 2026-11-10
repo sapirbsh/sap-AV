@@ -39,7 +39,8 @@ internal sealed record ScanCacheRow(
 internal sealed class ScanCacheStore : IDisposable
 {
     public const string DatabaseName = "scan.db";
-    private const int SchemaVersion = 1;
+    /// <summary>2 (E1): the verdict numbers changed (PotentiallyUnwanted = 2, Malicious = 3); version-1 rows are dropped at open.</summary>
+    private const int SchemaVersion = 2;
     private const int PruneEvery = 1000;
     private const int SqliteCorrupt = 11;
     private const int SqliteNotADatabase = 26;
@@ -299,6 +300,12 @@ internal sealed class ScanCacheStore : IDisposable
             if (problem is null)
             {
                 int version = UserVersion(connection);
+                if (version is > 0 and < SchemaVersion)
+                {
+                    DropOlderRows(connection, version);
+                    version = SchemaVersion;
+                }
+
                 problem = version is 0 or SchemaVersion ? null : $"unknown schema version {version}";
             }
 
@@ -380,6 +387,18 @@ internal sealed class ScanCacheStore : IDisposable
             PRAGMA user_version = {SchemaVersion};
             """;
         command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// E1: rows of an older schema version are cleanly invalidated (deleted, not a corruption rebuild): version 1 stored the
+    /// verdict's number from before PotentiallyUnwanted was inserted, and its reports came from the detection logic before E1–E4.
+    /// </summary>
+    private void DropOlderRows(SqliteConnection connection, int version)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"DELETE FROM entries; PRAGMA user_version = {SchemaVersion};";
+        int rows = command.ExecuteNonQuery();
+        _logger.LogInformation("Scan cache {Path}: schema version {Old} rows dropped ({Rows}); now version {New}.", _path, version, Math.Max(rows, 0), SchemaVersion);
     }
 
     private static int UserVersion(SqliteConnection connection)

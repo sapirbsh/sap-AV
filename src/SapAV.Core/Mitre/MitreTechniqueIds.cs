@@ -51,4 +51,41 @@ public static class MitreTechniqueIds
     public const string Mshta = "T1218.005";
     public const string Regsvr32 = "T1218.010";
     public const string Rundll32 = "T1218.011";
+
+    // Section E (threat pack, X1). Infostealers.
+
+    /// <summary>Reading browser credential stores (Login Data, logins.json, key4.db).</summary>
+    public const string CredentialsFromWebBrowsers = "T1555.003";
+
+    /// <summary>Reading browser cookie stores.</summary>
+    public const string StealWebSessionCookie = "T1539";
+
+    /// <summary>Discord tokens, password and token files.</summary>
+    public const string CredentialsInFiles = "T1552.001";
+
+    /// <summary>Crypto wallet files.</summary>
+    public const string DataFromLocalSystem = "T1005";
+
+    /// <summary>Cryptominers: CPU / GPU use, miner command lines, stopping when Task Manager opens (T1496 sub-technique since ATT&amp;CK v16).</summary>
+    public const string ComputeHijacking = "T1496.001";
+
+    /// <summary>Encoded PowerShell and other obfuscated command lines (secondary to T1059.001).</summary>
+    public const string CommandObfuscation = "T1027.010";
+
+    /// <summary>Proxy / PAC hijack (closest fit).</summary>
+    public const string AdversaryInTheMiddle = "T1557";
+
+    /// <summary>E4: a Microsoft binary that runs another program from its arguments (forfiles, pcalua, conhost, explorer).</summary>
+    public const string IndirectCommandExecution = "T1202";
+
+    /// <summary>E4: msiexec installing a package from the network or a user folder.</summary>
+    public const string Msiexec = "T1218.007";
+
+    // Pre-Flight capabilities (G3a) and Attack Story (G2b), listed in X1.
+
+    public const string DebuggerEvasion = "T1622";
+    public const string ProcessInjection = "T1055";
+    public const string Keylogging = "T1056.001";
+    public const string CredentialsFromPasswordStores = "T1555";
+    public const string ApplicationLayerProtocol = "T1071";
 }

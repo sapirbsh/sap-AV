@@ -147,7 +147,7 @@ public sealed class WorkerProtocolTests : IDisposable
         AssertRejected(good with { Result = good.Result with { SignatureStatus = SignatureStatus.Microsoft } }, item, "signature");
         AssertRejected(good with { Notes = [.. Enumerable.Repeat(good.Notes.FirstOrDefault() ?? new WireNote { Level = ScanNoteLevel.Information, Message = "n" }, 40)] }, item, "notes");
         AssertRejected(good with { Hash = good.Hash with { ErrorMessage = null, Sha256 = null } }, item, "SHA-256");
-        AssertRejected(good with { Yara = good.Yara! with { Matches = [good.Yara.Matches[0] with { Verdict = Verdict.Clean }] } }, item, "Suspicious or Malicious");
+        AssertRejected(good with { Yara = good.Yara! with { Matches = [good.Yara.Matches[0] with { Verdict = Verdict.Clean }] } }, item, "Suspicious, PotentiallyUnwanted or Malicious");
         AssertRejected(good with { Yara = good.Yara! with { Matches = [good.Yara.Matches[0] with { Identifier = new string('x', 5000) }] } }, item, "over");
         AssertRejected(good with { Signature = good.Signature! with { Status = SignatureStatus.Microsoft, FailureReason = SignatureFailureReason.None, Kind = SignatureKind.Embedded, Signer = null } }, item, "signer");
         AssertRejected(good with { Heuristics = good.Heuristics! with { Findings = [new WireFinding { Kind = HeuristicKind.UnsignedExecutable, Score = 10, Reason = "r", TechniqueId = "not-mitre" }] } }, item, "MITRE");

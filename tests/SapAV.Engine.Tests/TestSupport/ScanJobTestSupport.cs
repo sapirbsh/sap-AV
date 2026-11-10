@@ -87,6 +87,9 @@ internal sealed class FakeScanBroker : IScanBroker
                 ? new Detection(Verdict.Malicious, "YARA rule Test_Malicious matched (test.yar)", MitreTechniqueIds.MaliciousFile, DetectionSource.Yara)
             : name.StartsWith("sus", StringComparison.OrdinalIgnoreCase)
                 ? new Detection(Verdict.Suspicious, "Heuristic score 70: test", MitreTechniqueIds.DoubleFileExtension, DetectionSource.Heuristic)
+            : name.StartsWith("pup", StringComparison.OrdinalIgnoreCase) // E1: a synthetic PUP / hack tool
+                ? new Detection(Verdict.PotentiallyUnwanted, "YARA rule Test_Keygen matched (test.yar)", MitreTechniqueIds.MaliciousFile, DetectionSource.Yara,
+                    null, ThreatCategory.HackTool)
             : null;
         var result = new ScanResult(item, detection is null ? [] : [detection], time.GetUtcNow(), sha);
         return new FileScanReport(result, HashResult.Hashed(sha, length), null, null, null, null, []) { Identity = file.Identity };

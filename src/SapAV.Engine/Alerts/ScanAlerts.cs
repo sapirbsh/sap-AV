@@ -36,7 +36,7 @@ public static class ScanAlerts
             : alert.Reasons.Take(MaxWorkerReasons).Select(r => SafeText.SingleLine(r, MaxWorkerReasonLength)).ToArray();
         return new Alert(alert.AlertId, alert.Timestamp, alert.Type, alert.Verdict, alert.FilePath, alert.Sha256, alert.SignatureStatus,
             alert.Signer, alert.TechniqueId, alert.SecondaryTechniqueIds, reasons, alert.SourceUrl, action, alert.Trigger, alert.EngineVersion,
-            alert.Autostart);
+            alert.Autostart, alert.Category);
     }
 
     /// <summary>Most rule (signal) reasons a persistence alert keeps; they are engine text with the entry's values in them.</summary>
@@ -64,7 +64,7 @@ public static class ScanAlerts
         string[] reasons = [.. carried, .. signals];
         return new Alert(alert.AlertId, alert.Timestamp, alert.Type, alert.Verdict, alert.FilePath, alert.Sha256, alert.SignatureStatus,
             alert.Signer, alert.TechniqueId, alert.SecondaryTechniqueIds, reasons.Length > 0 ? reasons : alert.Reasons.Take(1).ToArray(),
-            alert.SourceUrl, action, alert.Trigger, alert.EngineVersion, alert.Autostart);
+            alert.SourceUrl, action, alert.Trigger, alert.EngineVersion, alert.Autostart, alert.Category);
     }
 
     /// <summary>The auto-quarantine rate limit was hit (review B5 M3): the file waits for the user.</summary>

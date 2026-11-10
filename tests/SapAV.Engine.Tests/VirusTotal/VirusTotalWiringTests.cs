@@ -97,6 +97,7 @@ public sealed class VirusTotalWiringTests : IDisposable
     [InlineData(ScanTrigger.FullScan, Verdict.Clean, OnlineLookupDecision.NotSuspicious)]
     [InlineData(ScanTrigger.CustomScan, Verdict.Suspicious, OnlineLookupDecision.Query)]
     [InlineData(ScanTrigger.Persistence, Verdict.Suspicious, OnlineLookupDecision.Query)]
+    [InlineData(ScanTrigger.FullScan, Verdict.PotentiallyUnwanted, OnlineLookupDecision.Query)] // E1: a keygen may be trojanized
     [InlineData(ScanTrigger.QuickScan, Verdict.Malicious, OnlineLookupDecision.AlreadyMalicious)]
     [InlineData(ScanTrigger.RealTime, Verdict.Malicious, OnlineLookupDecision.AlreadyMalicious)]
     public void Scans_QueryOnlySuspiciousFiles_WhateverTheExtension(ScanTrigger trigger, Verdict local, OnlineLookupDecision expected)
@@ -169,11 +170,13 @@ public sealed class VirusTotalWiringTests : IDisposable
     [InlineData(4, 9, "trojan.fake/test", Verdict.Suspicious)]
     [InlineData(3, 0, null, Verdict.Suspicious)]
     [InlineData(2, 20, "trojan.fake/test", null)] // review D3 L2: "suspicious" engines don't count
-    [InlineData(40, 0, "hacktool.fake/keygen", Verdict.Suspicious)] // review D3 L2: PUP / HackTool is never Malicious (never auto-quarantined)
-    [InlineData(30, 0, "Not-A-Virus:RiskWare.Fake", Verdict.Suspicious)]
-    [InlineData(25, 0, "adware.fake/bundle", Verdict.Suspicious)]
+    [InlineData(40, 0, "hacktool.fake/keygen", Verdict.PotentiallyUnwanted, ThreatCategory.HackTool)] // E1 (was review D3 L2): never Malicious
+    [InlineData(30, 0, "Not-A-Virus:RiskWare.Fake", Verdict.PotentiallyUnwanted, ThreatCategory.Pup)]
+    [InlineData(3, 0, "adware.fake/bundle", Verdict.PotentiallyUnwanted, ThreatCategory.Pup)]
+    [InlineData(2, 0, "adware.fake/bundle", null)] // below the threshold, a PUP label adds nothing
     [InlineData(0, 0, null, null)]
-    public void FoundReports_MapByMaliciousEngineCount_AndPupLabelsAreSuspiciousAtMost(int malicious, int suspicious, string? label, Verdict? expected)
+    public void FoundReports_MapByMaliciousEngineCount_AndPupLabelsArePotentiallyUnwantedNeverMalicious(
+        int malicious, int suspicious, string? label, Verdict? expected, ThreatCategory category = ThreatCategory.Malware)
     {
         var report = new VirusTotalReport(malicious, suspicious, 60, 0, 70, null, [], label);
         var result = new VirusTotalLookupResult(VirusTotalOrigin.Live, VirusTotalStatus.Found, report, DateTimeOffset.UnixEpoch, null, "VirusTotal: x (live).");
@@ -181,6 +184,11 @@ public sealed class VirusTotalWiringTests : IDisposable
         var outcome = VirusTotalVerdict.Map(result, new VirusTotalOptions());
 
         Assert.Equal(expected, outcome.Detection?.Verdict);
+        if (expected is not null)
+        {
+            Assert.Equal(category, outcome.Detection!.Category);
+        }
+
         Assert.NotNull(outcome.Note);
     }
 

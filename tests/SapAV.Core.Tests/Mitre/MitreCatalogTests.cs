@@ -46,6 +46,21 @@ public class MitreCatalogTests
         { "T1218.005", "System Binary Proxy Execution: Mshta" },
         { "T1218.010", "System Binary Proxy Execution: Regsvr32" },
         { "T1218.011", "System Binary Proxy Execution: Rundll32" },
+        // E1: the threat-pack rows of X1 (copied from ROADMAP.md), and E4's launcher techniques
+        { "T1555.003", "Credentials from Password Stores: Credentials from Web Browsers" },
+        { "T1539", "Steal Web Session Cookie" },
+        { "T1552.001", "Unsecured Credentials: Credentials In Files" },
+        { "T1005", "Data from Local System" },
+        { "T1496.001", "Resource Hijacking: Compute Hijacking" },
+        { "T1027.010", "Obfuscated Files or Information: Command Obfuscation" },
+        { "T1557", "Adversary-in-the-Middle" },
+        { "T1622", "Debugger Evasion" },
+        { "T1055", "Process Injection" },
+        { "T1056.001", "Input Capture: Keylogging" },
+        { "T1555", "Credentials from Password Stores" },
+        { "T1071", "Application Layer Protocol" },
+        { "T1202", "Indirect Command Execution" },
+        { "T1218.007", "System Binary Proxy Execution: Msiexec" },
     };
 
     [Theory]

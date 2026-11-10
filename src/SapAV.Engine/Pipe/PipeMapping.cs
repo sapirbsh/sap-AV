@@ -38,7 +38,7 @@ internal static class PipeMapping
         new(p.JobId, Map(p.State), p.FilesFound, p.FilesTotal, p.FilesDone, p.BytesDone, p.BytesTotal,
             p.CurrentFile is null ? null : WirePath.From(p.CurrentFile), p.Eta, p.Elapsed,
             new JobCountersInfo(p.Counters.Clean, p.Counters.Suspicious, p.Counters.Malicious, p.Counters.NotScanned, p.Counters.Excluded,
-                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed, p.Counters.Cached),
+                p.Counters.Quarantined, p.Counters.NeedsUserConfirmation, p.Counters.QuarantineFailed, p.Counters.Cached, p.Counters.PotentiallyUnwanted),
             p.Phase is { } phase ? new ScanPhaseProgressInfo(Text(phase.Name, MaxPhaseNameLength), phase.Index, phase.Count) : null,
             p.PercentDone is { } percent ? Math.Round(percent, 1) : null);
 
@@ -62,7 +62,8 @@ internal static class PipeMapping
             Signer: forAdmin ? (r.Signer is null ? null : Text(r.Signer, MaxSignerLength)) : SignerForUser(r),
             SourceUrl: forAdmin ? (r.SourceUrl is null ? null : Text(r.SourceUrl, MaxUrlLength)) : SourceHostForUser(r.SourceUrl),
             NotScannedReason: r.SkipReason is { } skip ? Map(skip) : null,
-            FromCache: r.FromCache);
+            FromCache: r.FromCache,
+            ThreatCategory: ordered.Length > 0 ? ordered[0].Category : null);
     }
 
     /// <summary>
@@ -199,7 +200,8 @@ internal static class PipeMapping
                 judgement.UnverifiedKind, Core.Persistence.PersistenceEntryId.Compute(entry));
         }
 
-        return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence);
+        var threat = f.Persistence?.Judgement.Detections.OrderByDescending(d => d.Verdict).FirstOrDefault()?.Category;
+        return new ScanFindingInfo(findingId, Enum.Parse<FindingCategory>(f.Category.ToString()), f.Verdict, techniques, reasons, f.AlertId, persistence, threat);
     }
 
     /// <summary>

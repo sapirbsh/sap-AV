@@ -123,6 +123,9 @@ public sealed record WireYaraMatch
 
     public required Verdict Verdict { get; init; }
 
+    /// <summary>E1: required, strict by name; checked against the verdict on the engine side (Pup / HackTool is never Malicious).</summary>
+    public required ThreatCategory Category { get; init; }
+
     public required string TechniqueId { get; init; }
 
     public required IReadOnlyList<string> SecondaryTechniqueIds { get; init; }

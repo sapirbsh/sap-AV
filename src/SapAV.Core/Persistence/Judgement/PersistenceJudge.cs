@@ -137,17 +137,22 @@ public sealed class PersistenceJudge
         int score = signals.Sum(s => s.Score);
         int threshold = Options.SuspiciousThreshold;
 
+        // Worst first: carried Malicious, then carried PotentiallyUnwanted (E1), then the entry's own, then carried Suspicious.
         var detections = new List<Detection>();
         detections.AddRange(context.Carried.Where(d => d.Verdict == Verdict.Malicious));
+        detections.AddRange(context.Carried.Where(d => d.Verdict == Verdict.PotentiallyUnwanted));
         if (score >= threshold)
         {
             var scored = signals.Where(s => s.Score > 0).ToArray();
             string reason = $"Autostart entry score {score} (threshold {threshold}): " + string.Join("; ", scored.Select(s => s.Reason));
             var secondaries = scored.Select(s => s.TechniqueId).OfType<string>().Where(t => t != kindTechnique).Distinct(StringComparer.Ordinal).ToArray();
-            detections.Add(new Detection(Verdict.Suspicious, reason, kindTechnique, DetectionSource.Persistence, secondaries));
+            // E3/E4: the category of the strongest signal that names one (a miner command line, ...); Malware otherwise.
+            var category = scored.FirstOrDefault(s => s.Category is not null)?.Category ?? ThreatCategory.Malware;
+            detections.Add(new Detection(Verdict.Suspicious, reason, kindTechnique, DetectionSource.Persistence, secondaries,
+                ThreatCategories.IsPotentiallyUnwanted(category) ? ThreatCategory.Malware : category));
         }
 
-        detections.AddRange(context.Carried.Where(d => d.Verdict != Verdict.Malicious));
+        detections.AddRange(context.Carried.Where(d => d.Verdict == Verdict.Suspicious));
         var verdict = detections.Count == 0 ? Verdict.Clean : detections.Max(d => d.Verdict);
 
         string primary = detections.Count > 0 ? detections[0].TechniqueId : kindTechnique;
@@ -161,6 +166,7 @@ public sealed class PersistenceJudge
         var priority = verdict switch
         {
             Verdict.Malicious => PersistencePriority.High,
+            Verdict.PotentiallyUnwanted => PersistencePriority.Normal,
             Verdict.Suspicious when signals.Any(s => s.Strength == PersistenceSignalStrength.Strong && s.Score > 0) => PersistencePriority.High,
             Verdict.Suspicious => PersistencePriority.Normal,
             _ when context.UnverifiedReasons.Count > 0 => PersistencePriority.Normal,
@@ -321,8 +327,10 @@ public sealed class PersistenceRuleContext
         _signals.Add(signal);
     }
 
-    public void Add(string rule, int score, string reason, string? techniqueId = null, PersistenceSignalStrength strength = PersistenceSignalStrength.Normal) =>
-        Add(new PersistenceSignal(rule, score, reason, techniqueId, strength));
+    public void Add(
+        string rule, int score, string reason, string? techniqueId = null, PersistenceSignalStrength strength = PersistenceSignalStrength.Normal,
+        ThreatCategory? category = null) =>
+        Add(new PersistenceSignal(rule, score, reason, techniqueId, strength, category));
 
     /// <summary>Carries a target / host detection over to the entry, with the entry kind's technique added as a secondary.</summary>
     public void Carry(Detection detection, bool fromHost)

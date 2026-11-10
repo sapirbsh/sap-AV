@@ -198,6 +198,9 @@ public sealed record ScanJobCounters(
 {
     /// <summary>C5: files whose verdict came from the scan cache (also counted under their verdict).</summary>
     public long Cached { get; init; }
+
+    /// <summary>E1: files whose worst verdict is PotentiallyUnwanted (PUP / hack tool); not in <see cref="Suspicious"/> or <see cref="Clean"/>.</summary>
+    public long PotentiallyUnwanted { get; init; }
 }
 
 /// <summary>A progress snapshot (B4 streams these).</summary>

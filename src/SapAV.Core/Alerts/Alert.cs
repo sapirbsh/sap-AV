@@ -32,8 +32,11 @@ namespace SapAV.Core.Alerts;
 /// </remarks>
 public sealed record Alert
 {
-    /// <summary>Version of the JSON field set.</summary>
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// Version of the JSON field set. 2 (E1): the <see cref="Category"/> field and the <c>PotentiallyUnwanted</c> verdict were
+    /// added (additive: every version-1 field is unchanged, and version-1 JSON still reads).
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>Longest <see cref="Signer"/> kept, in characters.</summary>
     public const int MaxSignerLength = 256;
@@ -65,7 +68,8 @@ public sealed record Alert
         AlertAction action,
         ScanTrigger trigger,
         string engineVersion,
-        AlertAutostart? autostart = null)
+        AlertAutostart? autostart = null,
+        ThreatCategory? category = null)
     {
         if (alertId == Guid.Empty)
         {
@@ -93,6 +97,7 @@ public sealed record Alert
         Trigger = trigger;
         EngineVersion = ValidateEngineVersion(engineVersion);
         Autostart = ValidateAutostart(type, autostart);
+        Category = ValidateCategory(type, category);
     }
 
     /// <summary>Always <see cref="CurrentSchemaVersion"/> (written to JSON; ignored when reading).</summary>
@@ -116,7 +121,10 @@ public sealed record Alert
     [JsonInclude]
     public AlertType Type { get; private init; }
 
-    /// <summary>Must match <see cref="Type"/>: MaliciousFile = Malicious, SuspiciousFile / PUP = Suspicious; never Clean.</summary>
+    /// <summary>
+    /// Must match <see cref="Type"/>: MaliciousFile / MaliciousPersistence = Malicious, SuspiciousFile = Suspicious,
+    /// PotentiallyUnwantedFile = PotentiallyUnwanted, SuspiciousPersistence = Suspicious or PotentiallyUnwanted; never Clean.
+    /// </summary>
     [JsonRequired]
     [JsonInclude]
     public Verdict Verdict { get; private init; }
@@ -173,6 +181,15 @@ public sealed record Alert
     public AlertAutostart? Autostart { get; }
 
     /// <summary>
+    /// E1: the threat category of the worst detection (Malware, Pup, HackTool, Infostealer, Miner, DefenderTampering,
+    /// BrowserHijack). Set on file and persistence detections built by <see cref="FromReport"/> / <see cref="FromPersistence"/>;
+    /// always null on health and user-action alerts. A PotentiallyUnwantedFile alert's category is Pup or HackTool. Older JSON
+    /// without it still reads.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ThreatCategory? Category { get; }
+
+    /// <summary>
     /// Builds the alert for a judged autostart entry (C3), or returns null when it is Clean. FilePath is the entry's target
     /// (or, without one, its location and value name); Sha256 and signature are the target's; the technique is the
     /// judgement's primary one; the reasons are the judgement's (carried detections first, then the scored signals).
@@ -190,13 +207,17 @@ public sealed record Alert
         }
 
         var entry = finding.Entry;
+        // E1: an entry whose target is a PUP / hack tool is still a "suspicious autostart" (event 2002), carrying the
+        // PotentiallyUnwanted verdict and the category; there is no separate persistence event for it.
         var type = judgement.Verdict == Verdict.Malicious ? AlertType.MaliciousPersistence : AlertType.SuspiciousPersistence;
         string path = entry.Resolution.TargetPath ?? (entry.ValueName is null ? entry.Location : entry.Location + @"\" + entry.ValueName);
         var target = finding.Target is { Status: ScanStatus.Scanned } scanned ? scanned : null;
         var utc = timestamp.ToUniversalTime();
         var id = ComputeAlertId(type, utc, path + "\n" + entry.Key, target?.Sha256, trigger);
+        var category = judgement.Detections.OrderByDescending(d => d.Verdict).First().Category;
         return new Alert(id, utc, type, judgement.Verdict, path, target?.Sha256, target?.SignatureStatus, target?.Signer,
-            judgement.TechniqueId, judgement.SecondaryTechniqueIds, judgement.Reasons, null, action, trigger, engineVersion, AlertAutostart.From(entry));
+            judgement.TechniqueId, judgement.SecondaryTechniqueIds, judgement.Reasons, null, action, trigger, engineVersion, AlertAutostart.From(entry),
+            category);
     }
 
     /// <summary>
@@ -225,7 +246,12 @@ public sealed record Alert
             return null;
         }
 
-        var type = verdict == Verdict.Malicious ? AlertType.MaliciousFile : AlertType.SuspiciousFile;
+        var type = verdict switch
+        {
+            Verdict.Malicious => AlertType.MaliciousFile,
+            Verdict.PotentiallyUnwanted => AlertType.PotentiallyUnwantedFile,
+            _ => AlertType.SuspiciousFile,
+        };
 
         // Worst first (stable), so the primary technique and the first reasons belong to the worst finding,
         // and a size cap that drops reasons from the end drops the least severe ones.
@@ -242,7 +268,7 @@ public sealed record Alert
 
         return new Alert(id, timestamp, type, verdict, result.Item.Path, result.Sha256, result.SignatureStatus,
             result.Signer, primary, secondaries, ordered.Select(d => d.Reason).ToArray(), sourceUrl, action,
-            result.Item.Trigger, engineVersion);
+            result.Item.Trigger, engineVersion, null, ordered[0].Category);
     }
 
     /// <summary>
@@ -283,7 +309,9 @@ public sealed record Alert
         bool fits = type switch
         {
             AlertType.MaliciousFile or AlertType.MaliciousPersistence => verdict == Verdict.Malicious,
-            AlertType.SuspiciousFile or AlertType.PotentiallyUnwantedFile or AlertType.SuspiciousPersistence => verdict == Verdict.Suspicious,
+            AlertType.SuspiciousFile => verdict == Verdict.Suspicious,
+            AlertType.PotentiallyUnwantedFile => verdict == Verdict.PotentiallyUnwanted,
+            AlertType.SuspiciousPersistence => verdict is Verdict.Suspicious or Verdict.PotentiallyUnwanted,
             _ => verdict != Verdict.Clean,
         };
 
@@ -313,6 +341,28 @@ public sealed record Alert
         }
 
         return autostart;
+    }
+
+    /// <summary>Only detections carry a category; a PotentiallyUnwantedFile alert's is Pup or HackTool.</summary>
+    private static ThreatCategory? ValidateCategory(AlertType type, ThreatCategory? category)
+    {
+        if (category is not { } value)
+        {
+            return null;
+        }
+
+        EnsureDefined(value, nameof(category));
+        if (!IsFileDetection(type))
+        {
+            throw new ArgumentException($"Alert type {type} can't carry a threat category.", nameof(category));
+        }
+
+        if (type == AlertType.PotentiallyUnwantedFile && !ThreatCategories.IsPotentiallyUnwanted(value))
+        {
+            throw new ArgumentException($"A PotentiallyUnwantedFile alert must be Pup or HackTool, not {value}.", nameof(category));
+        }
+
+        return value;
     }
 
     private static string ValidatePath(string filePath)
@@ -440,7 +490,8 @@ public sealed record Alert
                 && Action == other.Action
                 && Trigger == other.Trigger
                 && string.Equals(EngineVersion, other.EngineVersion, StringComparison.Ordinal)
-                && Equals(Autostart, other.Autostart)));
+                && Equals(Autostart, other.Autostart)
+                && Category == other.Category));
 
     public override int GetHashCode() => HashCode.Combine(AlertId, Timestamp, Type, Verdict, FilePath, Sha256, Action);
 }

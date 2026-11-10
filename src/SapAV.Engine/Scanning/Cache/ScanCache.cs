@@ -56,7 +56,8 @@ internal sealed class EngineScanFingerprints(IScanBroker broker, ILogger logger)
                 }
             }
 
-            return _blocklist is null ? null : new ScanCacheContext(rules.Fingerprint, _blocklist, EngineInfo.Version);
+            // E1: the detection logic version too, so a verdict cached under older heuristics or verdict rules is never used.
+            return _blocklist is null ? null : new ScanCacheContext(rules.Fingerprint, _blocklist, $"{EngineInfo.Version}+d{Core.Scanning.DetectionLogic.Version}");
         }
     }
 }
@@ -211,7 +212,7 @@ internal sealed class ScanCache : IDisposable
         }
 
         var result = cached.Result;
-        if (result.Status != ScanStatus.Scanned || result.Verdict is not (Verdict.Clean or Verdict.Suspicious) || result.Verdict != row.Verdict
+        if (result.Status != ScanStatus.Scanned || result.Verdict is not (Verdict.Clean or Verdict.Suspicious or Verdict.PotentiallyUnwanted) || result.Verdict != row.Verdict
             || !string.Equals(result.Sha256, row.Sha256, StringComparison.Ordinal) || cached.Hash.Length != stamp.Size)
         {
             _store.Delete(stamp.Volume, stamp.FileId);
@@ -283,7 +284,7 @@ internal sealed class ScanCache : IDisposable
             || KeyPath(item.Path).Length > _options.MaxPathLength // D1 (review C5 L1): long paths don't inflate the database
             || _fingerprints.Current() is not { } context
             || result.Status != ScanStatus.Scanned
-            || result.Verdict is not (Verdict.Clean or Verdict.Suspicious)
+            || result.Verdict is not (Verdict.Clean or Verdict.Suspicious or Verdict.PotentiallyUnwanted)
             || result.Sha256 is not { } sha
             || !report.Hash.IsHashed || report.Hash.Length != stamp.Size
             || report.Identity is null
