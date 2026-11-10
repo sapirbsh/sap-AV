@@ -55,6 +55,26 @@ public sealed class PotentiallyUnwantedEngineTests
     }
 
     [Fact]
+    public void DecodedPowerShell_IsForTheAdminPipeOnly_SanitizedAndCapped()
+    {
+        // E4 review L3: the decoded command is attacker-written; it is shown to administrators from the entry, never in reasons.
+        string script = "Write-Output 'sapav-e4'\r\n\u202E" + new string('x', 400);
+        string arguments = "-NoProfile -enc " + Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
+        var resolution = Core.Persistence.ResolvedCommand.Unresolved(Core.Persistence.TargetUnresolvedReason.InlineCommand,
+            @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", arguments,
+            [Core.Persistence.ResolutionFlag.InterpreterHost, Core.Persistence.ResolutionFlag.InlineCommand]);
+        var entry = new Core.Persistence.PersistenceEntry(Core.Persistence.PersistenceKind.RunKey, null,
+            @"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "Upd", "powershell.exe " + arguments, resolution, true);
+
+        string? decoded = Engine.Pipe.PipeMapping.DecodedCommand(entry);
+
+        Assert.StartsWith("Write-Output 'sapav-e4'", decoded, StringComparison.Ordinal);
+        Assert.True(decoded!.Length <= Core.Persistence.EncodedPowerShell.MaxDisplayLength);
+        Assert.DoesNotContain('\u202E', decoded);
+        Assert.DoesNotContain('\n', decoded);
+    }
+
+    [Fact]
     public void QuarantineMetadata_AcceptsAPupTheUserChoseToQuarantine_ButNeverClean()
     {
         var metadata = new QuarantineMetadata

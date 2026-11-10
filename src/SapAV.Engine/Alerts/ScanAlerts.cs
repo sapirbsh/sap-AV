@@ -9,9 +9,11 @@ namespace SapAV.Engine.Alerts;
 /// <summary>Builds the alerts scan jobs raise (B3): file detections and the engine-health alerts.</summary>
 /// <remarks>
 /// Review X2/B3 M2 (partial): detection reasons come from the sandboxed worker (YARA descriptions, heuristic text) and
-/// the Event Log is readable by users, so a compromised worker could use them to leak content of files the engine read
-/// as SYSTEM. File alerts therefore keep at most <see cref="MaxWorkerReasons"/> reasons of at most
-/// <see cref="MaxWorkerReasonLength"/> characters each. Health-alert text is built here from engine templates only.
+/// the Event Log is read by Administrators, Event Log Readers (B6) and the SIEMs it is forwarded to, so a compromised worker
+/// could use them to leak content of files the engine read as SYSTEM. File alerts therefore keep at most
+/// <see cref="MaxWorkerReasons"/> reasons of at most <see cref="MaxWorkerReasonLength"/> characters each. Health-alert text is
+/// built here from engine templates only. Persistence signal reasons are engine text with entry names in them; since E4 review
+/// L3 they never embed decoded PowerShell or inline mshta script (only engine-chosen keywords).
 /// </remarks>
 public static class ScanAlerts
 {

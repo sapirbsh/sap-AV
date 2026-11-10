@@ -174,6 +174,17 @@ internal static class PipeMapping
     /// isolate. Quick Scan results are administrator-only today (the pipe refuses Quick Scan to standard users), so the
     /// non-admin form is defense in depth for later finding sources.
     /// </summary>
+    /// <summary>
+    /// E4 review L3: the decoded encoded-PowerShell command of an entry (any of its commands run by PowerShell), sanitized and
+    /// capped by <see cref="Core.Persistence.EncodedPowerShell"/>; null when there is none or it doesn't decode. Admins only.
+    /// </summary>
+    internal static string? DecodedCommand(Core.Persistence.PersistenceEntry entry) =>
+        entry.Resolution.AllCommands
+            .Where(c => c.HostPath is { } host && Path.GetFileName(host).ToLowerInvariant() is "powershell.exe" or "pwsh.exe"
+                && c.HasFlag(Core.Persistence.ResolutionFlag.InlineCommand))
+            .Select(c => Core.Persistence.EncodedPowerShell.Find(c.Arguments)?.Display)
+            .FirstOrDefault(d => d is not null);
+
     public static ScanFindingInfo Finding(int findingId, Scanning.Checks.ScanFinding f, bool forAdmin)
     {
         var techniques = f.SecondaryTechniqueIds.Prepend(f.TechniqueId).Where(Core.Mitre.MitreTechniqueIdFormat.IsValid)
@@ -197,7 +208,8 @@ internal static class PipeMapping
                 entry.Resolution.TargetPath is { } target ? WirePath.From(target) : null,
                 entry.Enabled, rules, p.Target?.Verdict, judgement.Outcome,
                 forAdmin ? judgement.UnverifiedReasons.Take(MaxReasons).Select(r => Text(r, MaxReasonLength)).ToArray() : [],
-                judgement.UnverifiedKind, Core.Persistence.PersistenceEntryId.Compute(entry));
+                judgement.UnverifiedKind, Core.Persistence.PersistenceEntryId.Compute(entry),
+                forAdmin ? DecodedCommand(entry) : null);
         }
 
         var threat = f.Persistence?.Judgement.Detections.OrderByDescending(d => d.Verdict).FirstOrDefault()?.Category;

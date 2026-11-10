@@ -839,7 +839,12 @@ public sealed class CommandLineResolver(IPathProbe probe)
             return state.Unresolved(TargetUnresolvedReason.InlineCommand, host, args); // the default: cmd /c echo @file
         }
 
-        command = HexUnescape(command).Trim();
+        if (HexUnescape(command) is not { } unescaped)
+        {
+            return state.Unresolved(TargetUnresolvedReason.Malformed, host, args); // review L1: a control character (NUL, ...) escaped in
+        }
+
+        command = unescaped.Trim();
         if (command.Length == 0)
         {
             return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
@@ -850,8 +855,8 @@ public sealed class CommandLineResolver(IPathProbe probe)
             : Launched(host, command, state, depth);
     }
 
-    /// <summary>forfiles' <c>0xHH</c> escapes (<c>0x22</c> is a quote).</summary>
-    private static string HexUnescape(string text)
+    /// <summary>forfiles' <c>0xHH</c> escapes (<c>0x22</c> is a quote); null when one decodes to a control character (below 0x20, review L1).</summary>
+    private static string? HexUnescape(string text)
     {
         if (!text.Contains("0x", StringComparison.OrdinalIgnoreCase))
         {
@@ -863,7 +868,13 @@ public sealed class CommandLineResolver(IPathProbe probe)
         {
             if (i + 3 < text.Length && text[i] == '0' && text[i + 1] is 'x' or 'X' && char.IsAsciiHexDigit(text[i + 2]) && char.IsAsciiHexDigit(text[i + 3]))
             {
-                result.Append((char)Convert.ToInt32(text.Substring(i + 2, 2), 16));
+                char decoded = (char)Convert.ToInt32(text.Substring(i + 2, 2), 16);
+                if (decoded < ' ')
+                {
+                    return null;
+                }
+
+                result.Append(decoded);
                 i += 3;
             }
             else

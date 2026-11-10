@@ -616,6 +616,7 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
 
         var verdict = fromVerdict is not null ? Verdict.PotentiallyUnwanted : InterpretVerdict(file, rule, verdictMeta, warnings);
         var category = fromVerdict ?? ThreatCategory.Malware;
+        bool categoryParsed = false;
         if (categoryMeta is { } meta)
         {
             string key = new((meta.Text ?? string.Empty).Where(ch => ch is not ('-' or '_' or ' ')).ToArray());
@@ -624,6 +625,7 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
                 && string.Equals(parsed.ToString(), key, StringComparison.OrdinalIgnoreCase))
             {
                 category = parsed;
+                categoryParsed = true;
             }
             else
             {
@@ -643,8 +645,20 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
             return (Verdict.PotentiallyUnwanted, category);
         }
 
-        // A non-PUP category on a pup / hacktool verdict: the verdict's own category wins (it can't be PotentiallyUnwanted otherwise).
-        return verdict == Verdict.PotentiallyUnwanted ? (verdict, fromVerdict!.Value) : (verdict, category);
+        // A non-PUP category on a pup / hacktool verdict: the verdict's own category wins (it can't be PotentiallyUnwanted otherwise),
+        // with a warning (review L8), since the rule's two meta values disagree.
+        if (verdict == Verdict.PotentiallyUnwanted)
+        {
+            if (categoryParsed)
+            {
+                warnings.Add(new YaraRuleWarning(file, rule, YaraWarningKind.Category, categoryMeta?.Display,
+                    $"YARA rule {rule} ({file}): category {category} doesn't fit verdict {verdictMeta?.Display}; using {fromVerdict}."));
+            }
+
+            return (verdict, fromVerdict!.Value);
+        }
+
+        return (verdict, category);
     }
 
     internal static MitreTechniqueSelection InterpretMitre(string file, string rule, MetaValue? meta, List<YaraRuleWarning> warnings)

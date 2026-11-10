@@ -488,10 +488,12 @@ public sealed record ScanFindingsRequest(Guid JobId, int Offset = 0, int Limit =
 /// <param name="UnverifiedReasons">Why (administrators: the judgement's text, sanitised; everyone else: nothing beyond the outcome).</param>
 /// <param name="UnverifiedKind">M3: for an Unverified entry, whether that is how it is written (Inherent) or a gap in the scan (Coverage).</param>
 /// <param name="EntryId">D5: the ID for <see cref="PipeRequestKind.PersistenceBlock"/> (<see cref="Persistence.PersistenceEntryId"/>).</param>
+/// <param name="DecodedCommand">Administrators only (E4, review L3): an encoded PowerShell command of the entry, decoded, sanitized to one line and
+/// capped (<see cref="Persistence.EncodedPowerShell.MaxDisplayLength"/>). Attacker-written text: never in alerts or the Event Log. Null otherwise.</param>
 public sealed record PersistenceFindingInfo(
     Persistence.PersistenceKind Kind, bool MachineWide, string? UserSid, WirePath Location, WirePath? ValueName, WirePath? CommandLine,
     WirePath? TargetPath, bool Enabled, IReadOnlyList<string> RuleIds, Verdict? TargetVerdict, Persistence.PersistenceOutcome Outcome,
-    IReadOnlyList<string> UnverifiedReasons, Persistence.UnverifiedKind? UnverifiedKind = null, string? EntryId = null);
+    IReadOnlyList<string> UnverifiedReasons, Persistence.UnverifiedKind? UnverifiedKind = null, string? EntryId = null, string? DecodedCommand = null);
 
 /// <param name="FindingId">Stable index of the finding in its job (findings are only appended).</param>
 /// <param name="Verdict">Null when there is no verdict: an Unverified autostart entry (see <see cref="PersistenceFindingInfo.Outcome"/>).</param>

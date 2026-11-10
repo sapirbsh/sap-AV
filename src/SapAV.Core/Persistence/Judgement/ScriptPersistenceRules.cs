@@ -104,11 +104,10 @@ public static class EncodedPowerShell
 /// <remarks>
 /// <list type="table">
 /// <listheader><term>Rule</term><description>Points (strength)</description></listheader>
-/// <item><term><see cref="EncodedPowerShellRule"/></term><description>an encoded command 40 (T1027.010), decoded for display; it or an
+/// <item><term><see cref="EncodedPowerShellRule"/></term><description>an encoded command 5 (T1027.010; review M1: alone it stays below the threshold), decoded only for the admin pipe (review L3); it or an
 /// inline command downloads / runs code 30 (T1059.001); changes Defender 50 (strong, T1562.001, DefenderTampering); starts a miner
 /// 70 (strong, T1496.001, Miner)</description></item>
-/// <item><term><see cref="MshtaRule"/></term><description>inline JavaScript / VBScript 20 (strong) or a remote HTA 20 (strong) with what
-/// runs shown (C3's host rule already scores those 60); a local HTA from a user-writable or risky folder 40 (strong when
+/// <item><term><see cref="MshtaRule"/></term><description>inline JavaScript / VBScript 20 (strong, the language only) or a remote HTA 20 (strong, the URL in log form)/// runs shown (C3's host rule already scores those 60); a local HTA from a user-writable or risky folder 40 (strong when
 /// machine-wide)</description></item>
 /// <item><term><see cref="Rundll32UserFolderRule"/></term><description>rundll32 loads a library from a user-writable or risky folder 50
 /// (strong when machine-wide), 20 when that library is trusted-signed; a library without a library extension 20</description></item>
@@ -177,6 +176,9 @@ public static class ScriptPersistenceRules
     /// <summary>Encoded PowerShell (every <c>-enc</c> form), decoded for display; download cradles, Defender changes and miners in it.</summary>
     public sealed class EncodedPowerShellRule : IPersistenceTargetRule
     {
+        /// <summary>Points for an encoded command by itself (review M1).</summary>
+        public const int EncodedScore = 5;
+
         public void Evaluate(PersistenceRuleContext context)
         {
             var resolution = context.Entry.Resolution;
@@ -192,8 +194,12 @@ public static class ScriptPersistenceRules
             var encoded = EncodedPowerShell.Find(arguments);
             if (encoded is not null)
             {
-                context.Add(EncodedPowerShellId, 40, encoded.Display is { } shown
-                        ? $"PowerShell runs a Base64-encoded command; decoded: \"{shown}\""
+                // Review M1: low on its own (OEM and management tasks encode too); with the interpreter (20) and inline (30) signals it
+                // stays below 60. What the decoded command does (download, Defender, miner) carries the verdict.
+                // Review L3: the decoded text is attacker-written, so it never goes into reasons (alerts, Event Log); the admin
+                // pipe shows it from the entry itself (PersistenceFindingInfo.DecodedCommand).
+                context.Add(EncodedPowerShellId, EncodedScore, encoded.Display is not null
+                        ? "PowerShell runs a Base64-encoded command"
                         : $"PowerShell runs an encoded command, but {encoded.Problem}",
                     MitreTechniqueIds.CommandObfuscation);
             }
@@ -207,13 +213,13 @@ public static class ScriptPersistenceRules
 
             if (Words(text, DefenderWords) is { Length: > 0 } defender)
             {
-                context.Add(PowerShellDefenderTamperingId, 50, $"PowerShell changes Microsoft Defender at every start ({string.Join(", ", defender)})",
+                context.Add(PowerShellDefenderTamperingId, 50, $"The {(encoded is null ? "inline" : "decoded")} PowerShell command changes Microsoft Defender at every start ({string.Join(", ", defender)})",
                     MitreTechniqueIds.DisableOrModifyTools, S.Strong, ThreatCategory.DefenderTampering);
             }
 
             if (Words(text, DownloadWords) is { Length: > 0 } download)
             {
-                context.Add(PowerShellDownloadId, 30, $"PowerShell downloads or runs code from the command line ({string.Join(", ", download)})",
+                context.Add(PowerShellDownloadId, 30, $"The {(encoded is null ? "inline" : "decoded")} PowerShell command downloads or runs code ({string.Join(", ", download)})",
                     MitreTechniqueIds.PowerShell);
             }
 
@@ -262,7 +268,7 @@ public static class ScriptPersistenceRules
                 string language = script.StartsWith("vbscript:", StringComparison.OrdinalIgnoreCase) ? "VBScript"
                     : script.StartsWith("javascript:", StringComparison.OrdinalIgnoreCase) ? "JavaScript"
                     : "script";
-                context.Add(MshtaScriptId, 20, $"mshta runs inline {language} at every start: \"{SafeText.SingleLine(script, MaxShownLength)}\"",
+                context.Add(MshtaScriptId, 20, $"mshta runs inline {language} at every start", // review L3: never the script text
                     language == "VBScript" ? MitreTechniqueIds.VisualBasic : MitreTechniqueIds.JavaScript, S.Strong);
                 return;
             }

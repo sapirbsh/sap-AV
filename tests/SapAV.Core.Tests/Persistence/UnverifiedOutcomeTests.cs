@@ -266,12 +266,12 @@ public class UnverifiedOutcomeTests
     }
 
     [Fact]
-    public void HiddenAlone_StaysBelowTheThreshold_ButIsUnverified_WhileEncodedAloneIsSuspiciousSinceE4()
+    public void EncodedOrHiddenAlone_StaysBelowTheThreshold_ButIsUnverified()
     {
         Assert.Equal(PersistenceOutcome.Unverified, JudgeScanned(Resolve(@"powershell -w hidden -Command Get-Date")).Outcome);
 
-        // E4: an encoded command is script persistence in itself (decoded for display).
-        Assert.Equal(PersistenceOutcome.Suspicious, JudgeScanned(Resolve(@"powershell -enc AAAA")).Outcome);
+        // E4 review M1: encoding alone (no hidden window, nothing bad decoded) stays below the threshold.
+        Assert.Equal(PersistenceOutcome.Unverified, JudgeScanned(Resolve(@"powershell -enc AAAA")).Outcome);
     }
 
     [Theory]

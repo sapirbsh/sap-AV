@@ -147,7 +147,7 @@ public sealed class PersistenceJudge
             string reason = $"Autostart entry score {score} (threshold {threshold}): " + string.Join("; ", scored.Select(s => s.Reason));
             var secondaries = scored.Select(s => s.TechniqueId).OfType<string>().Where(t => t != kindTechnique).Distinct(StringComparer.Ordinal).ToArray();
             // E3/E4: the category of the strongest signal that names one (a miner command line, ...); Malware otherwise.
-            var category = scored.FirstOrDefault(s => s.Category is not null)?.Category ?? ThreatCategory.Malware;
+            var category = scored.Where(s => s.Category is not null).OrderByDescending(s => s.Score).FirstOrDefault()?.Category ?? ThreatCategory.Malware;
             detections.Add(new Detection(Verdict.Suspicious, reason, kindTechnique, DetectionSource.Persistence, secondaries,
                 ThreatCategories.IsPotentiallyUnwanted(category) ? ThreatCategory.Malware : category));
         }

@@ -66,21 +66,43 @@ public static class VirusTotalVerdict
             new ScanNote(ScanNoteLevel.Information, result.Detail));
     }
 
-    /// <summary>Label words that mean potentially unwanted software or a hacking tool rather than malware.</summary>
+    /// <summary>
+    /// Label words that mean potentially unwanted software or a hacking tool rather than malware. Matched as whole tokens of the
+    /// label split on <c>.</c> <c>/</c> <c>-</c> <c>:</c> <c>_</c> <c>!</c> <c>[</c> <c>]</c> parentheses and spaces (review L2: <c>trojan.pupy</c>, the Pupy RAT,
+    /// must not read as "pup"). Two-word forms: <c>not-a-virus</c>, <c>potentially unwanted</c>.
+    /// </summary>
     public static IReadOnlyList<string> UnwantedLabelWords { get; } =
-        ["hacktool", "pua", "pup", "riskware", "not-a-virus", "adware", "potentially unwanted", "potentiallyunwanted"];
+        ["hacktool", "pua", "pup", "riskware", "adware", "potentiallyunwanted", "not-a-virus", "potentially-unwanted"];
 
-    /// <summary>True if VirusTotal's threat label names a PUP / HackTool category (case-insensitive).</summary>
+    private static readonly HashSet<string> UnwantedTokens = new(StringComparer.Ordinal)
+    {
+        "hacktool", "pua", "pup", "riskware", "adware", "potentiallyunwanted",
+    };
+
+    /// <summary>True if VirusTotal's threat label names a PUP / HackTool category (case-insensitive, whole tokens).</summary>
     public static bool IsPotentiallyUnwanted(string? threatLabel) => UnwantedCategory(threatLabel) is not null;
 
-    /// <summary>E1: HackTool when the label says hacktool, Pup for the other unwanted words, null for anything else.</summary>
+    /// <summary>E1: HackTool when the label has the token hacktool, Pup for the other unwanted tokens, null for anything else.</summary>
     public static ThreatCategory? UnwantedCategory(string? threatLabel)
     {
-        if (threatLabel is not { Length: > 0 } label || !UnwantedLabelWords.Any(w => label.Contains(w, StringComparison.OrdinalIgnoreCase)))
+        if (threatLabel is not { Length: > 0 } label)
         {
             return null;
         }
 
-        return label.Contains("hacktool", StringComparison.OrdinalIgnoreCase) ? ThreatCategory.HackTool : ThreatCategory.Pup;
+        var tokens = label.ToLowerInvariant().Split(['.', '/', '-', ':', '_', '!', '[', ']', '(', ')', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Contains("hacktool"))
+        {
+            return ThreatCategory.HackTool;
+        }
+
+        bool phrase = false;
+        for (int i = 0; i + 1 < tokens.Length && !phrase; i++)
+        {
+            phrase = (tokens[i] == "potentially" && tokens[i + 1] == "unwanted")
+                || (i + 2 < tokens.Length && tokens[i] == "not" && tokens[i + 1] == "a" && tokens[i + 2] == "virus");
+        }
+
+        return phrase || tokens.Any(UnwantedTokens.Contains) ? ThreatCategory.Pup : null;
     }
 }

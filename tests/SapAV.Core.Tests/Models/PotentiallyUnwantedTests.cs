@@ -182,6 +182,7 @@ public sealed class PotentiallyUnwantedTests : IDisposable
     [InlineData("verdict = \"suspicious\" category = \"miner\"", Verdict.Suspicious, ThreatCategory.Miner, false)]
     [InlineData("category = \"Pup,Miner\"", Verdict.Malicious, ThreatCategory.Malware, true)] // no comma-combined or numeric values
     [InlineData("category = \"1\"", Verdict.Malicious, ThreatCategory.Malware, true)]
+    [InlineData("verdict = \"pup\" category = \"miner\"", Verdict.PotentiallyUnwanted, ThreatCategory.Pup, true)] // review L8: the metas disagree
     public void YaraVerdictAndCategoryMeta_AreInterpreted(string meta, Verdict verdict, ThreatCategory category, bool warns)
     {
         using var rules = YaraRuleSet.FromSource("e1.yar", $"rule R {{ meta: {meta} strings: $a = \"sapav-e1-yara-meta\" condition: $a }}");
