@@ -39,6 +39,7 @@ public interface IFileHeuristics
 /// <item><term>High-entropy PE sections (packed)</term><description><see cref="HighEntropyScore"/>, T1027.002</description></item>
 /// <item><term>Broken Authenticode signature</term><description><see cref="BrokenSignatureScore"/>, T1204.002</description></item>
 /// <item><term>Unsigned PE</term><description><see cref="UnsignedScore"/>, T1204.002</description></item>
+/// <item><term>A5 follow-up: untrusted "MZ" file with malformed headers</term><description><see cref="MalformedScore"/>, T1027.002</description></item>
 /// <item><term>Executable/script in Temp, Downloads or AppData</term><description><see cref="RiskyFolderScore"/>, T1204.002</description></item>
 /// <item><term>Executable/script with an Internet/Restricted-zone Mark-of-the-Web</term><description><see cref="InternetOriginScore"/>, T1204.002</description></item>
 /// <item><term>E3: unsigned PE in AppData with a machine-generated name</term><description><see cref="RandomNameScore"/>, T1204.002, Infostealer</description></item>
@@ -71,6 +72,15 @@ public sealed class FileHeuristics : IFileHeuristics
     public const int UnsignedScore = 15;
     public const int RiskyFolderScore = 15;
     public const int InternetOriginScore = 15;
+
+    /// <summary>
+    /// A5 follow-up M2: MZ headers a loader would refuse or that hide the PE (no PE header in reach, over 96 sections, a section
+    /// table past the headers): weak alone, but it no longer turns the other executable rules off.
+    /// </summary>
+    public const int MalformedScore = 20;
+
+    /// <summary>A5 follow-up M3: most section bytes sampled for entropy (ranges merged, so no byte is read twice).</summary>
+    public const long MaxEntropySampleBytes = 16L * 1024 * 1024;
 
     /// <summary>Plain Offline on an executable (<c>attrib +O</c>): weak. Hidden from naive scanners, but also set by old HSM software.</summary>
     public const int PlainOfflineScore = 10;
@@ -119,6 +129,9 @@ public sealed class FileHeuristics : IFileHeuristics
 
     public int Threshold { get; }
 
+    /// <summary>Section bytes sampled for entropy at most (<see cref="MaxEntropySampleBytes"/>; lowered by tests).</summary>
+    internal long EntropySampleBudget { get; init; } = MaxEntropySampleBytes;
+
     /// <inheritdoc/>
     public HeuristicResult Analyze(string path, HeuristicContext context, CancellationToken cancellationToken = default)
     {
@@ -129,7 +142,7 @@ public sealed class FileHeuristics : IFileHeuristics
         using var handle = SecureFile.OpenRegularFile(path, out var failure, out var attributes);
         if (handle is null)
         {
-            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
+            return new HeuristicResult(NameFindings(path, context).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
         return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken, FilePlaceholder.IsPlainOffline(attributes, NativeFile.ReparseTagOf(handle, attributes)));
@@ -145,7 +158,7 @@ public sealed class FileHeuristics : IFileHeuristics
 
         if (!SecureFile.Validate(handle, out var failure, out var attributes))
         {
-            return new HeuristicResult(NameFindings(path).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
+            return new HeuristicResult(NameFindings(path, context).AsReadOnly(), Threshold, contentInspected: false, failure.Message, failure.Reason);
         }
 
         return AnalyzeValidated(new HandleContent(handle), path, context, cancellationToken, FilePlaceholder.IsPlainOffline(attributes, NativeFile.ReparseTagOf(handle, attributes)));
@@ -171,7 +184,7 @@ public sealed class FileHeuristics : IFileHeuristics
 
     private HeuristicResult AnalyzeValidated(Content content, string path, HeuristicContext context, CancellationToken cancellationToken, bool plainOffline = false)
     {
-        var findings = NameFindings(path);
+        var findings = NameFindings(path, context);
         try
         {
             InspectContent(content, path, context, findings, cancellationToken, plainOffline);
@@ -183,12 +196,15 @@ public sealed class FileHeuristics : IFileHeuristics
         }
     }
 
-    private static List<HeuristicFinding> NameFindings(string path)
+    private static List<HeuristicFinding> NameFindings(string path, HeuristicContext context)
     {
         var findings = new List<HeuristicFinding>();
         string name = Path.GetFileName(path);
 
-        if (FileNameRules.DoubleExtension(name) is { } doubleExtension)
+        // A5 follow-up M7: a trusted-signed self-extractor (setup.7z.exe, data.zip.exe) names its archive honestly; only an
+        // untrusted file gets the double-extension points for an archive decoy.
+        if (FileNameRules.DoubleExtension(name) is { } doubleExtension
+            && !(context.IsTrustedSigned && FileNameRules.IsArchiveDecoy(doubleExtension)))
         {
             findings.Add(new(HeuristicKind.DoubleExtension, DoubleExtensionScore,
                 $"double file extension {doubleExtension}", MitreTechniqueIds.DoubleFileExtension));
@@ -197,7 +213,7 @@ public sealed class FileHeuristics : IFileHeuristics
         if (FileNameRules.HasRightToLeftOverride(name))
         {
             findings.Add(new(HeuristicKind.RightToLeftOverride, RightToLeftOverrideScore,
-                "file name contains a right-to-left override character", MitreTechniqueIds.RightToLeftOverride));
+                "file name contains a bidirectional override or isolate character", MitreTechniqueIds.RightToLeftOverride));
         }
 
         return findings;
@@ -209,10 +225,35 @@ public sealed class FileHeuristics : IFileHeuristics
         long length = content.Length;
         var head = new byte[(int)Math.Min(PeHeaders.HeaderReadSize, length)];
         int headLength = ReadFully(content, head, 0);
-        var pe = PeHeaders.TryParse(head.AsSpan(0, headLength), length);
+        // A5 follow-up M2: up to SizeOfHeaders / the section table end, at most 64 KiB. A far e_lfanew needs a second round (the
+        // first one only reaches the PE header); the size only grows and is capped, so a third is never needed.
+        for (int round = 0; round < 2; round++)
+        {
+            int needed = PeHeaders.HeaderBytesNeeded(head.AsSpan(0, headLength), length);
+            if (needed <= headLength)
+            {
+                break;
+            }
 
-        bool isExecutable = pe is not null || FileNameRules.ScriptExtensions.Contains(Path.GetExtension(path));
+            head = new byte[needed];
+            headLength = ReadFully(content, head, 0);
+        }
+
+        var probe = PeHeaders.Probe(head.AsSpan(0, headLength), length);
+        var pe = probe.Pe;
+
+        // A5 follow-up M2: "MZ" or an image extension makes it an executable image even when the headers don't parse (an empty
+        // file runs nothing, so it isn't one).
+        string extension = Path.GetExtension(path);
+        bool image = probe.IsMz || (length > 0 && FileNameRules.ImageExtensions.Contains(extension));
+        bool isExecutable = image || FileNameRules.ScriptExtensions.Contains(extension);
         bool trusted = context.IsTrustedSigned;
+
+        if (probe.Malformed is { } malformed && !trusted)
+        {
+            findings.Add(new(HeuristicKind.MalformedExecutable, MalformedScore, $"executable with malformed headers ({malformed})",
+                MitreTechniqueIds.SoftwarePacking));
+        }
 
         if (pe is not null && length > MaxSizeBytes)
         {
@@ -225,7 +266,7 @@ public sealed class FileHeuristics : IFileHeuristics
         }
         else if (pe is not null && !trusted)
         {
-            var entropy = SectionEntropy(content, pe, cancellationToken);
+            var entropy = SectionEntropy(content, pe, EntropySampleBudget, cancellationToken);
             if (entropy is { } bits && bits >= HighEntropyBitsPerByte)
             {
                 findings.Add(new(HeuristicKind.HighEntropyExecutable, HighEntropyScore,
@@ -234,7 +275,7 @@ public sealed class FileHeuristics : IFileHeuristics
             }
         }
 
-        if (pe is not null && context.Signature is { IsChecked: true } signature && !signature.IsTrusted)
+        if (image && context.Signature is { IsChecked: true } signature && !signature.IsTrusted)
         {
             findings.Add(signature.HasBrokenSignature
                 ? new(HeuristicKind.BrokenSignature, BrokenSignatureScore,
@@ -250,7 +291,7 @@ public sealed class FileHeuristics : IFileHeuristics
 
         // E3: random-named unsigned program in AppData (infostealer / dropper copies). Only with a checked, untrusted signature:
         // legitimate per-user installs (Discord, Teams, VS Code) are signed and never get it.
-        if (pe is not null && context.Signature is { IsChecked: true, IsTrusted: false }
+        if (image && context.Signature is { IsChecked: true, IsTrusted: false }
             && FileNameRules.ClassifyFolder(path) == RiskyFolder.AppData && FileNameRules.RandomNameReason(path) is { } random)
         {
             findings.Add(new(HeuristicKind.RandomNameAppDataExecutable, RandomNameScore,
@@ -299,18 +340,25 @@ public sealed class FileHeuristics : IFileHeuristics
     }
 
     /// <summary>Entropy of the PE section data (not headers or overlay), or null if there is too little.</summary>
-    private static double? SectionEntropy(Content content, PeHeaders pe, CancellationToken cancellationToken)
+    private static double? SectionEntropy(Content content, PeHeaders pe, long budget, CancellationToken cancellationToken)
     {
         var entropy = new ShannonEntropy();
         var buffer = ArrayPool<byte>.Shared.Rent(ReadBufferSize);
         try
         {
-            foreach (var (offset, size) in pe.SectionData)
+            // A5 follow-up M3: overlapping or repeated sections (thousands of entries pointing at the same bytes) are merged, so
+            // every byte is read once at most, and at most MaxEntropySampleBytes are read in all.
+            foreach (var (offset, size) in MergeRanges(pe.SectionData))
             {
-                for (long done = 0; done < size;)
+                if (budget <= 0)
+                {
+                    break;
+                }
+
+                for (long done = 0; done < size && budget > 0;)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    int want = (int)Math.Min(ReadBufferSize, size - done);
+                    int want = (int)Math.Min(Math.Min(ReadBufferSize, size - done), budget);
                     int read = content.Read(buffer.AsSpan(0, want), offset + done);
                     if (read == 0)
                     {
@@ -319,6 +367,7 @@ public sealed class FileHeuristics : IFileHeuristics
 
                     entropy.Add(buffer.AsSpan(0, read));
                     done += read;
+                    budget -= read;
                 }
             }
         }
@@ -328,6 +377,27 @@ public sealed class FileHeuristics : IFileHeuristics
         }
 
         return entropy.Total >= MinEntropySampleBytes ? entropy.Value : null;
+    }
+
+    /// <summary>The section ranges sorted and merged (overlapping or touching ranges become one).</summary>
+    internal static List<(long Offset, long Size)> MergeRanges(IReadOnlyList<(long Offset, long Size)> ranges)
+    {
+        var merged = new List<(long Offset, long Size)>();
+        foreach (var (offset, size) in ranges.Where(r => r.Size > 0).OrderBy(r => r.Offset))
+        {
+            long end = offset + size;
+            if (merged.Count > 0 && offset <= merged[^1].Offset + merged[^1].Size)
+            {
+                var last = merged[^1];
+                merged[^1] = (last.Offset, Math.Max(last.Offset + last.Size, end) - last.Offset);
+            }
+            else
+            {
+                merged.Add((offset, size));
+            }
+        }
+
+        return merged;
     }
 
     /// <summary>The overlay's share of the file in percent if it is padding; otherwise null.</summary>

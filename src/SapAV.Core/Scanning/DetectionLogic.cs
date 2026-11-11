@@ -7,6 +7,9 @@ namespace SapAV.Core.Scanning;
 /// </summary>
 public static class DetectionLogic
 {
-    /// <summary>2: E1 (PotentiallyUnwanted, threat categories), E3 (infostealer / miner heuristics).</summary>
-    public const int Version = 2;
+    /// <summary>
+    /// 2: E1 (PotentiallyUnwanted, threat categories), E3 (infostealer / miner heuristics).
+    /// 3: A5 follow-up (malformed-PE detection, image extensions, entropy read budget, trusted SFX names, bidi isolates).
+    /// </summary>
+    public const int Version = 3;
 }

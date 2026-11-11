@@ -43,6 +43,12 @@ public enum HeuristicKind
 
     /// <summary>E3: a small script whose text starts a cryptominer (pool URL, <c>--donate-level</c>, a Monero wallet, ...).</summary>
     MinerScript,
+
+    /// <summary>
+    /// A5 follow-up M2: an "MZ" file whose headers a loader would refuse or that hide the PE (no PE signature in reach, more than
+    /// 96 sections, a section table past the headers). Kept last: kinds cross the worker wire by name, but order stays stable.
+    /// </summary>
+    MalformedExecutable,
 }
 
 /// <summary>One heuristic that fired, with its score contribution.</summary>

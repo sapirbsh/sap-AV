@@ -35,7 +35,24 @@ public static class FileNameRules
         ".zip", ".rar", ".7z", ".htm", ".html",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
-    private const char RightToLeftOverrideChar = '\u202E';
+    /// <summary>
+    /// A5 follow-up M2: extensions Windows loads as a PE image. A file with one of these is treated as an executable image even
+    /// when its headers don't parse (or it has no "MZ" at all), so a broken header can't turn the unsigned / folder rules off.
+    /// </summary>
+    public static readonly FrozenSet<string> ImageExtensions = new[]
+    {
+        ".exe", ".dll", ".scr", ".com", ".pif", ".cpl", ".sys", ".ocx", ".drv", ".efi",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A5 follow-up M7: archive extensions a self-extractor names honestly (<c>setup.7z.exe</c>).</summary>
+    private static readonly FrozenSet<string> ArchiveDecoyExtensions = new[] { ".zip", ".rar", ".7z" }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A5 follow-up L1: bidirectional embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069). Each can reorder how the
+    /// rest of a file name is displayed, so <c>invoice[RLI]fdp.exe</c> masquerades like the classic U+202E.
+    /// </summary>
+    private static readonly System.Buffers.SearchValues<char> BidiControlChars =
+        System.Buffers.SearchValues.Create("\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069");
 
     /// <summary>
     /// Returns the double extension (e.g. <c>.pdf.exe</c>) if <paramref name="fileName"/> ends in an executable
@@ -58,9 +75,25 @@ public static class FileNameRules
             : null;
     }
 
-    /// <summary>True if the name contains a right-to-left override character (U+202E).</summary>
+    /// <summary>
+    /// A5 follow-up M7: true if <paramref name="doubleExtension"/> (as returned by <see cref="DoubleExtension"/>) is an archive
+    /// followed by <c>.exe</c> (<c>.zip.exe</c>, <c>.rar.exe</c>, <c>.7z.exe</c>): the honest name of a self-extracting archive.
+    /// Only a trusted-signed file is let off for it; other executable extensions (<c>.zip.scr</c>) never are.
+    /// </summary>
+    public static bool IsArchiveDecoy(string doubleExtension)
+    {
+        ArgumentNullException.ThrowIfNull(doubleExtension);
+        string last = Path.GetExtension(doubleExtension);
+        string stem = doubleExtension[..^last.Length];
+        return last.Equals(".exe", StringComparison.OrdinalIgnoreCase) && ArchiveDecoyExtensions.Contains(stem);
+    }
+
+    /// <summary>
+    /// True if the name contains a bidirectional override, embedding or isolate character (U+202A-U+202E, U+2066-U+2069), the
+    /// classic one being the right-to-left override U+202E.
+    /// </summary>
     public static bool HasRightToLeftOverride(string fileName) =>
-        Path.GetFileName(fileName).Contains(RightToLeftOverrideChar);
+        Path.GetFileName(fileName).AsSpan().ContainsAny(BidiControlChars);
 
     /// <summary>
     /// Classifies a full path: inside a user's Downloads, the Temp folders (user, <c>%SystemRoot%\Temp</c>,

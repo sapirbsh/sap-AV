@@ -78,7 +78,8 @@ public sealed class FileHeuristicsTests : IDisposable
     {
         var result = AnalyzeOnDisk("invoice.pdf.exe", "not really a program"u8.ToArray());
 
-        Assert.Equal([HeuristicKind.DoubleExtension], Kinds(result));
+        // A5 follow-up M2: an .exe name makes it an image even without "MZ", so the Temp folder rule adds its weak points.
+        Assert.Equal([HeuristicKind.DoubleExtension, HeuristicKind.RiskyFolderExecutable], Kinds(result));
         var detection = Assert.IsType<Detection>(result.Detection);
         Assert.Equal(Verdict.Suspicious, detection.Verdict);
         Assert.Equal(DetectionSource.Heuristic, detection.Source);
