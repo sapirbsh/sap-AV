@@ -972,7 +972,7 @@ and **never change the real Defender configuration** (Defender access goes throu
     user approves it.
   - **Budget caveat:** parallel scans can overrun the total by one per-file timeout per thread.
 
-**E5 (engine) immediate review (no Critical/High).** M1–M6, L2, L4 and L5 are being fixed before the E5 rules. Remaining:
+**E5 (engine) immediate review (no Critical/High).** Built `d548bea`; M1–M6, L2, L4, L5 fixed in `f5a10e4` (unknown never reads as benign; raw exclusion items; first+last 256 kept with `Truncated` as a signal; `CollectedAsSystem`/`ExclusionsHiddenFromSystem`; read-only registry fallback; `DefenderExpected` on client SKUs; System.Management 11.0.0). For the E5 rules: a stopped Defender service (ServiceNotRunning) gives `DefenderIsActiveAntivirus = null`, so rules must check the read state themselves (ServiceNotRunning or NotInstalled on a client = tamper sign). Remaining:
 - **L1:** the read-only guard test is easy to bypass: a `<Using Include="System.Management">` in a csproj, `.Delete(`,
   `dynamic`, MpCmdRun and Defender registry key writes aren't checked. Widen it to all engine files and csproj/props. E11
   needs a reviewed exception anyway.
