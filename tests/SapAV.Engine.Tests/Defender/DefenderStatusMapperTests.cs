@@ -34,7 +34,9 @@ public sealed class DefenderStatusMapperTests
         Assert.Equal(DefenderExclusionListState.Known, snapshot.Exclusions.IpAddresses.State); // null = no IP exclusions
         Assert.Empty(snapshot.Exclusions.IpAddresses.Items);
         Assert.True(snapshot.DefenderIsActiveAntivirus);
+        Assert.Equal(DefenderActiveSource.RunningMode, snapshot.ActiveAntivirusDecidedBy);
         Assert.False(snapshot.ThirdPartyAntivirusActive);
+        Assert.Equal(DefenderExclusionSource.Wmi, snapshot.Exclusions.Paths.Source);
     }
 
     [Fact]
@@ -55,12 +57,14 @@ public sealed class DefenderStatusMapperTests
     [Fact]
     public void PlaceholderLookalike_NextToRealExclusions_CantHideThem()
     {
-        var prefs = Preference(paths: [AdminPlaceholder, @"C:\Users\Public\x"]);
+        var prefs = Preference(paths: [AdminPlaceholder, @"C:\Users\Public\x"], extensions: ["N/A: no exclusions here"]);
 
-        var paths = Map(One(HealthyStatus()), One(prefs)).Exclusions.Paths;
+        var exclusions = Map(One(HealthyStatus()), One(prefs)).Exclusions;
 
-        Assert.Equal(DefenderExclusionListState.Known, paths.State);
-        Assert.Equal([AdminPlaceholder, @"C:\Users\Public\x"], paths.Items);
+        Assert.Equal(DefenderExclusionListState.Known, exclusions.Paths.State);
+        Assert.Equal([AdminPlaceholder, @"C:\Users\Public\x"], exclusions.Paths.Items);
+        Assert.Equal(DefenderExclusionListState.Known, exclusions.Extensions.State); // only the exact placeholder text hides a list
+        Assert.Equal(["N/A: no exclusions here"], exclusions.Extensions.Items);
     }
 
     [Fact]
@@ -115,10 +119,11 @@ public sealed class DefenderStatusMapperTests
         var snapshot = Map(stopped, stopped, products);
 
         Assert.Equal(DefenderReadState.ServiceNotRunning, snapshot.Availability);
-        Assert.False(snapshot.DefenderIsActiveAntivirus);
+        Assert.Null(snapshot.DefenderIsActiveAntivirus); // a stopped Defender is unknown, never "handed over" (review M3)
+        Assert.Equal(DefenderActiveSource.Unknown, snapshot.ActiveAntivirusDecidedBy);
         Assert.True(snapshot.ThirdPartyAntivirusActive);
         Assert.Same(DefenderProtectionState.Unknown, snapshot.Protection);
-        Assert.Same(DefenderExclusions.Unknown, snapshot.Exclusions);
+        Assert.Equal(DefenderExclusionListState.Unknown, snapshot.Exclusions.Paths.State);
         Assert.Contains("0x800106BA", snapshot.Detail);
     }
 
@@ -139,7 +144,9 @@ public sealed class DefenderStatusMapperTests
         Assert.Equal(DefenderExclusionListState.Unknown, snapshot.Exclusions.Paths.State);
         Assert.Null(snapshot.RegisteredAntivirus);
         Assert.Contains("MSFT_MpComputerStatus: " + expected, snapshot.Detail);
-        Assert.Equal(expected == DefenderReadState.NotInstalled ? false : null, snapshot.DefenderIsActiveAntivirus);
+        Assert.Null(snapshot.DefenderIsActiveAntivirus); // review M1: not installed, without Security Center, is unknown
+        Assert.Null(snapshot.ThirdPartyAntivirusActive); // review M2: Security Center unknown
+        Assert.Null(snapshot.DefenderExpected);
     }
 
     [Fact]
@@ -155,20 +162,86 @@ public sealed class DefenderStatusMapperTests
     }
 
     [Fact]
-    public void ExclusionText_IsSanitized_AndCapped()
+    public void ExclusionItems_AreStoredRaw_OnlyUnloggableCharactersReplaced()
     {
-        var many = Enumerable.Range(0, DefenderExclusionList.MaxItems + 5).Select(i => $@"C:\e{i}").ToArray();
-        var hostile = Preference(paths: ["C:\\a\r\nfake line\u0007", new string('x', DefenderExclusionList.MaxItemLength + 50), "  ", null!]);
-        hostile["ExclusionExtension"] = many;
+        var hostile = Preference(paths: ["C:\\a\r\nfake  line\u0007", @" C:\lead\  ", new string('x', DefenderExclusionList.MaxItemLength + 50), "  ", null!]);
 
-        var exclusions = Map(One(HealthyStatus()), One(hostile)).Exclusions;
+        var paths = Map(One(HealthyStatus()), One(hostile)).Exclusions.Paths;
 
-        Assert.Equal(2, exclusions.Paths.Items.Count); // blank and null entries dropped
-        Assert.DoesNotContain(exclusions.Paths.Items[0], c => char.IsControl(c));
-        Assert.True(exclusions.Paths.Items[1].Length <= DefenderExclusionList.MaxItemLength);
-        Assert.True(exclusions.Paths.Truncated);
-        Assert.Equal(DefenderExclusionList.MaxItems, exclusions.Extensions.Items.Count);
-        Assert.True(exclusions.Extensions.Truncated);
+        Assert.Equal(3, paths.Items.Count);
+        Assert.Equal("C:\\a\uFFFD\uFFFDfake  line\uFFFD", paths.Items[0]); // same length, nothing collapsed
+        Assert.Equal(@" C:\lead\  ", paths.Items[1]);                     // nothing trimmed
+        Assert.Equal(new string('x', DefenderExclusionList.MaxItemLength), paths.Items[2]); // cut at the cap, no ellipsis
+        Assert.True(paths.Truncated);
+        Assert.Equal(2, paths.BlankItemsDropped);
+        Assert.DoesNotContain(DefenderExclusionList.ForDisplay("C:\\a\r\nfake line"), c => char.IsControl(c)); // display only
+    }
+
+    [Fact]
+    public void PaddedList_IsTruncated_KeepingTheFirstAndLastHalf_AndTheRealCount()
+    {
+        const int total = 600;
+        var prefs = Preference(extensions: Enumerable.Range(0, total).Select(i => $".e{i}").ToArray());
+
+        var extensions = Map(One(HealthyStatus()), One(prefs)).Exclusions.Extensions;
+
+        Assert.True(extensions.Truncated); // surfaced: a padded list is suspicious in itself
+        Assert.Equal(total, extensions.TotalCount);
+        Assert.Equal(DefenderExclusionList.MaxItems, extensions.Items.Count);
+        Assert.Equal(".e0", extensions.Items[0]);
+        Assert.Equal(".e255", extensions.Items[255]);
+        Assert.Equal($".e{total - 256}", extensions.Items[256]);
+        Assert.Equal($".e{total - 1}", extensions.Items[^1]); // an entry appended at the end is never pushed out of view
+    }
+
+    [Fact]
+    public void NotInstalled_UsesSecurityCenter_AndIsATamperSignOnAClient()
+    {
+        var missing = WmiReadResult.Failure(WmiReadStatus.NotFound, "0x8004100E");
+        var client = new DefenderEnvironmentInfo(IsClientSku: true, RunningAsSystem: true, DefenderRegistryExclusions.Unreadable);
+        var thirdParty = WmiReadResult.Ok([Product("Other AV", ThirdPartyGuid, State(on: true))]);
+
+        var withCenter = DefenderStatusMapper.Map(missing, missing, thirdParty, Now, client);
+        var withoutCenter = DefenderStatusMapper.Map(missing, missing, NoSecurityCenter, Now, client);
+
+        Assert.Equal(DefenderReadState.NotInstalled, withCenter.Availability);
+        Assert.True(withCenter.DefenderExpected);
+        Assert.False(withCenter.DefenderIsActiveAntivirus);
+        Assert.Equal(DefenderActiveSource.SecurityCenter, withCenter.ActiveAntivirusDecidedBy);
+        Assert.Null(withoutCenter.DefenderIsActiveAntivirus);
+        Assert.Null(withoutCenter.ThirdPartyAntivirusActive);
+    }
+
+    [Fact]
+    public void FailedStatusRead_IgnoresSecurityCenter_EvenWhenAnotherProductIsOn()
+    {
+        var timedOut = WmiReadResult.Failure(WmiReadStatus.TimedOut, null);
+        var products = WmiReadResult.Ok([DefenderProduct(on: false), Product("Other AV", ThirdPartyGuid, State(on: true))]);
+
+        var snapshot = Map(timedOut, One(Preference()), products);
+
+        Assert.Null(snapshot.DefenderIsActiveAntivirus);
+        Assert.Equal(DefenderActiveSource.Unknown, snapshot.ActiveAntivirusDecidedBy);
+        Assert.True(snapshot.ThirdPartyAntivirusActive);
+    }
+
+    [Fact]
+    public void HiddenFromSystem_IsFlagged_AndTheRegistryFallbackFillsReadableLists()
+    {
+        var prefs = Preference(paths: [AdminPlaceholder], extensions: [AdminPlaceholder], processes: [AdminPlaceholder]);
+        var registry = new DefenderRegistryExclusions(Paths: [@"C:\Games"], Extensions: null, Processes: [], IpAddresses: null);
+        var environment = new DefenderEnvironmentInfo(IsClientSku: true, RunningAsSystem: true, registry);
+
+        var snapshot = DefenderStatusMapper.Map(One(HealthyStatus()), One(prefs), NoSecurityCenter, Now, environment);
+
+        Assert.True(snapshot.CollectedAsSystem);
+        Assert.True(snapshot.ExclusionsHiddenFromSystem);
+        Assert.Equal(DefenderExclusionSource.Registry, snapshot.Exclusions.Paths.Source);
+        Assert.Equal([@"C:\Games"], snapshot.Exclusions.Paths.Items);
+        Assert.Equal(DefenderExclusionListState.Known, snapshot.Exclusions.Processes.State);
+        Assert.Equal(DefenderExclusionListState.Hidden, snapshot.Exclusions.Extensions.State); // registry couldn't read it either
+        Assert.Equal(DefenderExclusionListState.Known, snapshot.Exclusions.IpAddresses.State); // WMI null list stays Known (WMI)
+        Assert.Equal(DefenderExclusionSource.Wmi, snapshot.Exclusions.IpAddresses.Source);
     }
 
     [Theory]

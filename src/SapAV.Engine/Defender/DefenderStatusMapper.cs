@@ -9,8 +9,9 @@ namespace SapAV.Engine.Defender;
 /// </summary>
 /// <remarks>
 /// Values of the wrong type count as unknown. An exclusion list that is exactly Defender's one-item
-/// <c>N/A: Must be an administrator to view exclusions</c> placeholder is <see cref="DefenderExclusionListState.Hidden"/>; any
-/// other list is kept as-is (an "N/A:" lookalike added next to real exclusions can't hide them).
+/// <see cref="HiddenPlaceholder"/> (trimmed, case-insensitive) is <see cref="DefenderExclusionListState.Hidden"/>; any other list
+/// is kept as-is (an "N/A:" lookalike, alone or next to real exclusions, is an ordinary entry). A Hidden or Unknown list is then
+/// filled from the read-only registry fallback when that could read it.
 /// </remarks>
 public static class DefenderStatusMapper
 {
@@ -40,16 +41,20 @@ public static class DefenderStatusMapper
 
     public static readonly IReadOnlyCollection<string> AntivirusProductProperties = ["displayName", "instanceGuid", "productState"];
 
-    public static DefenderStatusSnapshot Map(WmiReadResult computerStatus, WmiReadResult preference, WmiReadResult securityCenter, DateTimeOffset collectedAt)
+    public static DefenderStatusSnapshot Map(WmiReadResult computerStatus, WmiReadResult preference, WmiReadResult securityCenter,
+        DateTimeOffset collectedAt, DefenderEnvironmentInfo? environment = null)
     {
         ArgumentNullException.ThrowIfNull(computerStatus);
         ArgumentNullException.ThrowIfNull(preference);
         ArgumentNullException.ThrowIfNull(securityCenter);
+        environment ??= DefenderEnvironmentInfo.Unknown;
 
         var (statusRead, status) = Part(computerStatus);
         var (preferenceRead, prefs) = Part(preference);
         var protection = status is null ? DefenderProtectionState.Unknown : MapProtection(status);
         var products = MapProducts(securityCenter);
+        var wmiExclusions = prefs is null ? DefenderExclusions.Unknown : MapExclusions(prefs);
+        var (active, decidedBy) = IsDefenderActive(statusRead, protection, products);
 
         return new DefenderStatusSnapshot
         {
@@ -59,11 +64,32 @@ public static class DefenderStatusMapper
             Detail = MapDetail(computerStatus, statusRead, preference, preferenceRead),
             Protection = protection,
             Preferences = prefs is null ? DefenderPreferenceFlags.Unknown : MapPreferences(prefs),
-            Exclusions = prefs is null ? DefenderExclusions.Unknown : MapExclusions(prefs),
+            Exclusions = WithRegistryFallback(wmiExclusions, environment.RegistryExclusions),
             RegisteredAntivirus = products,
-            DefenderIsActiveAntivirus = IsDefenderActive(statusRead, protection, products),
+            DefenderIsActiveAntivirus = active,
+            ActiveAntivirusDecidedBy = decidedBy,
+            DefenderExpected = environment.IsClientSku,
+            CollectedAsSystem = environment.RunningAsSystem,
+            ExclusionsHiddenFromSystem = environment.RunningAsSystem == true && AnyHidden(wmiExclusions),
         };
     }
+
+    private static bool AnyHidden(DefenderExclusions e) =>
+        new[] { e.Paths, e.Extensions, e.Processes, e.IpAddresses }.Any(l => l.State == DefenderExclusionListState.Hidden);
+
+    /// <summary>A Hidden or Unknown WMI list is replaced by the registry's, when the registry could read it completely.</summary>
+    private static DefenderExclusions WithRegistryFallback(DefenderExclusions wmi, DefenderRegistryExclusions registry) => new()
+    {
+        Paths = Fallback(wmi.Paths, registry.Paths),
+        Extensions = Fallback(wmi.Extensions, registry.Extensions),
+        Processes = Fallback(wmi.Processes, registry.Processes),
+        IpAddresses = Fallback(wmi.IpAddresses, registry.IpAddresses),
+    };
+
+    private static DefenderExclusionList Fallback(DefenderExclusionList wmi, IReadOnlyList<string>? registry) =>
+        wmi.State != DefenderExclusionListState.Known && registry is not null
+            ? DefenderExclusionList.Known(registry, DefenderExclusionSource.Registry)
+            : wmi;
 
     internal static DefenderReadState ToReadState(WmiReadStatus status) => status switch
     {
@@ -160,8 +186,11 @@ public static class DefenderStatusMapper
     private static bool IsHiddenPlaceholder(string?[] items)
     {
         var nonBlank = items.Where(i => !string.IsNullOrWhiteSpace(i)).ToArray();
-        return nonBlank.Length == 1 && nonBlank[0]!.TrimStart().StartsWith("N/A", StringComparison.OrdinalIgnoreCase);
+        return nonBlank.Length == 1 && string.Equals(nonBlank[0]!.Trim(), HiddenPlaceholder, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>Defender's exact placeholder for an exclusion list hidden from a non-administrator.</summary>
+    public const string HiddenPlaceholder = "N/A: Must be an administrator to view exclusions";
 
     private static IReadOnlyList<RegisteredAntivirus>? MapProducts(WmiReadResult result)
     {
@@ -182,38 +211,36 @@ public static class DefenderStatusMapper
     }
 
     /// <summary>
-    /// Defender's own running mode decides when known; otherwise Security Center's view of Defender, or of another enabled product.
+    /// Defender's own running mode decides when its status was read. Security Center is consulted only when Defender's classes
+    /// don't exist (NotInstalled). Any other failed read (service not running, denied, timed out, ...) is unknown: a broken or
+    /// tampered Defender must not look like a deliberate hand-over to another product.
     /// </summary>
-    private static bool? IsDefenderActive(DefenderReadState statusRead, DefenderProtectionState protection, IReadOnlyList<RegisteredAntivirus>? products)
+    private static (bool? Active, DefenderActiveSource DecidedBy) IsDefenderActive(
+        DefenderReadState statusRead, DefenderProtectionState protection, IReadOnlyList<RegisteredAntivirus>? products)
     {
-        if (statusRead is DefenderReadState.NotInstalled or DefenderReadState.ServiceNotRunning)
-        {
-            return false;
-        }
-
         if (statusRead == DefenderReadState.Available)
         {
-            switch (protection.RunningMode)
+            return protection.RunningMode switch
             {
-                case DefenderRunningMode.Passive or DefenderRunningMode.SideBySidePassive or DefenderRunningMode.EdrBlock:
-                    return false;
-                case DefenderRunningMode.Normal when protection.AntivirusEnabled is { } enabled:
-                    return enabled;
-            }
+                DefenderRunningMode.Passive or DefenderRunningMode.SideBySidePassive or DefenderRunningMode.EdrBlock => (false, DefenderActiveSource.RunningMode),
+                DefenderRunningMode.Normal when protection.AntivirusEnabled is { } enabled => (enabled, DefenderActiveSource.RunningMode),
+                _ => (null, DefenderActiveSource.Unknown),
+            };
         }
 
-        if (products is null)
+        if (statusRead != DefenderReadState.NotInstalled || products is null)
         {
-            return null;
+            return (null, DefenderActiveSource.Unknown);
         }
 
-        var defender = products.FirstOrDefault(p => p.IsDefender);
-        if (defender?.Enabled is { } defenderEnabled)
+        if (products.FirstOrDefault(p => p.IsDefender)?.Enabled is { } defenderEnabled)
         {
-            return defenderEnabled;
+            return (defenderEnabled, DefenderActiveSource.SecurityCenter);
         }
 
-        return products.Any(p => !p.IsDefender && p.Enabled == true) ? false : null;
+        return products.Any(p => !p.IsDefender && p.Enabled == true)
+            ? (false, DefenderActiveSource.SecurityCenter)
+            : (null, DefenderActiveSource.Unknown);
     }
 
     private static string? MapDetail(WmiReadResult status, DefenderReadState statusRead, WmiReadResult preference, DefenderReadState preferenceRead)

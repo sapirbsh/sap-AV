@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,8 +14,9 @@ namespace SapAV.Engine.Tests.Defender;
 /// <summary>E5: the WMI-backed source (timeouts, failures, what it queries), the real reader's hang guard, and DI wiring.</summary>
 public sealed class DefenderStatusSourceTests
 {
-    private static WmiDefenderStatusSource Source(IWmiReader reader, TimeSpan? timeout = null) =>
-        new(reader, TimeProvider.System, Options.Create(new DefenderStatusOptions { QueryTimeout = timeout ?? TimeSpan.FromSeconds(5) }),
+    private static WmiDefenderStatusSource Source(IWmiReader reader, TimeSpan? timeout = null, IDefenderEnvironment? environment = null) =>
+        new(reader, environment ?? new FakeDefenderEnvironment(DefenderEnvironmentInfo.Unknown), TimeProvider.System,
+            Options.Create(new DefenderStatusOptions { QueryTimeout = timeout ?? TimeSpan.FromSeconds(5) }),
             NullLogger<WmiDefenderStatusSource>.Instance);
 
     [Fact]
@@ -106,6 +108,7 @@ public sealed class DefenderStatusSourceTests
     [InlineData(unchecked((int)0x80041003), WmiReadStatus.AccessDenied)]
     [InlineData(unchecked((int)0x800106BA), WmiReadStatus.ServiceNotRunning)] // Defender's service stopped
     [InlineData(unchecked((int)0x800706BA), WmiReadStatus.Unavailable)]       // WMI's RPC server unavailable
+    [InlineData(unchecked((int)0x80041002), WmiReadStatus.Failed)]            // generic not found is not "not installed"
     [InlineData(unchecked((int)0x80004005), WmiReadStatus.Failed)]
     public void Hresults_AreClassified(int hresult, WmiReadStatus expected) =>
         Assert.Equal(expected, ManagementWmiReader.Classify(hresult));
@@ -117,6 +120,68 @@ public sealed class DefenderStatusSourceTests
     [InlineData(@"root\..\cimv2", "Win32_Process")]
     public void Query_RejectsAnythingButALocalNamespaceAndAPlainClassName(string ns, string className) =>
         Assert.ThrowsAny<ArgumentException>(() => new WmiClassQuery(ns, className, ["Name"], TimeSpan.FromSeconds(1)));
+
+    [Fact]
+    public async Task ConcurrentCallers_ShareOneCollection()
+    {
+        var gate = new TaskCompletionSource();
+        int statusReads = 0;
+        var reader = new FakeWmiReader()
+            .Handles(DefenderStatusMapper.ComputerStatusClass, async (_, _) =>
+            {
+                Interlocked.Increment(ref statusReads);
+                await gate.Task;
+                return One(HealthyStatus());
+            })
+            .Returns(DefenderStatusMapper.PreferenceClass, One(Preference()));
+        var environment = new FakeDefenderEnvironment(DefenderEnvironmentInfo.Unknown);
+        var source = Source(reader, environment: environment);
+
+        var callers = Enumerable.Range(0, 8).Select(_ => source.GetSnapshotAsync()).ToArray();
+        gate.SetResult();
+        var snapshots = await Task.WhenAll(callers);
+
+        Assert.Equal(1, statusReads);
+        Assert.Equal(1, environment.Calls);
+        Assert.All(snapshots, s => Assert.Same(snapshots[0], s));
+        await source.GetSnapshotAsync(); // a finished collection isn't reused
+        Assert.Equal(2, statusReads);
+    }
+
+    [Theory]
+    [InlineData("not a timespan", 10_000)]
+    [InlineData("00:00:03", 3_000)]
+    public void QueryTimeout_MalformedConfig_KeepsTheDefault(string value, int expectedMs)
+    {
+        var section = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Defender:QueryTimeout"] = value }).Build().GetSection("Defender");
+        var options = new DefenderStatusOptions();
+
+        DefenderStatusOptions.Bind(section, options);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(expectedMs), options.QueryTimeout);
+    }
+
+    [Fact]
+    public void Environment_ReadsSku_AndMergesExclusionKeys_ButAPartialListIsUnreadable()
+    {
+        const string local = WindowsDefenderEnvironment.LocalExclusionsKey;
+        const string policy = WindowsDefenderEnvironment.PolicyExclusionsKey;
+        var registry = new FakeRegistryView()
+            .Key(WindowsDefenderEnvironment.ProductOptionsKey, ("ProductType", "WinNT"))
+            .Key(local + @"\Paths", (@"C:\Dev", 0), (@"D:\", 0))
+            .Key(policy + @"\Paths", (@"c:\dev", "0"), (@"C:\Games", "0"))
+            .Denied(local + @"\Processes")
+            .Key(policy + @"\Processes", ("evil.exe", "0"));
+
+        var info = new WindowsDefenderEnvironment(registry, () => true).Read();
+
+        Assert.True(info.IsClientSku);
+        Assert.True(info.RunningAsSystem);
+        Assert.Equal([@"C:\Dev", @"D:\", @"C:\Games"], info.RegistryExclusions.Paths);
+        Assert.Null(info.RegistryExclusions.Processes); // the local key was denied: unknown, never just the policy half
+        Assert.Empty(info.RegistryExclusions.Extensions!); // no keys at all: no exclusions
+    }
 
     [Fact]
     public void BuiltHost_ExposesTheWmiDefenderStatusSource()
@@ -134,7 +199,7 @@ public sealed class DefenderStatusSourceTests
     [RequiresFact(Requires.DefenderWmi)]
     public async Task RealDefender_SnapshotIsReadable_WithoutChangingAnything()
     {
-        var source = Source(new ManagementWmiReader(), TimeSpan.FromSeconds(30));
+        var source = Source(new ManagementWmiReader(), TimeSpan.FromSeconds(30), new WindowsDefenderEnvironment());
 
         var snapshot = await source.GetSnapshotAsync();
 

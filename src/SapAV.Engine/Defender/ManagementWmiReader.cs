@@ -65,7 +65,8 @@ public sealed class ManagementWmiReader : IWmiReader
     /// <summary>Maps a WMI / COM HRESULT to a status (ManagementStatus values are HRESULTs).</summary>
     internal static WmiReadStatus Classify(int hresult) => unchecked((uint)hresult) switch
     {
-        0x8004100E or 0x80041010 or 0x80041002 => WmiReadStatus.NotFound,     // invalid namespace, invalid class, not found
+        // Only "this namespace / class doesn't exist" means not installed; a generic WBEM_E_NOT_FOUND (0x80041002) is Failed.
+        0x8004100E or 0x80041010 => WmiReadStatus.NotFound,                   // invalid namespace, invalid class
         0x80041003 or 0x80070005 => WmiReadStatus.AccessDenied,               // WBEM_E_ACCESS_DENIED, E_ACCESSDENIED
         0x80043001 or 0x80041032 => WmiReadStatus.TimedOut,                   // WBEM_E_TIMED_OUT (2 forms), WBEM_E_CALL_CANCELLED
         0x800106BA => WmiReadStatus.ServiceNotRunning,                        // Defender's provider: its service isn't running

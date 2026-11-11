@@ -31,6 +31,68 @@ internal sealed class FakeWmiReader : IWmiReader
     }
 }
 
+/// <summary>A fake <see cref="IDefenderEnvironment"/> returning a given value, counting calls.</summary>
+internal sealed class FakeDefenderEnvironment(DefenderEnvironmentInfo info) : IDefenderEnvironment
+{
+    private int _calls;
+
+    public int Calls => Volatile.Read(ref _calls);
+
+    public DefenderEnvironmentInfo Read()
+    {
+        Interlocked.Increment(ref _calls);
+        return info;
+    }
+}
+
+/// <summary>
+/// A fake HKLM for <see cref="WindowsDefenderEnvironment"/>: keys (path -> values), and paths that throw access denied.
+/// </summary>
+internal sealed class FakeRegistryView : SapAV.Engine.Persistence.IRegistryView
+{
+    private readonly Dictionary<string, Dictionary<string, object>> _keys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _denied = new(StringComparer.OrdinalIgnoreCase);
+
+    public FakeRegistryView Key(string path, params (string Name, object Value)[] values)
+    {
+        _keys[path] = values.ToDictionary(v => v.Name, v => v.Value, StringComparer.OrdinalIgnoreCase);
+        return this;
+    }
+
+    public FakeRegistryView Denied(string path)
+    {
+        _denied.Add(path);
+        return this;
+    }
+
+    public SapAV.Engine.Persistence.IRegistryKeyReader? Open(SapAV.Engine.Persistence.RegistryRoot root, string path)
+    {
+        if (_denied.Contains(path))
+        {
+            throw new System.Security.SecurityException("Requested registry access is not allowed.");
+        }
+
+        return _keys.TryGetValue(path, out var values) ? new Reader(values) : null;
+    }
+
+    private sealed class Reader(Dictionary<string, object> values) : SapAV.Engine.Persistence.IRegistryKeyReader
+    {
+        public IReadOnlyList<string> SubKeyNames() => [];
+
+        public IReadOnlyList<string> ValueNames() => values.Keys.ToArray();
+
+        public SapAV.Engine.Persistence.RegistryData? Value(string name) =>
+            values.TryGetValue(name, out var v) ? new SapAV.Engine.Persistence.RegistryData(
+                v is string ? Microsoft.Win32.RegistryValueKind.String : Microsoft.Win32.RegistryValueKind.DWord, v) : null;
+
+        public SapAV.Engine.Persistence.IRegistryKeyReader? OpenSubKey(string name) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+}
+
 /// <summary>Synthetic WMI property bags shaped like Defender's and Security Center's classes. No real Defender data.</summary>
 internal static class DefenderWmiData
 {

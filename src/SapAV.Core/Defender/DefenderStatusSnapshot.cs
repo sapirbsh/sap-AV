@@ -113,8 +113,9 @@ public enum DefenderExclusionListState
     Known,
 
     /// <summary>
-    /// Defender answered with its <c>N/A: Must be an administrator to view exclusions</c> placeholder: the list exists but is
-    /// hidden from this caller. Unknown content, not "no exclusions".
+    /// Defender answered with exactly its <c>N/A: Must be an administrator to view exclusions</c> placeholder (one entry,
+    /// trimmed, case-insensitive) and the registry fallback couldn't read the list either: unknown content, not "no exclusions".
+    /// Seen as SYSTEM, it is unexpected (see <see cref="DefenderStatusSnapshot.ExclusionsHiddenFromSystem"/>).
     /// </summary>
     Hidden,
 
@@ -122,62 +123,129 @@ public enum DefenderExclusionListState
     Unknown,
 }
 
+/// <summary>Where a known exclusion list came from.</summary>
+public enum DefenderExclusionSource
+{
+    /// <summary>Not read (the list is Hidden or Unknown).</summary>
+    None,
+
+    /// <summary>WMI <c>MSFT_MpPreference</c>.</summary>
+    Wmi,
+
+    /// <summary>
+    /// The read-only registry fallback (<c>HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\*</c> plus the Group Policy key
+    /// <c>HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\*</c>), used when WMI hid or didn't return the list.
+    /// </summary>
+    Registry,
+}
+
 /// <summary>One Defender exclusion list (paths, extensions, processes or IP addresses).</summary>
 /// <remarks>
-/// Items are untrusted text (anyone with admin rights, including malware, chose them): each is one sanitized line
-/// (<see cref="Text.SafeText.SingleLine"/>), capped at <see cref="MaxItemLength"/>; the list keeps at most
-/// <see cref="MaxItems"/> entries and sets <see cref="Truncated"/> when it cut any.
+/// <para>
+/// Items are untrusted (anyone with admin rights, including malware, chose them) and stored <b>raw</b> in the
+/// <see cref="Text.SafeText.Identifier"/> style: characters that can't be logged on one line (controls, line breaks, unpaired
+/// surrogates) become U+FFFD; nothing is trimmed, collapsed or ellipsized, so rules match what Defender actually excludes. An item
+/// longer than <see cref="MaxItemLength"/> is cut at the cap (never inside a surrogate pair) and sets <see cref="Truncated"/>.
+/// Use <see cref="ForDisplay"/> to show an item. Null, empty and whitespace-only items are dropped and counted in
+/// <see cref="BlankItemsDropped"/> (Defender doesn't store such entries, so a non-zero count is odd in itself).
+/// </para>
+/// <para>
+/// At most <see cref="MaxItems"/> entries are kept: the first and the last <see cref="MaxItems"/>/2, with
+/// <see cref="TotalCount"/> holding the real count. <b><see cref="Truncated"/> is itself suspicious</b>: legitimate setups have a
+/// handful of exclusions, and a padded list is a way to push the bad entry out of view. Rules should report a truncated list.
+/// </para>
 /// </remarks>
 public sealed record DefenderExclusionList
 {
-    public const int MaxItems = 4096;
+    public const int MaxItems = 512;
     public const int MaxItemLength = 2048;
+    public const int DisplayLength = 260;
 
-    public static DefenderExclusionList Unknown { get; } = new(DefenderExclusionListState.Unknown, [], truncated: false);
+    public static DefenderExclusionList Unknown { get; } = new(DefenderExclusionListState.Unknown, DefenderExclusionSource.None, [], 0, false, 0);
 
-    public static DefenderExclusionList Hidden { get; } = new(DefenderExclusionListState.Hidden, [], truncated: false);
+    public static DefenderExclusionList Hidden { get; } = new(DefenderExclusionListState.Hidden, DefenderExclusionSource.None, [], 0, false, 0);
 
-    public static DefenderExclusionList Empty { get; } = new(DefenderExclusionListState.Known, [], truncated: false);
-
-    private DefenderExclusionList(DefenderExclusionListState state, IReadOnlyList<string> items, bool truncated)
+    private DefenderExclusionList(DefenderExclusionListState state, DefenderExclusionSource source, IReadOnlyList<string> items,
+        int totalCount, bool truncated, int blankItemsDropped)
     {
         State = state;
+        Source = source;
         Items = items;
+        TotalCount = totalCount;
         Truncated = truncated;
+        BlankItemsDropped = blankItemsDropped;
     }
 
     public DefenderExclusionListState State { get; }
 
+    public DefenderExclusionSource Source { get; }
+
     /// <summary>The entries (only when <see cref="State"/> is <see cref="DefenderExclusionListState.Known"/>; empty otherwise).</summary>
     public IReadOnlyList<string> Items { get; }
 
-    /// <summary>True when the list or an item was cut to the caps.</summary>
+    /// <summary>How many non-blank entries the list really had (more than <see cref="Items"/> when truncated).</summary>
+    public int TotalCount { get; }
+
+    /// <summary>True when entries were left out (<see cref="MaxItems"/>) or an entry was cut (<see cref="MaxItemLength"/>). Suspicious.</summary>
     public bool Truncated { get; }
 
-    /// <summary>A known list, sanitized and capped. Blank entries are dropped.</summary>
-    public static DefenderExclusionList Known(IEnumerable<string?> items)
+    /// <summary>Null, empty or whitespace-only entries that were dropped.</summary>
+    public int BlankItemsDropped { get; }
+
+    /// <summary>An item as one display line (<see cref="Text.SafeText.Display"/>), for logs and the UI only; never for matching.</summary>
+    public static string ForDisplay(string item) => Text.SafeText.Display(item ?? string.Empty, DisplayLength);
+
+    /// <summary>A known list from <paramref name="source"/>, stored raw (see the remarks).</summary>
+    public static DefenderExclusionList Known(IEnumerable<string?> items, DefenderExclusionSource source = DefenderExclusionSource.Wmi)
     {
         ArgumentNullException.ThrowIfNull(items);
-        var kept = new List<string>();
-        bool truncated = false;
+        if (source == DefenderExclusionSource.None || !Enum.IsDefined(source))
+        {
+            throw new ArgumentOutOfRangeException(nameof(source), source, "A known list needs a source.");
+        }
+
+        const int half = MaxItems / 2;
+        var head = new List<string>(Math.Min(half, 64));
+        var tail = new Queue<string>();
+        int total = 0, blanks = 0;
+        bool cut = false;
         foreach (var raw in items)
         {
             if (string.IsNullOrWhiteSpace(raw))
             {
+                blanks++;
                 continue;
             }
 
-            if (kept.Count == MaxItems)
+            total++;
+            var item = Raw(raw, ref cut);
+            if (head.Count < half)
             {
-                truncated = true;
-                break;
+                head.Add(item);
+                continue;
             }
 
-            truncated |= raw.Length > MaxItemLength;
-            kept.Add(Text.SafeText.SingleLine(raw.Trim(), MaxItemLength));
+            tail.Enqueue(item);
+            if (tail.Count > half)
+            {
+                tail.Dequeue();
+            }
         }
 
-        return kept.Count == 0 && !truncated ? Empty : new DefenderExclusionList(DefenderExclusionListState.Known, kept.AsReadOnly(), truncated);
+        head.AddRange(tail);
+        return new DefenderExclusionList(DefenderExclusionListState.Known, source, head.AsReadOnly(), total, cut || total > MaxItems, blanks);
+    }
+
+    private static string Raw(string value, ref bool cut)
+    {
+        if (value.Length > MaxItemLength)
+        {
+            cut = true;
+            int length = char.IsHighSurrogate(value[MaxItemLength - 1]) ? MaxItemLength - 1 : MaxItemLength;
+            value = value[..length];
+        }
+
+        return Text.SafeText.Identifier(value);
     }
 }
 
@@ -243,9 +311,45 @@ public sealed record DefenderStatusSnapshot
     /// <summary>Antivirus products registered with Security Center; null when unknown (e.g. Windows Server has no Security Center).</summary>
     public IReadOnlyList<RegisteredAntivirus>? RegisteredAntivirus { get; init; }
 
-    /// <summary>True when Defender is the active antivirus, false when it isn't (passive, not running, another product active), null when unknown.</summary>
+    /// <summary>
+    /// True when Defender is the active antivirus, false when it isn't, null when unknown. Decided by Defender's own running mode
+    /// when its status was read; by Security Center only when Defender's classes don't exist (<see cref="DefenderReadState.NotInstalled"/>);
+    /// any other failed read gives null. <see cref="ActiveAntivirusDecidedBy"/> says which.
+    /// </summary>
     public bool? DefenderIsActiveAntivirus { get; init; }
 
-    /// <summary>True when Security Center lists an enabled antivirus other than Defender.</summary>
-    public bool ThirdPartyAntivirusActive => RegisteredAntivirus?.Any(p => !p.IsDefender && p.Enabled == true) == true;
+    /// <summary>What decided <see cref="DefenderIsActiveAntivirus"/>.</summary>
+    public DefenderActiveSource ActiveAntivirusDecidedBy { get; init; }
+
+    /// <summary>True when Security Center lists an enabled antivirus other than Defender; null when Security Center is unknown.</summary>
+    public bool? ThirdPartyAntivirusActive => RegisteredAntivirus?.Any(p => !p.IsDefender && p.Enabled == true);
+
+    /// <summary>
+    /// True when Defender should be present: a client SKU (Windows 10/11, <c>ProductType</c> = <c>WinNT</c>), where Defender is
+    /// part of the OS. On such a machine <see cref="DefenderReadState.NotInstalled"/> is a <b>tamper sign</b> (its WMI provider was
+    /// removed or broken), not a normal state. False on Server SKUs (Defender is an optional feature), null when unknown.
+    /// </summary>
+    public bool? DefenderExpected { get; init; }
+
+    /// <summary>Whether the collector ran as LocalSystem (null when unknown). As SYSTEM, Defender shows the exclusion lists.</summary>
+    public bool? CollectedAsSystem { get; init; }
+
+    /// <summary>
+    /// True when the collector ran as SYSTEM and Defender's WMI still answered with the "N/A" placeholder for a list. Unexpected,
+    /// so worth reporting even when the registry fallback then read the list.
+    /// </summary>
+    public bool ExclusionsHiddenFromSystem { get; init; }
+}
+
+/// <summary>What decided <see cref="DefenderStatusSnapshot.DefenderIsActiveAntivirus"/>.</summary>
+public enum DefenderActiveSource
+{
+    /// <summary>Nothing: the value is null.</summary>
+    Unknown,
+
+    /// <summary>Defender's <c>AMRunningMode</c> (and <c>AntivirusEnabled</c>).</summary>
+    RunningMode,
+
+    /// <summary>Security Center, because Defender's WMI classes don't exist.</summary>
+    SecurityCenter,
 }
