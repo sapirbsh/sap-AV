@@ -219,7 +219,7 @@ Each step is small enough for one agent session and one or a few commits.
 
 **Carried over from the section A review (Medium/Low, by target step).** The High findings H1–H3 are fixed in
 section A: single-handle pipeline, crash-safe YARA content access, YARA import allowlist.
-- **A5 (follow-up, before E3):**
+- **A5 (follow-up, before E3; still open after E3, see "Notes from E1/E3/E4"):**
   - (M2) PE detection is easy to dodge. More than 96 sections, `e_lfanew` > 4072, or a section table past the first 4 KiB → no PE
     → the unsigned/entropy/folder rules are skipped. Treat MZ or any executable extension as executable, read headers up to
     `SizeOfHeaders` (cap 64 KiB), raise the section cap to 65535, and count "malformed PE" as a signal.
@@ -898,6 +898,60 @@ and **never change the real Defender configuration** (Defender access goes throu
 | E10 | engine-dev + detection-dev | Infostealer behaviour monitor: ETW file-read events on browser/Discord/wallet store paths by non-owning processes; allowlist by signer + path | Fake ETW feed tests; one integration test where a test process reads a **fake** store file in a temp folder that is registered as a watched pattern |
 | E11 | engine-dev | "Remove threat" remediation: kill the process tree → remove persistence (D5) → quarantine the file (B2) → remove the flagged Defender exclusions. One remediation record with grouped undo (the kill is not undoable) | Dry-run plan test; remove → undo round-trip on HKCU test entries + temp files + a fake Defender; partial-failure test: a failed step is reported and the earlier steps stay undoable |
 | E12 | engine-dev | Quarantine "Delete permanently" (engine requires an explicit confirmed request from the UI) + reboot-time actions for locked files (`MoveFileEx` delay; move into quarantine when possible, delete only for "Delete permanently"); list and cancel pending reboot actions | Delete only with confirmation; a pending reboot action is registered and can be cancelled (checked through `PendingFileRenameOperations`, then cleaned up) |
+
+**Notes from E1/E3/E4 (built `5f0882d`…`4b89f85`).**
+- **Verdict model:** `Verdict.PotentiallyUnwanted` (Malicious is now 3) and `ThreatCategory` on Detection. Pup and
+  HackTool are never Malicious, and a missing category reads as Malware.
+- **Formats:**
+  - Alert schema v2: an optional `Category` field; event 1003 is now produced.
+  - Scan cache schema v2: v1 rows are dropped at open.
+- **VirusTotal:** PUP-like labels now map to PotentiallyUnwanted (this replaces D3 L2). Local PotentiallyUnwanted
+  verdicts are looked up in scans too.
+- **E3:** the random-name rule (unsigned PE in AppData) and miner name/command-line rules. `MinerRules.AnalyzeCommandLine`
+  is public, for E7.
+- **E4:** encoded PowerShell is decoded for display. Also: mshta, rundll32 from user folders, and launcher payload
+  extraction: rundll32 FileProtocolHandler/ShellExec_RunDLL/…, regsvr32 multi-DLL plus `/i:`, conhost, forfiles,
+  pcalua, explorer, msiexec.
+- **New MITRE IDs:** the X1 list, plus T1202 and T1218.007 (add them to X1).
+- **Closed:** E4 (M4); E4 (M9) partly.
+- **Deferred:**
+  - **A5 follow-up, before E2 (M2, M3, M7), detection-dev:** not done yet, and it now matters more. The E3 random-name
+    rule depends on PE detection, so the M2 dodge (more than 96 sections, a large `e_lfanew`, a section table past 4 KiB)
+    gets past it too.
+  - **E4 (M9) rest:** certutil and msbuild.
+  - **D4/E4 (M10) second half:** an unregistered COM class with an unloaded hive should be Unverified. Needs a flag
+    from the collector (engine-dev).
+  - **E (L5) / E / D1 (L3):** named streams aren't scanned yet (engine). There is a guard test that `wscript x.txt:a.js`
+    is never Clean.
+  - **D4 follow-up:** the persistence baseline has no judge-rules version, so unchanged entries aren't re-judged by D4
+    after a rules update (Quick and Full Scan do re-judge). Add a rules version to the baseline.
+  - **Flaky once:** `ScanBrokerSupervisionTests.Crash_IsNotScanned_WorkerRestarts_AndRepeatOffenderIsSuspicious`
+    took 20 s under load.
+- **E1/E3/E4 immediate review (no Critical).** Fixed in the fix round: H1 (explorer/msiexec/rundll32 launcher forms
+  resolved to the Microsoft binary), M1 (encoded PowerShell alone was Suspicious), L1, L2, L3, L7, L8, L9 (scans look up
+  VirusTotal for Suspicious files only, as CLAUDE.md says), and A5 M2/M3/M7 (PE detection, entropy reads, SFX). Remaining:
+  - **E2 (M2):** a vendored rule without `verdict` meta defaults to Malicious, so HKTL_/PUA_ rules would be
+    auto-quarantined. And `category="hacktool"` on a malware rule would make it never quarantined. When vendoring, map
+    categories explicitly (HKTL_/PUA_ → hacktool/pup; implants and backdoors stay malware), with a test listing every
+    third-party rule's verdict and category.
+  - **E3 (L5):** random-name false positives on unsigned per-user tools (`wkhtmltopdf`, `pngcrush`,
+    `vcredist2015x64`). Require two of the three name signals, or exclude known tool folders.
+  - **D4 follow-up (L3 rest):** the stored autostart command line, Base64 included, still appears in
+    PersistenceBaseline display and monitor logs. Redact it there too.
+  - **Decision (2026-11-10):** PowerShell with a hidden window plus an encoded command stays Suspicious (a stronger
+    evasion signal than the encoding alone).
+  - **Fix round commits:** `49ffe04` (M1, L1–L3, L7–L9), `9fc21f2` (A5 M2/M3/M7 + bidi isolates, `DetectionLogic.Version` 3),
+    `3315240` (H1). Open from the fix round:
+    - A 16-bit DOS program (MZ, no PE) now scores malformed 20 + unsigned 15; in Downloads with MOTW it reaches 65 (Suspicious).
+      Rare, but a new false-positive path: consider no malformed points for a valid DOS stub without `e_lfanew`.
+    - Entropy samples the first 16 MiB of merged section data only.
+    - msiexec: `TRANSFORMS=` and other property values aren't judged as payloads; ordinal aliases of launcher entries without
+      arguments still resolve to the DLL. `msiexec /x {GUID}` is now Unverified (was Clean).
+    - Checked: a Run target with a trailing dot (`\\?\C:\Users\...\evil.exe.`) judged Clean only in the ScriptPersistenceTests
+      harness, because `FakeAcl` matches folders by exact string. The real code is fine: `FileNameRules.ClassifyFolder` strips
+      `\\?\` and the real ACL check asks the file system. Test-only (L): make `FakeAcl` normalize the prefix.
+  - **E3 (L6):** miner analysis reads 256 tokens / 32K chars while `MinerScript` reads 64 KB, so padding can hide the
+    miner line, and BOM-less UTF-16 scripts are decoded as UTF-8. Heuristic limits; document them.
 
 **F. UI (ui-designer)**
 

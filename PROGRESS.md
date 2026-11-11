@@ -10,7 +10,7 @@ Updated after each ROADMAP section (see `ROADMAP.md` for the full plan and the o
 | B — Engine infrastructure (incl. B5 scan-worker sandbox) | **Done** (B1–B6, section test + review, High fixes) |
 | C — Scan modes | **Done** (C1–C6, section test + review, 9 High fixed) |
 | D — Real-time + VirusTotal | **Done** (D1–D5, section test + review, 5 High fixed + follow-up review) |
-| E — Cracked-software threat pack | Not started |
+| E — Cracked-software threat pack | In progress (E1, E3, E4 built and reviewed; review fixes done) |
 | F — UI | Not started |
 | G — Signature features (Honeytokens, Attack Story, Pre-Flight, Exposure Report) + G5 Phase 1 security review | Not started |
 
@@ -317,10 +317,15 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
   - a value re-created right after the post-action check;
   - task budgets after a cache reset.
 
-## Current status (2026-11-05)
+## Current status (2026-11-11)
 
-**Sections A, B, C and D are done.** **Next:** section E, the cracked-software threat pack. It starts with E1
-(PUP/HackTool category) and E2 (YARA-Forge rules), both detection-dev.
+**Sections A, B, C and D are done.** Section E is in progress:
+- **Built:** E1 (PotentiallyUnwanted verdict and threat categories), E3 (static infostealer and miner heuristics),
+  E4 (script-persistence rules and launcher payloads).
+- **Review fixes:** M1, L1, L2, L3, L7, L8 and L9 are in `49ffe04`.
+- **Also fixed:** the A5 follow-up for PE detection (M2, M3, M7; `9fc21f2`) and the E4 review H1 (`3315240`, launcher forms are judged by
+  their payload).
+- **Next:** E2 (YARA-Forge rules, with explicit category mapping), then E5–E12.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -334,7 +339,7 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 
 ## What's left
 
-- **E:** cracked-software threat pack (E1–E12).
+- **E:** cracked-software threat pack. Left: E2 and E5–E12, then the section test and review passes.
 - **F:** the GUI (F1–F8).
 - **G:** signature features (G1–G5), ending with the Phase 1 security review (G5).
-- **Progress:** 24 of 60 build steps done (about 40%).
+- **Progress:** 27 of 60 build steps done (about 45%).
