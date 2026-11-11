@@ -325,7 +325,9 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 - **Review fixes:** M1, L1, L2, L3, L7, L8 and L9 are in `49ffe04`.
 - **Also fixed:** the A5 follow-up for PE detection (M2, M3, M7; `9fc21f2`) and the E4 review H1 (`3315240`, launcher forms are judged by
   their payload).
-- **Next:** E2 (YARA-Forge rules, with explicit category mapping), then E5–E12.
+- **E2 done** (`bf000ca`…`03fd7e6`): 228 curated YARA-Forge rules, permissive licenses only, explicit category mapping.
+- **E5 in progress:** the read-only Defender collector is built and reviewed (no Critical/High); review fixes, then the rules.
+- **Next:** E5 rules, then E6–E12.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -339,7 +341,7 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 
 ## What's left
 
-- **E:** cracked-software threat pack. Left: E2 and E5–E12, then the section test and review passes.
+- **E:** cracked-software threat pack. Left: E5 (rules) and E6–E12, then the section test and review passes.
 - **F:** the GUI (F1–F8).
 - **G:** signature features (G1–G5), ending with the Phase 1 security review (G5).
-- **Progress:** 27 of 60 build steps done (about 45%).
+- **Progress:** 28 of 60 build steps done (about 47%).

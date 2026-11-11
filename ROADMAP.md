@@ -953,6 +953,34 @@ and **never change the real Defender configuration** (Defender access goes throu
   - **E3 (L6):** miner analysis reads 256 tokens / 32K chars while `MinerScript` reads 64 KB, so padding can hide the
     miner line, and BOM-less UTF-16 scripts are decoded as UTF-8. Heuristic limits; document them.
 
+**Notes from E2 (built `bf000ca`…`03fd7e6`).**
+- **Rule set:** YARA-Forge release 20261108 (extended package), 228 curated rules: infostealer 167, miner 10, hacktool 44,
+  pup 7.
+- **Licenses:** DRL-1.1 115, BSD-2-Clause 91, Apache-2.0 16, MIT 6. Excluded: CC BY-SA (Malpedia, 1647), no license (546),
+  GPL (201).
+- **Category mapping (closes E1/E3/E4 review M2):** an explicit per-rule table in `curated-rules.txt`. Under `third-party/`
+  a missing verdict loads as Suspicious, never Malicious, and a malware-named rule can't be pup or hacktool. Rules with
+  hacktool names that detect malware (njRAT/AsyncRAT GUIDs, Cobalt Strike beacons) are left out.
+- **Version:** `DetectionLogic.Version` is now 4.
+- **Open:**
+  - **Engine wiring for `YaraScanBudget` (engine-dev, at E7/C6):** one total budget per scan job (a worker protocol field
+    or a reset per job). Until then the worker keeps its 30 s per-file timeout with no total.
+  - **Rule seeding never removes old files:** a renamed or removed vendored file stays in
+    `%ProgramData%\sap-AV\Rules\third-party` and keeps loading (engine-dev). Fix with a seed manifest.
+  - **Coverage:** keygen/crack coverage is thin (few permissive rules). RAT families that come with cracks (AsyncRAT,
+    XWorm, njRAT, Remcos, DCRat) aren't included, which is a scope question for later. CC BY-SA stays excluded unless the
+    user approves it.
+  - **Budget caveat:** parallel scans can overrun the total by one per-file timeout per thread.
+
+**E5 (engine) immediate review (no Critical/High).** M1–M6, L2, L4 and L5 are being fixed before the E5 rules. Remaining:
+- **L1:** the read-only guard test is easy to bypass: a `<Using Include="System.Management">` in a csproj, `.Delete(`,
+  `dynamic`, MpCmdRun and Defender registry key writes aren't checked. Widen it to all engine files and csproj/props. E11
+  needs a reviewed exception anyway.
+- **L3:** a hung Defender provider uses up the abandoned-call cap, so the Security Center read also times out. Keep a
+  counter per namespace.
+- **L6:** the real-Defender test probes through the reader under test, so a reader regression makes it skip instead of
+  fail. Probe with a direct query.
+
 **F. UI (ui-designer)**
 
 | Step | Owner | Deliverable | Done when (tests) |
@@ -1092,7 +1120,8 @@ Approved:
 4. **`%ProgramData%\sap-AV\`** is restricted to SYSTEM and Administrators.
 
 Open (decide before the step that needs it):
-- **New dependencies for the threat pack (E):**
+- **New dependencies for the threat pack (E):** **approved by the user on 2026-11-11** (all three, latest stable versions,
+  pinned):
   - `Microsoft.Diagnostics.Tracing.TraceEvent`, for ETW process and file-read events (E8, E10);
   - `System.Management`, for WMI: Defender, process command lines (E5, E7);
   - `System.Diagnostics.PerformanceCounter`, for CPU/GPU counters (E9).
