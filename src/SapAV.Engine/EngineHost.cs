@@ -139,6 +139,14 @@ public static class EngineHost
         builder.Services.AddSingleton(sp => new Persistence.Remediation.PersistenceActionLedger(sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton<Persistence.Remediation.IPersistenceRemediation>(Persistence.Remediation.PersistenceRemediator.CreateDefault);
 
+        // Defender status (E5): read-only WMI snapshot of Defender's state and exclusions, for the Defender-tampering rules (E5)
+        // and the Quick Scan check (E7). Never calls a Defender method; every WMI read is time-bounded.
+        var defenderSection = builder.Configuration.GetSection(Defender.DefenderStatusOptions.SectionName);
+        builder.Services.Configure<Defender.DefenderStatusOptions>(options => Defender.DefenderStatusOptions.Bind(defenderSection, options));
+        builder.Services.AddSingleton<Defender.IWmiReader, Defender.ManagementWmiReader>();
+        builder.Services.AddSingleton<Defender.IDefenderEnvironment, Defender.WindowsDefenderEnvironment>();
+        builder.Services.AddSingleton<Core.Defender.IDefenderStatusSource, Defender.WmiDefenderStatusSource>();
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();

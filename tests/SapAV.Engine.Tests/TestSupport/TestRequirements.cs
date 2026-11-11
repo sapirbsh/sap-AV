@@ -64,6 +64,12 @@ public enum Requires
     /// Missing on some Server SKUs, and a %TEMP% inside a synced folder doesn't qualify.
     /// </summary>
     CloudFilesApi,
+
+    /// <summary>
+    /// Microsoft Defender's WMI provider answers (<c>root\Microsoft\Windows\Defender</c> <c>MSFT_MpComputerStatus</c>, read-only).
+    /// Missing when Defender isn't installed or its service is stopped (e.g. a third-party antivirus is active) (E5).
+    /// </summary>
+    DefenderWmi,
 }
 
 internal static class TestRequirements
@@ -89,6 +95,7 @@ internal static class TestRequirements
         [Requires.AdminShare] = new(ProbeAdminShare),
         [Requires.UsnJournal] = new(ProbeUsnJournal),
         [Requires.CloudFilesApi] = new(ProbeCloudFilesApi),
+        [Requires.DefenderWmi] = new(ProbeDefenderWmi),
         [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),
@@ -117,6 +124,17 @@ internal static class TestRequirements
         }
 
         return status == SapAV.Core.Hashing.SyncRootStatus.NotInSyncRoot ? null : $"the Cloud Files API says {status} for %TEMP%";
+    }
+
+    /// <summary>Read-only: one enumeration of Defender's status class through the engine's real WMI reader.</summary>
+    private static string? ProbeDefenderWmi()
+    {
+        var query = new SapAV.Engine.Defender.WmiClassQuery(SapAV.Engine.Defender.DefenderStatusMapper.DefenderNamespace,
+            SapAV.Engine.Defender.DefenderStatusMapper.ComputerStatusClass, ["AMServiceEnabled"], TimeSpan.FromSeconds(15));
+        var result = new SapAV.Engine.Defender.ManagementWmiReader().ReadAsync(query, CancellationToken.None).GetAwaiter().GetResult();
+        return result.Status == SapAV.Engine.Defender.WmiReadStatus.Ok && result.Instances.Count > 0
+            ? null
+            : $"Defender's WMI status class didn't answer: {result.Status} {result.Detail}";
     }
 
     private static string? ProbeUsnJournal()
