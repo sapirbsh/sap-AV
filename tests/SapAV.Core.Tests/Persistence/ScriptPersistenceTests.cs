@@ -284,9 +284,11 @@ public sealed class ScriptPersistenceTests
     }
 
     [Theory]
-    [InlineData("msiexec /x {11111111-2222-3333-4444-555555555555} /qn", @"C:\Windows\System32\msiexec.exe")]
+    [InlineData("msiexec /qn /norestart", @"C:\Windows\System32\msiexec.exe")]
     [InlineData("conhost.exe 0xffffffff -ForceV1", @"C:\Windows\System32\conhost.exe")]
     [InlineData(@"explorer.exe C:\Users\alice\Documents", @"C:\Windows\explorer.exe")]
+    [InlineData(@"explorer.exe /e,/root,C:\Users\alice\Documents\", @"C:\Windows\explorer.exe")]
+    [InlineData("explorer.exe /n", @"C:\Windows\explorer.exe")]
     [InlineData("explorer.exe", @"C:\Windows\explorer.exe")]
     public void LaunchersWithoutAPayload_AreThemselves(string commandLine, string target)
     {
@@ -294,6 +296,69 @@ public sealed class ScriptPersistenceTests
 
         Assert.Equal(target, resolution.TargetPath);
         Assert.DoesNotContain(ResolutionFlag.LauncherPayload, resolution.Flags);
+    }
+
+    // ---- E4 review H1: launcher forms judge the payload, never the Microsoft launcher ----
+
+    [Theory]
+    [InlineData(@"explorer.exe /select," + Evil, Evil)]
+    [InlineData(@"explorer.exe C:\Users\alice\Downloads\invoice.pdf", @"C:\Users\alice\Downloads\invoice.pdf")] // a document is opened: it is the payload
+    [InlineData(@"msiexec /fvomus C:\Users\alice\Downloads\setup.msi", @"C:\Users\alice\Downloads\setup.msi")]
+    [InlineData(@"msiexec /x C:\Users\alice\Downloads\setup.msi /qn", @"C:\Users\alice\Downloads\setup.msi")]
+    [InlineData(@"msiexec /qn /l*v C:\Users\alice\log.txt PROP=1 /i C:\Users\alice\Downloads\setup.msi", @"C:\Users\alice\Downloads\setup.msi")]
+    [InlineData(@"rundll32 shell32.dll,ShellExec_RunDLL ?0x1? " + Evil, Evil)]
+    [InlineData(@"rundll32 advpack.dll,RegisterOCX C:\Users\alice\AppData\Local\x\evil.dll", @"C:\Users\alice\AppData\Local\x\evil.dll")]
+    public void LauncherForms_JudgeThePayload(string commandLine, string payload)
+    {
+        var resolution = Resolve(commandLine);
+
+        Assert.Equal(payload, resolution.TargetPath);
+        Assert.Contains(ResolutionFlag.LauncherPayload, resolution.Flags);
+        Assert.NotEqual(PersistenceOutcome.Clean, JudgeRun(commandLine).Outcome); // the unsigned payload, not the signed launcher, is judged
+    }
+
+    [Fact]
+    public void ExplorerWithATrailingDot_IsAFile_NotAFolder()
+    {
+        // Windows trims trailing dots, so "evil.exe." runs evil.exe: it must not pass the extension-less "local folder" check.
+        var resolution = Resolve(@"explorer.exe """ + Evil + @".""");
+
+        Assert.Equal(@"\\?\" + Evil + ".", resolution.TargetPath); // ExactPath keeps the dot
+        Assert.Equal(@"C:\Windows\explorer.exe", resolution.HostPath);
+        Assert.Contains(ResolutionFlag.LauncherPayload, resolution.Flags);
+    }
+
+    [Fact]
+    public void MsiexecUpdate_JudgesEveryPatch()
+    {
+        var resolution = Resolve(@"msiexec /update C:\Users\alice\Downloads\a.msp;C:\Users\alice\Downloads\b.msp /qn");
+
+        Assert.Equal(@"C:\Users\alice\Downloads\a.msp", resolution.TargetPath);
+        Assert.Equal(@"C:\Users\alice\Downloads\b.msp", Assert.Single(resolution.Additional).TargetPath);
+    }
+
+    [Theory]
+    [InlineData("rundll32.exe url.dll,FileProtocolHandler", TargetUnresolvedReason.MissingHostArgument)]
+    [InlineData("rundll32 shell32.dll,ShellExec_RunDLL ?0x1?", TargetUnresolvedReason.MissingHostArgument)]
+    [InlineData("rundll32 advpack.dll,RegisterOCX", TargetUnresolvedReason.MissingHostArgument)]
+    [InlineData(@"rundll32 shell32.dll,#61 " + Evil, TargetUnresolvedReason.HostArgumentsNotUnderstood)]
+    [InlineData("explorer.exe shell:startup", TargetUnresolvedReason.NotFullyQualified)]
+    [InlineData("explorer.exe ::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", TargetUnresolvedReason.NotFullyQualified)]
+    [InlineData(@"explorer.exe /idlist,:1:2 " + Evil, TargetUnresolvedReason.HostArgumentsNotUnderstood)]
+    [InlineData("explorer.exe evil.exe", TargetUnresolvedReason.NotFullyQualified)]
+    [InlineData("msiexec /x {11111111-2222-3333-4444-555555555555} /qn", TargetUnresolvedReason.HostArgumentsNotUnderstood)]
+    [InlineData("msiexec /i /qn", TargetUnresolvedReason.MissingHostArgument)]
+    [InlineData(@"msiexec /iC:\Users\alice\Downloads\setup.msi", TargetUnresolvedReason.HostArgumentsNotUnderstood)]
+    [InlineData(@"msiexec C:\Users\alice\Downloads\setup.msi", TargetUnresolvedReason.HostArgumentsNotUnderstood)]
+    public void LauncherForms_WithoutAPayload_AreUnverified_NeverTheLauncher(string commandLine, TargetUnresolvedReason reason)
+    {
+        var resolution = Resolve(commandLine);
+        var judgement = JudgeRun(commandLine); // the launcher is scanned and Microsoft-signed
+
+        Assert.Equal(reason, resolution.UnresolvedReason);
+        Assert.Null(resolution.TargetPath);
+        Assert.NotNull(resolution.HostPath);
+        Assert.Equal(PersistenceOutcome.Unverified, judgement.Outcome);
     }
 
     [Fact]

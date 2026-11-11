@@ -633,14 +633,15 @@ public sealed class CommandLineResolver(IPathProbe probe)
         switch (EntryKind(dll, entry))
         {
             case LauncherEntry.CommandLine:
-                if (rest.Length == 0)
-                {
-                    return library;
-                }
-
                 if (rest.StartsWith('?') && rest.IndexOf('?', 1) is var close and > 0)
                 {
                     rest = rest[(close + 1)..].TrimStart(); // ShellExec_RunDLL's optional "?flags?" prefix
+                }
+
+                if (rest.Length == 0)
+                {
+                    // E4 review H1: a launcher entry without a payload is not "the Microsoft DLL itself": what runs is unknown.
+                    return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, entryAndArgs);
                 }
 
                 if (IsRemote(rest.Trim('"')))
@@ -674,11 +675,15 @@ public sealed class CommandLineResolver(IPathProbe probe)
             case LauncherEntry.Library:
                 var first = Tokenize(rest).FirstOrDefault().Value;
                 return string.IsNullOrEmpty(first)
-                    ? library
+                    ? state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, entryAndArgs)
                     : LibraryPayload(host, first, rest, state).WithFlags(ResolutionFlag.LauncherPayload);
 
             default:
-                return library;
+                // E4 review H1: an entry by ordinal (shell32.dll,#61) may be any export, a launcher one included, so with arguments it
+                // can't be judged. Named entries that launch nothing (SHCreateLocalServerRunDll, ...) and a bare ordinal stay the DLL.
+                return entry.StartsWith('#') && rest.Length > 0
+                    ? state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, entryAndArgs)
+                    : library;
         }
     }
 
@@ -917,75 +922,195 @@ public sealed class CommandLineResolver(IPathProbe probe)
             .WithFlags(ResolutionFlag.LauncherPayload);
     }
 
-    /// <summary>Extensions explorer.exe would run (not open in another program) when given the file.</summary>
-    private static readonly HashSet<string> LaunchableExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".msi", ".ps1", ".cpl", ".jar",
-    };
+    /// <summary>explorer.exe's own switches (<c>/select,</c> and <c>/root,</c> name an object after the comma).</summary>
+    private static readonly HashSet<string> ExplorerSwitches = new(StringComparer.OrdinalIgnoreCase) { "/n", "/e", "/separate", "/select", "/root" };
 
     /// <summary>
-    /// <c>explorer.exe &lt;file&gt;</c> opens the file like a double-click (E4, review C M9): a program or script given to it is the
-    /// target. A folder, a <c>shell:</c> location, a document or explorer's own switches leave explorer itself as the target.
+    /// <c>explorer.exe [/n] [/e] [/root,|/select,]&lt;object&gt;</c> opens the object like a double-click (E4, review C M9; E4 review
+    /// H1): a file given to it (program, script or document) is the payload and the target, never explorer. Explorer itself is the
+    /// target only with no object, its window switches alone, or a local folder (a drive path whose last part has no extension
+    /// once trailing dots and spaces are trimmed, as Windows does). An unknown switch, a <c>shell:</c> / <c>::{CLSID}</c> location or a
+    /// relative name can't be judged: Unverified.
     /// </summary>
     private ResolvedCommand Explorer(string host, string args, State state)
     {
-        var tokens = Tokenize(args);
-        if (tokens.Count == 0 || tokens.Any(t => t.Value.StartsWith('/')))
+        var tokens = Tokenize(args, out bool truncated);
+        if (truncated)
         {
-            return state.Resolved(host, args);
+            state.Flags.Add(ResolutionFlag.InterpreterHost);
+            return state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host, args);
         }
 
-        string first = tokens[0].Value;
-        if (IsRemote(first))
+        string? target = null;
+        int end = 0;
+        foreach (var token in tokens)
+        {
+            // Switches are comma-separated and may share a token with the object ("/e,/select,C:\x\a.exe").
+            string part = token.Value;
+            while (part.StartsWith('/'))
+            {
+                int comma = part.IndexOf(',');
+                string name = comma < 0 ? part : part[..comma];
+                if (!ExplorerSwitches.Contains(name))
+                {
+                    state.Flags.Add(ResolutionFlag.InterpreterHost);
+                    return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+                }
+
+                part = comma < 0 ? string.Empty : part[(comma + 1)..].TrimStart();
+            }
+
+            part = part.Trim(',', ' ');
+            if (part.Length > 0)
+            {
+                target = part;
+                end = token.End;
+                break;
+            }
+        }
+
+        if (target is null)
+        {
+            return state.Resolved(host, args); // no object: a window
+        }
+
+        string rest = args[end..].Trim();
+        if (IsRemote(target))
         {
             state.Flags.Add(ResolutionFlag.InterpreterHost);
             state.Flags.Add(ResolutionFlag.RemotePayload);
-            return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, args).WithFlags(ResolutionFlag.LauncherPayload);
+            return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, rest).WithFlags(ResolutionFlag.LauncherPayload);
         }
 
-        if (!LaunchableExtensions.Contains(Path.GetExtension(first)))
+        string trimmed = target.TrimEnd('.', ' ', '\\', '/');
+        if (IsDriveQualified(target) && trimmed.Length > 2 && trimmed.IndexOf(':', 2) < 0 && !HasExtension(trimmed))
         {
-            return state.Resolved(host, args);
+            return state.Resolved(host, args); // a local folder: explorer shows it, nothing else runs
         }
 
         state.Flags.Add(ResolutionFlag.InterpreterHost);
         state.Flags.Add(ResolutionFlag.LauncherPayload);
-        var file = ResolveFile(first, FileRole.Script, state);
-        string rest = args[tokens[0].End..].Trim();
+        var file = ResolveFile(target, FileRole.Script, state);
         return file.Path is { } path ? state.Resolved(path, rest, host) : state.Unresolved(file.Reason!.Value, host, rest);
     }
 
     /// <summary>
-    /// <c>msiexec /i|/package &lt;msi|url&gt;</c> installs a package (the <c>.msi</c> is the target; a URL is a remote payload), and
-    /// <c>msiexec /y|/z &lt;dll&gt;</c> registers a library (E4, review C M9). Anything else (an uninstall by product code, ...) is msiexec.
+    /// <c>msiexec</c> (E4, review C M9; E4 review H1): the package a command installs, repairs, uninstalls, advertises or patches
+    /// (<c>/i /package /a /j /x /uninstall /f /p /update</c>) is the target, and so is the library of <c>/y</c> / <c>/z</c>; a URL there is a
+    /// remote payload. msiexec itself is the target only when every argument is a known switch that runs no package (<c>/q</c>,
+    /// <c>/norestart</c>, <c>/l*v log</c>, ...) or a <c>PROPERTY=value</c>. A product code (the cached package of an installed product), a
+    /// missing package or an unknown switch can't be judged: Unverified, never msiexec.
     /// </summary>
     private ResolvedCommand Msiexec(string host, string args, State state)
     {
-        var tokens = Tokenize(args);
-        for (int i = 0; i + 1 < tokens.Count; i++)
+        var tokens = Tokenize(args, out bool truncated);
+        if (truncated)
         {
-            string name = tokens[i].Value.ToLowerInvariant();
-            string value = tokens[i + 1].Value;
-            bool package = name is "/i" or "-i" or "/package" or "-package" or "/a" or "-a" or "/j" or "-j";
-            bool library = name is "/y" or "-y" or "/z" or "-z";
-            if ((!package && !library) || value.StartsWith('{') || value.StartsWith('/'))
-            {
-                continue;
-            }
-
             state.Flags.Add(ResolutionFlag.InterpreterHost);
-            state.Flags.Add(ResolutionFlag.LauncherPayload);
-            string rest = args[tokens[i + 1].End..].Trim();
-            if (IsRemote(value))
+            return state.Unresolved(TargetUnresolvedReason.SearchLimitReached, host, args);
+        }
+
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            string value = tokens[i].Value;
+            if (value.Length < 2 || value[0] is not ('/' or '-'))
             {
-                state.Flags.Add(ResolutionFlag.RemotePayload);
-                return state.Unresolved(TargetUnresolvedReason.RemotePayload, host, rest);
+                if (value.IndexOf('=') > 0)
+                {
+                    continue; // PROPERTY=value
+                }
+
+                state.Flags.Add(ResolutionFlag.InterpreterHost);
+                return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
             }
 
-            return library ? LibraryPayload(host, value, rest, state) : ScriptPayload(host, value, rest, state);
+            var kind = MsiexecSwitch(value[1..].ToLowerInvariant());
+            switch (kind)
+            {
+                case MsiSwitch.Plain:
+                    continue;
+                case MsiSwitch.TakesValue:
+                    i++;
+                    continue;
+                case MsiSwitch.Package or MsiSwitch.Library:
+                    return MsiexecPayload(host, args, tokens, i, kind == MsiSwitch.Library, state);
+                default:
+                    state.Flags.Add(ResolutionFlag.InterpreterHost);
+                    return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args);
+            }
         }
 
         return state.Resolved(host, args);
+    }
+
+    private enum MsiSwitch
+    {
+        Unknown,
+
+        /// <summary>Runs no package and takes no value (<c>/qn</c>, <c>/norestart</c>).</summary>
+        Plain,
+
+        /// <summary>Takes a value that is not a package (<c>/l*v log.txt</c>, <c>/t</c>, <c>/g</c>).</summary>
+        TakesValue,
+
+        /// <summary>The next argument is a package (or a product code).</summary>
+        Package,
+
+        /// <summary>The next argument is a library to register (<c>/y</c>) or unregister (<c>/z</c>).</summary>
+        Library,
+    }
+
+    private static MsiSwitch MsiexecSwitch(string name)
+    {
+        static bool Letters(string s, string allowed) => s.Skip(1).All(allowed.Contains);
+        return name switch
+        {
+            "i" or "package" or "a" or "x" or "uninstall" or "p" or "update" or "j" or "ju" or "jm" => MsiSwitch.Package,
+            _ when name[0] == 'f' && Letters(name, "pecdaumsvo") => MsiSwitch.Package, // repair: /f, /fvomus
+            "y" or "z" => MsiSwitch.Library,
+            "quiet" or "passive" or "norestart" or "forcerestart" or "promptrestart" or "?" or "h" or "help" or "unregister" or "regserver" => MsiSwitch.Plain,
+            _ when name[0] == 'q' && Letters(name, "nbrfh+-!") => MsiSwitch.Plain,
+            _ when name[0] == 'l' && Letters(name, "iwearucmopvx+!*") => MsiSwitch.TakesValue, // /l*v logfile
+            "log" or "t" or "g" => MsiSwitch.TakesValue,
+            _ => MsiSwitch.Unknown,
+        };
+    }
+
+    /// <summary>The package (or library) after msiexec switch <paramref name="index"/>; <c>/update</c> may list several, each judged.</summary>
+    private ResolvedCommand MsiexecPayload(
+        string host, string args, List<(string Value, string Raw, int Start, int End)> tokens, int index, bool library, State state)
+    {
+        state.Flags.Add(ResolutionFlag.InterpreterHost);
+        string value = index + 1 < tokens.Count ? tokens[index + 1].Value.Trim() : string.Empty;
+        if (value.Length == 0 || value[0] is '/' or '-')
+        {
+            return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
+        }
+
+        if (value.StartsWith('{'))
+        {
+            return state.Unresolved(TargetUnresolvedReason.HostArgumentsNotUnderstood, host, args); // a product code: no package named
+        }
+
+        state.Flags.Add(ResolutionFlag.LauncherPayload);
+        string rest = args[tokens[index + 1].End..].Trim();
+        var packages = value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (packages.Length == 0)
+        {
+            return state.Unresolved(TargetUnresolvedReason.MissingHostArgument, host, args);
+        }
+
+        var results = packages.Take(MaxChainCommands)
+            .Select((package, n) => library
+                ? LibraryPayload(host, package, rest, n == 0 ? state : state.ForChainCommand())
+                : ScriptPayload(host, package, rest, n == 0 ? state : state.ForChainCommand()))
+            .ToList();
+        if (packages.Length > MaxChainCommands)
+        {
+            results.Add(state.ForChainCommand().Unresolved(TargetUnresolvedReason.SearchLimitReached, host, rest));
+        }
+
+        return results[0].WithAdditional(results.Skip(1));
     }
 
     private ResolvedCommand LibraryPayload(string host, string dll, string remaining, State state)
