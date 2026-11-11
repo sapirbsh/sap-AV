@@ -586,8 +586,15 @@ public sealed unsafe partial class YaraRuleSet : IDisposable
             metaHandle.Free();
         }
 
-        var (verdict, category) = InterpretVerdictAndCategory(file, identifier,
-            meta.TryGetValue("verdict", out var v) ? v : null, meta.TryGetValue("category", out var c) ? c : null, warnings);
+        var verdictMeta = meta.TryGetValue("verdict", out var v) ? v : (MetaValue?)null;
+        var categoryMeta = meta.TryGetValue("category", out var c) ? c : (MetaValue?)null;
+        var (verdict, category) = InterpretVerdictAndCategory(file, identifier, verdictMeta, categoryMeta, warnings);
+        if (ThirdPartyRules.IsThirdParty(file))
+        {
+            // E2 (review M2): vendored rules must map verdict and category explicitly; nothing defaults to Malicious.
+            (verdict, category) = ThirdPartyRules.Enforce(file, identifier, verdictMeta is not null, categoryMeta is not null, verdict, category, warnings);
+        }
+
         return new YaraRuleInfo(
             file,
             identifier,

@@ -72,7 +72,8 @@ public sealed record YaraScanResult
             or YaraFailureReason.IoError
             or YaraFailureReason.Timeout
             or YaraFailureReason.RulesDisposed
-            or YaraFailureReason.EngineError => ScanStatus.Error,
+            or YaraFailureReason.EngineError
+            or YaraFailureReason.BudgetExhausted => ScanStatus.Error,
         _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "None or undefined."),
     };
 

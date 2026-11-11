@@ -60,4 +60,10 @@ public enum YaraFailureReason
 
     /// <summary>The YARA engine reported an error (e.g. out of memory). Status Error.</summary>
     EngineError,
+
+    /// <summary>
+    /// E2: the scan-time budget (<see cref="YaraScanBudget"/>) of this run was used up, so the content was not YARA-scanned.
+    /// Status Error (never Clean).
+    /// </summary>
+    BudgetExhausted,
 }

@@ -75,17 +75,21 @@ public sealed unsafe class YaraScanner : IYaraScanner
     private const int BufferedReadChunk = 1024 * 1024;
 
     private YaraRuleSet _rules;
+    private YaraScanBudget? _budget;
 
     /// <param name="rules">The rules to scan with. Not owned: the caller disposes it (after swapping it out).</param>
     /// <param name="maxSizeBytes">Largest content size that is scanned (default: the hasher's limit, 256 MiB).</param>
     /// <param name="timeout">Per-scan timeout (default <see cref="DefaultTimeout"/>); <see cref="Timeout.InfiniteTimeSpan"/> for none.</param>
     /// <param name="maxBufferedSizeBytes">Largest file read into memory when it can't be mapped (default 64 MiB).</param>
+    /// <param name="budget">E2: an optional scan-time budget for the run (see <see cref="SetBudget"/>).</param>
     public YaraScanner(
         YaraRuleSet rules,
         long maxSizeBytes = Sha256Hasher.DefaultMaxSizeBytes,
         TimeSpan? timeout = null,
-        long maxBufferedSizeBytes = DefaultMaxBufferedSizeBytes)
+        long maxBufferedSizeBytes = DefaultMaxBufferedSizeBytes,
+        YaraScanBudget? budget = null)
     {
+        _budget = budget;
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentOutOfRangeException.ThrowIfNegative(maxSizeBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(maxBufferedSizeBytes);
@@ -117,6 +121,16 @@ public sealed unsafe class YaraScanner : IYaraScanner
 
     /// <summary>The current rule set.</summary>
     public YaraRuleSet Rules => Volatile.Read(ref _rules);
+
+    /// <summary>E2: the current scan-time budget, or null (each scan then has only <see cref="Timeout"/>).</summary>
+    public YaraScanBudget? Budget => Volatile.Read(ref _budget);
+
+    /// <summary>
+    /// E2: starts a new budgeted run (e.g. one scan job): later scans use <paramref name="budget"/> (null: no budget) and the
+    /// previous budget is returned. With a budget, each scan's YARA-X timeout is the smaller of <see cref="Timeout"/> and what
+    /// the budget allows, and once the budget is used up scans return <see cref="YaraFailureReason.BudgetExhausted"/>.
+    /// </summary>
+    public YaraScanBudget? SetBudget(YaraScanBudget? budget) => Interlocked.Exchange(ref _budget, budget);
 
     /// <summary>Test seam: true forces the buffered path, as for a file on removable or network media.</summary>
     internal bool ForceBufferedRead { get; init; }
@@ -300,12 +314,34 @@ public sealed unsafe class YaraScanner : IYaraScanner
     private YaraScanResult ScanWithCurrentRules(byte* data, long length)
     {
         var rules = Rules;
-        var result = rules.ScanMemory(data, length, TimeoutSeconds);
-        if (result.FailureReason == YaraFailureReason.RulesDisposed && Rules is var current && !ReferenceEquals(current, rules))
+        int timeout = TimeoutSeconds;
+        var budget = Budget;
+        if (budget is not null)
         {
-            result = current.ScanMemory(data, length, TimeoutSeconds); // lost the race with a reload: retry once
+            if (!budget.TryGetTimeoutSeconds(out int allowed))
+            {
+                return YaraScanResult.NotScanned(YaraFailureReason.BudgetExhausted,
+                    $"The YARA scan-time budget of this run ({budget.Total.TotalSeconds:0.#} s) is used up; not YARA-scanned.",
+                    length, rules.Fingerprint);
+            }
+
+            timeout = timeout == 0 ? allowed : Math.Min(timeout, allowed);
         }
 
-        return result;
+        long start = budget?.GetTimestamp() ?? 0;
+        try
+        {
+            var result = rules.ScanMemory(data, length, timeout);
+            if (result.FailureReason == YaraFailureReason.RulesDisposed && Rules is var current && !ReferenceEquals(current, rules))
+            {
+                result = current.ScanMemory(data, length, timeout); // lost the race with a reload: retry once
+            }
+
+            return result;
+        }
+        finally
+        {
+            budget?.Charge(budget.GetElapsedTime(start));
+        }
     }
 }

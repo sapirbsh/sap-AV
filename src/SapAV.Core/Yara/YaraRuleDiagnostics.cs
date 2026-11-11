@@ -18,7 +18,10 @@ public enum YaraWarningKind
     /// </summary>
     Mitre,
 
-    /// <summary>The rule's <c>verdict</c> meta is not a known value; the rule reports Suspicious.</summary>
+    /// <summary>
+    /// The rule's <c>verdict</c> meta is not a known value, or (E2) a third-party rule lacks its explicit <c>verdict</c> /
+    /// <c>category</c> meta; the rule reports Suspicious.
+    /// </summary>
     Verdict,
 
     /// <summary>A warning from the YARA compiler itself (e.g. a rule that may slow down scanning).</summary>
@@ -26,7 +29,8 @@ public enum YaraWarningKind
 
     /// <summary>
     /// E1: the rule's <c>category</c> meta is not a known value (the rule reports Malware), or it says pup / hacktool while the
-    /// verdict says malicious (the rule is capped at PotentiallyUnwanted).
+    /// verdict says malicious (the rule is capped at PotentiallyUnwanted). E2: a third-party rule whose name says malware is
+    /// mapped to pup / hacktool (it reports Malware, Suspicious).
     /// </summary>
     Category,
 }
