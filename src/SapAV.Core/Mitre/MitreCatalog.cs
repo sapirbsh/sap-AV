@@ -55,6 +55,12 @@ public static class MitreCatalog
         new(MitreTechniqueIds.Keylogging, "Input Capture: Keylogging"),
         new(MitreTechniqueIds.CredentialsFromPasswordStores, "Credentials from Password Stores"),
         new(MitreTechniqueIds.ApplicationLayerProtocol, "Application Layer Protocol"),
+        new(MitreTechniqueIds.OsCredentialDumping, "OS Credential Dumping"),
+        new(MitreTechniqueIds.NetworkSniffing, "Network Sniffing"),
+        new(MitreTechniqueIds.BruteForce, "Brute Force"),
+        new(MitreTechniqueIds.PasswordManagers, "Credentials from Password Stores: Password Managers"),
+        new(MitreTechniqueIds.StealOrForgeKerberosTickets, "Steal or Forge Kerberos Tickets"),
+        new(MitreTechniqueIds.ObtainTool, "Obtain Capabilities: Tool"),
     }.ToFrozenDictionary(t => t.Id, StringComparer.Ordinal);
 
     /// <summary>All techniques in the catalog.</summary>

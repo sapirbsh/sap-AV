@@ -61,6 +61,13 @@ public class MitreCatalogTests
         { "T1071", "Application Layer Protocol" },
         { "T1202", "Indirect Command Execution" },
         { "T1218.007", "System Binary Proxy Execution: Msiexec" },
+        // E2: third-party YARA rules (curated-rules.txt)
+        { "T1003", "OS Credential Dumping" },
+        { "T1040", "Network Sniffing" },
+        { "T1110", "Brute Force" },
+        { "T1555.005", "Credentials from Password Stores: Password Managers" },
+        { "T1558", "Steal or Forge Kerberos Tickets" },
+        { "T1588.002", "Obtain Capabilities: Tool" },
     };
 
     [Theory]

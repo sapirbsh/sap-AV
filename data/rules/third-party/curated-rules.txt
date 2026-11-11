@@ -1,0 +1,263 @@
+# sap-AV curated YARA-Forge subset (ROADMAP E2). Read by update.ps1; also read by the unit tests.
+#
+# One rule per line:   <YARA-Forge rule name>  <category>  <verdict>  [<mitre>]
+#   category: infostealer | miner | hacktool | pup
+#   verdict:  malicious | suspicious       (infostealer, miner)
+#             hacktool                     (hacktool: always PotentiallyUnwanted, never quarantined automatically)
+#             pup                          (pup: always PotentiallyUnwanted, never quarantined automatically)
+#   mitre:    optional, comma-separated without spaces; default per category (see update.ps1 $CategoryMitre)
+#
+# Mapping rules (review E1/E3/E4 M2), checked by ThirdPartyRulesTests:
+#   - HKTL_ / Hacktool_ / INDICATOR_TOOL_ / Tool_ names are hacktool; PUA_ names are pup.
+#   - MAL_ / MALWARE_ / Infostealer_ / Stealer_ / Trojan_ / Crime_ names are never hacktool or pup.
+#   - A rule that has a hack-tool name but detects malware (e.g. HKTL_NET_GUID_Njrat) is not vendored at all.
+#   - Generic or weak rules (SUSP_, "generic", "unknown") are suspicious, never malicious.
+#   - Plain XMRig / Monero-miner software (not a trojanized miner) is pup.
+
+# --- Infostealers: DitekSHen (BSD-2-Clause) ---
+DITEKSHEN_MALWARE_Win_Acridrain                       infostealer malicious
+DITEKSHEN_MALWARE_Win_Agentteslav3                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Agnianestealer                  infostealer malicious
+DITEKSHEN_MALWARE_Win_Apocalypse                      infostealer malicious
+DITEKSHEN_MALWARE_Win_Arkei                           infostealer malicious
+DITEKSHEN_MALWARE_Win_Avalon                          infostealer malicious
+DITEKSHEN_MALWARE_Win_Bhunt                           infostealer malicious
+DITEKSHEN_MALWARE_Win_Bitcoingrabber                  infostealer suspicious
+DITEKSHEN_MALWARE_Win_Blankstealer                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Blitzgrabber                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Bobik                           infostealer malicious
+DITEKSHEN_MALWARE_Win_Clipbanker01                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Clipbanker02                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Cookiestealer                   infostealer suspicious
+DITEKSHEN_MALWARE_Win_Cryptostealergo                 infostealer malicious
+DITEKSHEN_MALWARE_Win_Cyberstealer                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Darkeye                         infostealer malicious
+DITEKSHEN_MALWARE_Win_Echelon                         infostealer malicious
+DITEKSHEN_MALWARE_Win_FOXGRABBER                      infostealer malicious
+DITEKSHEN_MALWARE_Win_Fabookie                        infostealer malicious
+DITEKSHEN_MALWARE_Win_Ficker                          infostealer malicious
+DITEKSHEN_MALWARE_Win_Gloomanestealer                 infostealer malicious
+DITEKSHEN_MALWARE_Win_Greetingghoul                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Heracles                        infostealer malicious
+DITEKSHEN_MALWARE_Win_Isrstealer                      infostealer malicious
+DITEKSHEN_MALWARE_Win_Jesterstealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Krakenstealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Lummastealer                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Mercurial                       infostealer malicious
+DITEKSHEN_MALWARE_Win_Metastealer                     infostealer malicious
+DITEKSHEN_MALWARE_Win_Multi_Family_Infostealer        infostealer malicious
+DITEKSHEN_MALWARE_Win_Mystic                          infostealer malicious
+DITEKSHEN_MALWARE_Win_Neptune                         infostealer malicious   T1555.003,T1056.001
+DITEKSHEN_MALWARE_Win_Nodachi                         infostealer malicious
+DITEKSHEN_MALWARE_Win_PWSH_Poshcookiestealer          infostealer malicious   T1539,T1059.001
+DITEKSHEN_MALWARE_Win_PWSH_Poshwifistealer            infostealer malicious   T1555,T1059.001
+DITEKSHEN_MALWARE_Win_Phemedronestealer               infostealer malicious
+DITEKSHEN_MALWARE_Win_Phoenix                         infostealer malicious   T1056.001,T1555.003
+DITEKSHEN_MALWARE_Win_Poullight                       infostealer malicious
+DITEKSHEN_MALWARE_Win_Povertystealer                  infostealer malicious
+DITEKSHEN_MALWARE_Win_Quasarstealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Quilclipper                     infostealer malicious
+DITEKSHEN_MALWARE_Win_Qulab                           infostealer malicious
+DITEKSHEN_MALWARE_Win_Ragestealer                     infostealer malicious
+DITEKSHEN_MALWARE_Win_Rdpcredsstealerinjector         infostealer malicious   T1555,T1055
+DITEKSHEN_MALWARE_Win_Redlinedropperahk               infostealer malicious
+DITEKSHEN_MALWARE_Win_Redlinedropperexe               infostealer malicious
+DITEKSHEN_MALWARE_Win_Risepro                         infostealer malicious
+DITEKSHEN_MALWARE_Win_Rootteamstealer                 infostealer malicious
+DITEKSHEN_MALWARE_Win_Rustystealer                    infostealer malicious
+DITEKSHEN_MALWARE_Win_Sapphirestealer                 infostealer malicious
+DITEKSHEN_MALWARE_Win_Solarmarker                     infostealer malicious
+DITEKSHEN_MALWARE_Win_Soranostealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Spectre                         infostealer malicious
+DITEKSHEN_MALWARE_Win_Stealerium                      infostealer malicious
+DITEKSHEN_MALWARE_Win_Steamhook                       infostealer suspicious
+DITEKSHEN_MALWARE_Win_Stormkitty                      infostealer malicious
+DITEKSHEN_MALWARE_Win_Sweetystealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Taurus                          infostealer malicious
+DITEKSHEN_MALWARE_Win_Tefosteal                       infostealer malicious
+DITEKSHEN_MALWARE_Win_Toxiceye                        infostealer malicious
+DITEKSHEN_MALWARE_Win_UNK_Infostealer                 infostealer suspicious
+DITEKSHEN_MALWARE_Win_Umbralstealer                   infostealer malicious
+DITEKSHEN_MALWARE_Win_Unamedstealer                   infostealer suspicious
+DITEKSHEN_MALWARE_Win_Unicorn                         infostealer malicious
+DITEKSHEN_MALWARE_Win_Vidar                           infostealer malicious
+DITEKSHEN_MALWARE_Win_Vulturi                         infostealer malicious
+DITEKSHEN_MALWARE_Win_Xfiles                          infostealer malicious
+
+# --- Infostealers: SEKOIA (DRL-1.1) ---
+SEKOIA_Clipper_Win_Atlas_Strings                      infostealer malicious
+SEKOIA_Clipper_Win_Cryptoclippy                       infostealer malicious
+SEKOIA_Infostealer_Win_44Caliber                      infostealer malicious
+SEKOIA_Infostealer_Win_Acridrain_Mar23                infostealer malicious
+SEKOIA_Infostealer_Win_Acrstealer_Str                 infostealer malicious
+SEKOIA_Infostealer_Win_Agrat                          infostealer malicious
+SEKOIA_Infostealer_Win_Aurora                         infostealer malicious
+SEKOIA_Infostealer_Win_Aurora_Str                     infostealer malicious
+SEKOIA_Infostealer_Win_Banditstealer                  infostealer malicious
+SEKOIA_Infostealer_Win_Bebra                          infostealer malicious
+SEKOIA_Infostealer_Win_Blackcap                       infostealer malicious
+SEKOIA_Infostealer_Win_Blackguard_Mar23               infostealer malicious
+SEKOIA_Infostealer_Win_Blustealer                     infostealer malicious
+SEKOIA_Infostealer_Win_Cinoshistealer                 infostealer malicious
+SEKOIA_Infostealer_Win_Daolpu_Str                     infostealer malicious
+SEKOIA_Infostealer_Win_Doenerium_Str                  infostealer malicious
+SEKOIA_Infostealer_Win_Ducklogs                       infostealer malicious
+SEKOIA_Infostealer_Win_Edgeguard                      infostealer malicious
+SEKOIA_Infostealer_Win_Enigma_Initial_Loader          infostealer malicious
+SEKOIA_Infostealer_Win_Enigma_Loader_Module           infostealer malicious
+SEKOIA_Infostealer_Win_Enigma_Stealer_Module          infostealer malicious
+SEKOIA_Infostealer_Win_Eternity                       infostealer malicious
+SEKOIA_Infostealer_Win_Fwit_Strings                   infostealer malicious
+SEKOIA_Infostealer_Win_Ginzostealer_Str               infostealer malicious
+SEKOIA_Infostealer_Win_Irontiger_Chrome_Stealer       infostealer malicious
+SEKOIA_Infostealer_Win_Leaf                           infostealer malicious
+SEKOIA_Infostealer_Win_Lighting                       infostealer malicious
+SEKOIA_Infostealer_Win_Lumma_Strings_Aug23            infostealer malicious
+SEKOIA_Infostealer_Win_Mars_Stealer                   infostealer malicious
+SEKOIA_Infostealer_Win_Mars_Stealer_Variant_Llcppc1   infostealer malicious
+SEKOIA_Infostealer_Win_Mars_Stealer_Xor_Routine       infostealer malicious
+SEKOIA_Infostealer_Win_Meduzastealer                  infostealer malicious
+SEKOIA_Infostealer_Win_Monster_Stub                   infostealer malicious
+SEKOIA_Infostealer_Win_Nekostealer                    infostealer malicious
+SEKOIA_Infostealer_Win_Nemesis_In_Memory              infostealer malicious
+SEKOIA_Infostealer_Win_Nosu                           infostealer malicious
+SEKOIA_Infostealer_Win_Pennywise_Mar23                infostealer malicious
+SEKOIA_Infostealer_Win_Phoenix                        infostealer malicious
+SEKOIA_Infostealer_Win_Phoenixwave                    infostealer malicious
+SEKOIA_Infostealer_Win_Raccoon_Str_Takemypainback     infostealer malicious
+SEKOIA_Infostealer_Win_Redline_Strings                infostealer malicious
+SEKOIA_Infostealer_Win_Solarmarker_Dll                infostealer malicious
+SEKOIA_Infostealer_Win_Solarmarker_Powershell         infostealer malicious   T1555.003,T1059.001
+SEKOIA_Infostealer_Win_Spacestealer                   infostealer malicious
+SEKOIA_Infostealer_Win_Stealc_Str_Oct24               infostealer malicious
+SEKOIA_Infostealer_Win_Stealerium                     infostealer malicious
+SEKOIA_Infostealer_Win_Stormkitty                     infostealer malicious
+SEKOIA_Infostealer_Win_Stormkitty_Exfil_Urls          infostealer malicious
+SEKOIA_Infostealer_Win_Titan                          infostealer malicious
+SEKOIA_Infostealer_Win_Vidar_Str_Jul22                infostealer malicious
+SEKOIA_Infostealer_Win_Vidar_Strings_Nov23            infostealer malicious
+SEKOIA_Infostealer_Win_Vulturi                        infostealer malicious
+SEKOIA_Infostealer_Win_Whitesnake_Loader_Feb23        infostealer malicious
+SEKOIA_Infostealer_Win_Whitesnake_Stealer_Feb23       infostealer malicious
+SEKOIA_Infostealer_Win_Whitesnake_Xor_Rc4_July12      infostealer malicious
+SEKOIA_Infostealer_Win_Xehook_Str                     infostealer malicious
+SEKOIA_Infostealer_Win_Xenostealer_Strings            infostealer malicious
+SEKOIA_Infostealer_Win_Xfiles                         infostealer malicious
+SEKOIA_Koi_Netstealer                                 infostealer malicious
+SEKOIA_Loader_Amadey_Clipper_Plugin                   infostealer malicious
+SEKOIA_Loader_Amadey_Stealer_Plugin                   infostealer malicious
+SEKOIA_Pe_Stealer_Axilestealer_Strings                infostealer malicious
+SEKOIA_Pe_Stealer_Scarletstealer_Strings              infostealer malicious
+SEKOIA_Radx_Stealer                                   infostealer malicious
+SEKOIA_Stealer_Win_Demotryspy                         infostealer malicious
+SEKOIA_Stealer_Win_Luca                               infostealer malicious
+SEKOIA_Typhon_Reborn_Stealer                          infostealer malicious
+SEKOIA_Win_Clipper_Generic                            infostealer suspicious
+SEKOIA_Win_Infostealer_Serpent_Strings                infostealer malicious
+SEKOIA_Win_Malware_Agnianestealer                     infostealer malicious
+
+# --- Infostealers: other permissive sources ---
+BLACKBERRY_Eternityclipper                            infostealer malicious
+BLACKBERRY_Eternitystealer                            infostealer malicious
+BLACKBERRY_Mal_Infostealer_EXE_Jupyter_Cert_36Ff      infostealer malicious
+BLACKBERRY_Mal_Infostealer_MSI_EXE_Jupyter_Certificate infostealer malicious
+BLACKBERRY_Mal_Infostealer_MSI_Jupyter_Embedded_Powershell infostealer malicious
+BLACKBERRY_Mal_Infostealer_Win32_Blackguard           infostealer malicious
+BLACKBERRY_Mal_Infostealer_Win32_Jupyter_Main_Module  infostealer malicious
+BLACKBERRY_Mal_Infostealer_Win32_Jupyter_Download_And_Execute_Module infostealer malicious
+DR4K0NIA_MAL_MSIL_NET_Typhonlogger_Jul23              infostealer malicious
+SIGNATURE_BASE_MAL_Katz_Stealer_May25                 infostealer malicious
+SIGNATURE_BASE_MAL_NET_Katz_Stealer_Loader_May25      infostealer malicious
+SIGNATURE_BASE_MAL_DLL_Stealer_Nov23                  infostealer malicious
+SIGNATURE_BASE_MAL_DLL_Chrome_App_Bound_Encryption_Decryption_May25 infostealer malicious
+SIGNATURE_BASE_MAL_Compromised_Cert_Ducktail_Stealer_Jun23 infostealer malicious
+SIGNATURE_BASE_Telebots_Credraptor_Password_Stealer   infostealer malicious
+SIGNATURE_BASE_Freeenki_Infostealer_Nov17             infostealer malicious
+SIGNATURE_BASE_Rombertik_Carbongrabber                infostealer malicious
+SIGNATURE_BASE_Lokibot_Dropper_Packed_R11_Feb18       infostealer malicious
+SIGNATURE_BASE_Lokibot_Dropper_Scancopypdf_Feb18      infostealer malicious
+SIGNATURE_BASE_Credentialstealer_Generic_Backdoor     infostealer suspicious
+SIGNATURE_BASE_SUSP_MAL_EXFIL_Stealer_Output_Characteristics_Sep22_1 infostealer suspicious T1005,T1555.003
+REVERSINGLABS_Win64_Infostealer_Skuld                 infostealer malicious
+REVERSINGLABS_Win32_Infostealer_Lumarstealer          infostealer malicious
+REVERSINGLABS_Win64_Infostealer_Weaselstore           infostealer malicious
+REVERSINGLABS_Bytecode_MSIL_Infostealer_Gomorrahstealer infostealer malicious
+REVERSINGLABS_Win32_Infostealer_Stealc                infostealer malicious
+REVERSINGLABS_Win64_Infostealer_Daolpu                infostealer malicious
+TRELLIX_ARC_Redline_Payload                           infostealer malicious
+TRELLIX_ARC_STEALER_Lokibot                           infostealer malicious
+TRELLIX_ARC_STEALER_Credstealesy                      infostealer suspicious
+
+# --- Miners ---
+DITEKSHEN_MALWARE_Win_Coinminer01                     miner       malicious
+DITEKSHEN_MALWARE_Win_Coinminer02                     miner       malicious
+DITEKSHEN_MALWARE_Win_Coinminer03                     miner       malicious
+DITEKSHEN_MALWARE_Win_Coinminer04                     miner       malicious
+DITEKSHEN_MALWARE_Win_Abubasbanditbot                 miner       malicious
+DITEKSHEN_MALWARE_Win_Nplusminer                      miner       suspicious
+SIGNATURE_BASE_MAL_XMR_Miner_May19_1                  miner       malicious
+SIGNATURE_BASE_NK_Miner_Malware_Jan18_1               miner       malicious
+SIGNATURE_BASE_SUSP_XMRIG_Reference                   miner       suspicious
+TRELLIX_ARC_Trojan_Coinminer                          miner       malicious
+# Plain miner software (XMRig, Monero miners, miner configs and command lines): unwanted, not malware.
+SEKOIA_Miner_Win_Xmrig_Strings                        pup         pup         T1496.001
+SIGNATURE_BASE_PUA_WIN_XMRIG_Cryptocoin_Miner_Dec20   pup         pup         T1496.001
+SIGNATURE_BASE_PUA_Cryptominer_Jan19_1                pup         pup         T1496.001
+SIGNATURE_BASE_PUA_Crypto_Mining_Commandline_Indicators_Oct21 pup pup         T1496.001
+SIGNATURE_BASE_XMRIG_Monero_Miner                     pup         pup         T1496.001
+SIGNATURE_BASE_XMRIG_Monero_Miner_Config              pup         pup         T1496.001
+TRELLIX_ARC_MINER_Monero_Mining_Detection             pup         pup         T1496.001
+
+# --- Hack tools: credential dumpers, password / cookie extractors, keygens ---
+DITEKSHEN_INDICATOR_TOOL_Chromecookiesview            hacktool    hacktool    T1539
+DITEKSHEN_INDICATOR_TOOL_Chromekatz                   hacktool    hacktool    T1555.003,T1539
+DITEKSHEN_INDICATOR_TOOL_Edgecookiesview              hacktool    hacktool    T1539
+DITEKSHEN_INDICATOR_TOOL_PWS_Blackbone                hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_Credstealer              hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_Fgdump                   hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_LSASS_Createminidump     hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_Mimikatz                 hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_Pwdump7                  hacktool    hacktool
+DITEKSHEN_INDICATOR_TOOL_PWS_Rubeus                   hacktool    hacktool    T1558
+DITEKSHEN_INDICATOR_TOOL_PWS_Securityxploded_Browserpassworddumper hacktool hacktool T1555.003
+DITEKSHEN_INDICATOR_TOOL_PWS_Securityxploded_Emailpassworddumper hacktool hacktool T1555
+DITEKSHEN_INDICATOR_TOOL_PWS_Securityxploded_Ftppassworddumper hacktool hacktool T1555
+DITEKSHEN_INDICATOR_TOOL_PWS_Sniffpass                hacktool    hacktool    T1040
+DITEKSHEN_INDICATOR_TOOL_Pandora                      hacktool    hacktool    T1555.005
+DITEKSHEN_INDICATOR_TOOL_Pplblade                     hacktool    hacktool
+BINARYALERT_Hacktool_Windows_Mimikatz_Copywrite       hacktool    hacktool
+BINARYALERT_Hacktool_Windows_Mimikatz_Errors          hacktool    hacktool
+BINARYALERT_Hacktool_Windows_Mimikatz_Sekurlsa        hacktool    hacktool
+BINARYALERT_Hacktool_Windows_Moyix_Creddump           hacktool    hacktool
+FIREEYE_RT_Hacktool_MSIL_SAFETYKATZ_4                 hacktool    hacktool
+SEKOIA_Hacktool_Lazagne_Strings                       hacktool    hacktool    T1555
+SEKOIA_Hacktool_Mimikatz_Obfuscated                   hacktool    hacktool
+SEKOIA_Hacktool_Win_Cookiekatz                        hacktool    hacktool    T1539
+SEKOIA_Tool_Quarkspwdump                              hacktool    hacktool
+SEKOIA_Tool_Safetykatz                                hacktool    hacktool
+SIGNATURE_BASE_HKTL_Lazagne_Gen_18                    hacktool    hacktool    T1555
+SIGNATURE_BASE_HKTL_Lazagne_Passworddumper_Dec18_1    hacktool    hacktool    T1555
+SIGNATURE_BASE_HKTL_Mimikatz_Memssp_Hookfn            hacktool    hacktool
+SIGNATURE_BASE_HKTL_NET_Edge_Saved_Passwords_Dumper_May26 hacktool hacktool   T1555.003
+SIGNATURE_BASE_HKTL_Powerkatz_Feb19_1                 hacktool    hacktool
+SIGNATURE_BASE_Crackmapexec_EXE                       hacktool    hacktool    T1110
+SIGNATURE_BASE_Empire_Invoke_Mimikatz_Gen             hacktool    hacktool
+SIGNATURE_BASE_Invoke_Mimikatz                        hacktool    hacktool
+SIGNATURE_BASE_Lazagne_PW_Dumper                      hacktool    hacktool    T1555
+SIGNATURE_BASE_Mimikatz                               hacktool    hacktool
+SIGNATURE_BASE_Mimikatz_Gen_Strings                   hacktool    hacktool
+SIGNATURE_BASE_Mimikatz_Logfile                       hacktool    hacktool
+SIGNATURE_BASE_Msbuild_Mimikatz_Execution_Via_XML     hacktool    hacktool
+SIGNATURE_BASE_Powerkatz_DLL_Generic                  hacktool    hacktool
+SIGNATURE_BASE_SUSP_Patcher_Keygen_Indicators_Jun15   hacktool    hacktool    T1588.002
+SIGNATURE_BASE_WCE_In_Memory                          hacktool    hacktool
+SIGNATURE_BASE_WCE_Modified_1_1014                    hacktool    hacktool
+SIGNATURE_BASE_Windowscredentialeditor                hacktool    hacktool
+
+# --- Considered and left out on purpose (kept here so an update doesn't re-add them silently) ---
+# DITEKSHEN_INDICATOR_TOOL_PWS_Amady          hack-tool name on an Amadey stealer DLL (malware): M2 conflict
+# SIGNATURE_BASE_HKTL_NET_GUID_*              hack-tool names on RATs/miners (Njrat, Asyncrat, Lime_Miner, ...): M2 conflict
+# BINARYALERT_Hacktool_Windows_Cobaltstrike_* hack-tool names on Cobalt Strike beacons (implants): M2 conflict
+# DITEKSHEN_INDICATOR_TOOL_PRV_Advancedrun    NirSoft admin tool, false positives on normal admin use
+# SIGNATURE_BASE_Crime_H2Miner_Kinsing        Linux malware
+# Malpedia (CC BY-SA 4.0), RussianPanda, CAPE (GPL), Arkbird, EmbeeResearch, ...: license not in the approved list

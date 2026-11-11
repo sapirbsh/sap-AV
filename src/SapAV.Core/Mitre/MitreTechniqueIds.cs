@@ -88,4 +88,24 @@ public static class MitreTechniqueIds
     public const string Keylogging = "T1056.001";
     public const string CredentialsFromPasswordStores = "T1555";
     public const string ApplicationLayerProtocol = "T1071";
+
+    // E2: third-party YARA rules (data/rules/third-party/curated-rules.txt).
+
+    /// <summary>E2: credential dumpers (mimikatz, pwdump, WCE, LSASS dumpers); the default for hack-tool rules.</summary>
+    public const string OsCredentialDumping = "T1003";
+
+    /// <summary>E2: password sniffers (SniffPass).</summary>
+    public const string NetworkSniffing = "T1040";
+
+    /// <summary>E2: password spraying / brute-force tools (CrackMapExec).</summary>
+    public const string BruteForce = "T1110";
+
+    /// <summary>E2: password-manager extractors (Pandora).</summary>
+    public const string PasswordManagers = "T1555.005";
+
+    /// <summary>E2: Kerberos ticket tools (Rubeus).</summary>
+    public const string StealOrForgeKerberosTickets = "T1558";
+
+    /// <summary>E2: keygens, patchers and other obtained tools.</summary>
+    public const string ObtainTool = "T1588.002";
 }

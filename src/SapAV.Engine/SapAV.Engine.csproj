@@ -45,5 +45,8 @@
     <!-- Shipped rule package: loaded directly only by a non-elevated console run; otherwise the seed of %ProgramData%\sap-AV\Rules + \Blocklist (D3). -->
     <None Include="..\..\data\rules\**\*.yar" Link="data\rules\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\data\hashes\blocklist.txt" Link="data\hashes\blocklist.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- E2: attribution and license texts of the vendored third-party rules ship with them (BSD/MIT/Apache/DRL notices). -->
+    <None Include="..\..\data\rules\third-party\NOTICE.md" Link="data\rules\third-party\NOTICE.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\data\rules\third-party\licenses\*.txt" Link="data\rules\third-party\licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
