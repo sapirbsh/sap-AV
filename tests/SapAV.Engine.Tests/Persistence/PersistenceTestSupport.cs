@@ -65,7 +65,14 @@ internal sealed class RegistryTestRoot : IDisposable
         using var parent = Registry.CurrentUser.OpenSubKey(Parent, writable: true);
         if (parent is not null && parent.SubKeyCount == 0 && parent.ValueCount == 0)
         {
-            Registry.CurrentUser.DeleteSubKey(Parent, throwOnMissingSubKey: false);
+            try
+            {
+                Registry.CurrentUser.DeleteSubKey(Parent, throwOnMissingSubKey: false);
+            }
+            catch (InvalidOperationException)
+            {
+                // A test class running in parallel created its own root under Parent after the check: leave it to that test.
+            }
         }
     }
 }

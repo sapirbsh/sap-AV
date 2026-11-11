@@ -1097,7 +1097,9 @@ Open (decide before the step that needs it):
   - `System.Management`, for WMI: Defender, process command lines (E5, E7);
   - `System.Diagnostics.PerformanceCounter`, for CPU/GPU counters (E9).
 - **YARA-Forge licensing:** the repo is public. Vendored rules must keep their per-rule licenses, and any rule whose license
-  doesn't allow redistribution is left out (or downloaded by the update script instead of committed). Decide at E2.
+  doesn't allow redistribution is left out (or downloaded by the update script instead of committed). **Decided
+  (user, 2026-11-11):** permissive only. Commit rules under DRL 1.1, MIT, Apache-2.0, BSD, CC0 or CC-BY, keeping author and
+  license. Leave out GPL, non-commercial (NC) and unlicensed rules; nothing is downloaded at runtime.
 - **Honeytoken read detection (G1b):** the primary method is ETW file-read events (E10, needs TraceEvent). File SACL auditing
   would also need the system-wide "Audit File System" policy turned on (`auditpol`), which changes the machine's security
   policy and fills the Security log. Offer it only as an opt-in setting, or drop it. Decide at G1b.
