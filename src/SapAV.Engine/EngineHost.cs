@@ -147,6 +147,10 @@ public static class EngineHost
         builder.Services.AddSingleton<Defender.IDefenderEnvironment, Defender.WindowsDefenderEnvironment>();
         builder.Services.AddSingleton<Core.Defender.IDefenderStatusSource, Defender.WmiDefenderStatusSource>();
 
+        // Browser hijack (E6): read-only snapshot of per-user / machine / policy proxy and PAC settings, the WinHTTP proxy and the
+        // hosts file (hardened open, 1 MB cap), for the browser-hijack rules (E6) and the scan checks (E7).
+        builder.Services.AddSingleton<Core.BrowserHijack.IBrowserHijackSource, BrowserHijack.RegistryBrowserHijackSource>();
+
         // Engine <-> GUI pipe (B4): explicit DACL, first-instance only, local clients only; identities come from the pipe.
         builder.Services.Configure<Pipe.PipeServerOptions>(builder.Configuration.GetSection(Pipe.PipeServerOptions.SectionName));
         builder.Services.AddHostedService<Pipe.EnginePipeServer>();
