@@ -105,9 +105,10 @@ All 10880 rules of the release package by effective license; only the approved o
 | License | Rules | Approved |
 |---|---|---|
 | DRL-1.1 | 5064 | yes |
-| none (no license set) | 2193 | no |
 | BSD-2-Clause | 1780 | yes |
+| CC BY-SA (share-alike) | 1647 | no |
 | MIT | 1265 | yes |
+| none (no license set) | 546 | no |
 | Apache-2.0 | 343 | yes |
 | GPL (any version) | 201 | no |
 | BSD-3-Clause | 29 | yes |

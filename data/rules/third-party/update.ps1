@@ -324,6 +324,11 @@ try {
         foreach ($m in [regex]::Matches($block, '(?ms)^(?:(?:private|global) )*rule\s+(?<name>\w+)[^\n]*\n\{.*?\n\}')) {
             $ruleText = $m.Value
             $ownLicense = Get-Meta $ruleText 'license'
+            if (-not $ownLicense) {
+                # Some sources name it after themselves (e.g. malpedia_license).
+                $alt = [regex]::Match($ruleText, '(?m)^\s*\w+_license\s*=\s*"(?<v>[^"]*)"')
+                if ($alt.Success) { $ownLicense = $alt.Groups['v'].Value }
+            }
             $licenseId = $repoLicense
             $licenseFrom = 'repository'
             if ($ownLicense -and $ownLicense -notmatch '^\s*See license at') {
@@ -337,6 +342,7 @@ try {
                 Repo        = $repo
                 RepoKey     = $key
                 OwnLicense  = $ownLicense
+                HasLicense  = [bool](Get-Meta $ruleText 'license')
                 LicenseId   = $licenseId
                 LicenseFrom = $licenseFrom
                 Quality     = [int](@(Get-Meta $ruleText 'quality') + '0')[0]
@@ -404,7 +410,7 @@ try {
         if (-not $metaMatch.Success) { $excluded += [pscustomobject]@{ Name = $c.Name; Category = $c.Category; Reason = 'no meta section' }; continue }
         $in = $metaMatch.Groups['inner'].Value
         $add = "${in}verdict = `"$($c.Verdict)`"`n${in}category = `"$($c.Category)`"`n${in}mitre = `"$($c.Mitre)`"`n${in}license_spdx = `"$($r.LicenseId)`"`n"
-        if (-not $r.OwnLicense) { $add += "${in}license = `"$($r.LicenseId) (license of the source repository, see licenses/$($r.Repo.Slug).txt)`"`n" }
+        if (-not $r.HasLicense) { $add += "${in}license = `"$($r.LicenseId) (license of the source repository, see licenses/$($r.Repo.Slug).txt)`"`n" }
         if ($portNote) { $add += "${in}sapav_port = `"$portNote`"`n" }
         $insertAt = $metaMatch.Index + $metaMatch.Length - $in.Length
         $ruleText = $ruleText.Insert($insertAt, $add)
