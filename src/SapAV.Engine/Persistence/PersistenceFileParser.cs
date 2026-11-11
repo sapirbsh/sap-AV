@@ -33,6 +33,9 @@ internal sealed record PersistenceParseResult(PersistenceParseStatus Status, Tas
     /// <summary>For <see cref="PersistenceParseStatus.NotCollected"/>: the budget was the reason (no issue of its own is needed).</summary>
     public bool IsOverBudget { get; init; }
 
+    /// <summary>E6: the validated hosts entries when a <see cref="WorkerParseKind.HostsFile"/> was Parsed.</summary>
+    public SapAV.Core.BrowserHijack.HostsParseResult? Hosts { get; init; }
+
     public static PersistenceParseResult Malformed(string message) => new(PersistenceParseStatus.Malformed, null, null, message);
 
     public static PersistenceParseResult Unavailable(string message) => new(PersistenceParseStatus.Unavailable, null, null, message);
@@ -88,7 +91,8 @@ internal interface IPersistenceFileParser
 }
 
 /// <summary>One file for <see cref="IPersistenceFileParser.ParseBatchAsync"/>; the caller keeps <paramref name="File"/> open and closes it.</summary>
-internal sealed record PersistenceParseInput(SafeFileHandle File, WorkerParseKind Kind, string DisplayPath);
+/// <param name="KeepNames">E6, <see cref="WorkerParseKind.HostsFile"/> only: the domain suffixes whose entries are kept past the cap.</param>
+internal sealed record PersistenceParseInput(SafeFileHandle File, WorkerParseKind Kind, string DisplayPath, IReadOnlyList<string>? KeepNames = null);
 
 /// <summary>
 /// No sandbox (InProcess debugging mode, a refused configuration, or nothing registered): nothing is parsed, so the tasks and

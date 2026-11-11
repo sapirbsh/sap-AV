@@ -4,7 +4,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 using SapAV.Core.BrowserHijack;
+using SapAV.Core.Scanning.Isolation;
 using SapAV.Engine.BrowserHijack;
 using SapAV.Engine.Persistence;
 using SapAV.Engine.Tests.Persistence;
@@ -13,25 +15,43 @@ using SapAV.Engine.Tests.TestSupport;
 namespace SapAV.Engine.Tests.BrowserHijack;
 
 /// <summary>
-/// E6: the read-only browser-hijack collector over a throwaway test registry root (never the real HKLM / HKU) and a fake hosts
-/// reader; the real hardened hosts reader over temp files; one skippable read-only test of the real machine.
+/// E6: the read-only browser-hijack collector over a throwaway test registry root (never the real HKLM / HKU), a fake hosts
+/// opener and an in-test stand-in for the worker; the real hardened opener over temp files. The real worker path is in
+/// <see cref="HostsParsingInWorkerTests"/>.
 /// </summary>
 public sealed class BrowserHijackCollectorTests : IDisposable
 {
     private const string SidA = "S-1-5-21-1000-2000-3000-1001";
     private const string SidB = "S-1-5-21-1000-2000-3000-1002";
     private const string SidUnloaded = "S-1-5-21-1000-2000-3000-1003";
-    private const string SystemDirectory = @"C:\Windows\System32";
+    internal const string SystemDirectory = @"C:\Windows\System32";
 
     private readonly RegistryTestRoot _root = new();
+    private readonly TempDir _dir = new();
 
-    public void Dispose() => _root.Dispose();
+    public void Dispose()
+    {
+        _root.Dispose();
+        _dir.Dispose();
+    }
 
-    private RegistryBrowserHijackSource Source(IHostsFileReader? hosts = null, IRegistryView? registry = null, Func<string, bool>? keep = null) =>
-        new(registry ?? _root.View, hosts ?? new FakeHostsReader(HostsFileRead.Failed(HijackReadState.NotFound, null)), SystemDirectory,
-            () => false, keep, TimeProvider.System, NullLogger.Instance);
+    private RegistryBrowserHijackSource Source(IHostsFileOpener? hosts = null, IRegistryView? registry = null, IPersistenceFileParser? parser = null) =>
+        new(registry ?? _root.View, hosts ?? new FakeHostsOpener(() => HostsFileOpen.Failed(HijackReadState.NotFound, null)),
+            parser ?? InTestHostsParser.Instance, SystemDirectory, () => false, null, TimeProvider.System, NullLogger.Instance);
 
     private RegistryKey UserSettings(string sid) => _root.Users($@"{sid}\{RegistryBrowserHijackSource.InternetSettingsPath}");
+
+    /// <summary>An opener that opens a temp file with this content, as the real one would open the hosts file.</summary>
+    private FakeHostsOpener HostsWith(string content, string owner = "S-1-5-18")
+    {
+        var path = Path.Combine(_dir.Path, Guid.NewGuid().ToString("N"));
+        File.WriteAllBytes(path, Encoding.UTF8.GetBytes(content));
+        return new FakeHostsOpener(() =>
+        {
+            var handle = File.OpenHandle(path);
+            return HostsFileOpen.Opened(handle, RandomAccess.GetLength(handle), DateTimeOffset.UnixEpoch, owner);
+        });
+    }
 
     /// <summary>A synthetic connection-settings blob: version, counter, flags, then length-prefixed ANSI strings.</summary>
     private static byte[] Blob(uint version, uint flags, params string[] strings)
@@ -169,19 +189,34 @@ public sealed class BrowserHijackCollectorTests : IDisposable
     }
 
     [Fact]
-    public async Task Hosts_ContentAndMetadata_FromTheReader()
+    public async Task Hosts_HandleGoesToTheParser_WithTheDefaultFilter_AndMetadataStaysEngineSide()
     {
-        var reader = new FakeHostsReader(new HostsFileRead(HijackReadState.Available, null,
-            Encoding.UTF8.GetBytes("127.0.0.1 localhost\n10.6.6.6 www.eset.com\n"), false, 42, DateTimeOffset.UnixEpoch, "S-1-5-21-1-2-3-1001"));
+        var opener = HostsWith("127.0.0.1 localhost\n10.6.6.6 www.eset.com\n", owner: "S-1-5-21-1-2-3-1001");
+        var parser = new RecordingParser(InTestHostsParser.Instance);
 
-        var hosts = (await Source(reader).GetSnapshotAsync()).Hosts;
+        var hosts = (await Source(opener, parser: parser).GetSnapshotAsync()).Hosts;
 
-        Assert.Equal(@"C:\Windows\System32\drivers\etc\hosts", reader.LastPath);
-        Assert.Equal(HostsFileSnapshot.MaxBytes, reader.LastMax);
+        Assert.Equal(@"C:\Windows\System32\drivers\etc\hosts", opener.LastPath);
+        var input = Assert.Single(parser.Inputs);
+        Assert.Equal(WorkerParseKind.HostsFile, input.Kind);
+        Assert.Same(HostsNameFilter.DefaultSecurityDomains, input.KeepNames);
+        Assert.Equal(HijackReadState.Available, hosts.Read);
         Assert.Equal(2, hosts.Content!.TotalEntries);
-        Assert.Equal(42, hosts.Length);
+        Assert.False(hosts.Content.Entries[1].IsBlocking);
         Assert.False(hosts.OwnerIsTrusted); // a user owns the hosts file: a signal
-        Assert.False(hosts.ContentTruncated);
+        Assert.Equal(DateTimeOffset.UnixEpoch, hosts.LastWriteTime);
+        Assert.True(opener.LastOpen!.Handle!.IsClosed); // the collector closes the handle after the parse
+    }
+
+    [Fact]
+    public async Task Hosts_WithoutAWorker_IsParserUnavailable_NeverParsedHere()
+    {
+        var hosts = (await Source(HostsWith("127.0.0.1 localhost\n"), parser: UnavailablePersistenceParser.NoSandbox).GetSnapshotAsync()).Hosts;
+
+        Assert.Equal(HijackReadState.ParserUnavailable, hosts.Read);
+        Assert.Null(hosts.Content);
+        Assert.NotNull(hosts.Length); // metadata is still known
+        Assert.Equal("S-1-5-18", hosts.OwnerSid);
     }
 
     [Theory]
@@ -190,17 +225,19 @@ public sealed class BrowserHijackCollectorTests : IDisposable
     [InlineData(HijackReadState.Locked)]
     public async Task Hosts_UnreadStates_LeaveContentUnknown(HijackReadState state)
     {
-        var hosts = (await Source(new FakeHostsReader(HostsFileRead.Failed(state, "x"))).GetSnapshotAsync()).Hosts;
+        var parser = new RecordingParser(InTestHostsParser.Instance);
+        var hosts = (await Source(new FakeHostsOpener(() => HostsFileOpen.Failed(state, "x")), parser: parser).GetSnapshotAsync()).Hosts;
 
         Assert.Equal(state, hosts.Read);
         Assert.Null(hosts.Content);
         Assert.Null(hosts.OwnerIsTrusted);
+        Assert.Empty(parser.Inputs);
     }
 
     [Fact]
-    public async Task RegistryAccessDenied_AndAThrowingReader_AreUnknownStates()
+    public async Task RegistryAccessDenied_AndAThrowingOpener_AreUnknownStates()
     {
-        var snapshot = await Source(new ThrowingHostsReader(), new DenyingRegistryView()).GetSnapshotAsync();
+        var snapshot = await Source(new FakeHostsOpener(() => throw new InvalidOperationException("bug")), new DenyingRegistryView()).GetSnapshotAsync();
 
         Assert.Equal(HijackReadState.AccessDenied, snapshot.MachineSettings.Read);
         Assert.Equal(HijackReadState.AccessDenied, snapshot.MachinePolicy.Read);
@@ -226,49 +263,31 @@ public sealed class BrowserHijackCollectorTests : IDisposable
     }
 
     [Fact]
-    public void RealReader_ReadsCappedWithTruncatedFlag_AndMissingIsNotFound()
+    public void RealOpener_ReadsMetadataFromTheHandle_AndMissingIsNotFound()
     {
-        using var dir = new TempDir();
-        var path = Path.Combine(dir.Path, "hosts");
+        var path = Path.Combine(_dir.Path, "hosts");
         File.WriteAllBytes(path, Encoding.ASCII.GetBytes("127.0.0.1 a.example\n0.0.0.0 b.example\n"));
-        var reader = new SafeHostsFileReader();
+        var opener = new SafeHostsFileOpener();
 
-        var full = reader.Read(path, HostsFileSnapshot.MaxBytes);
-        Assert.Equal(HijackReadState.Available, full.State);
-        Assert.False(full.Truncated);
-        Assert.Equal(new FileInfo(path).Length, full.Content.Length);
-        Assert.Equal(WindowsIdentity.GetCurrent().User!.Value, full.OwnerSid);
-        Assert.NotNull(full.LastWriteTime);
+        using (var opened = opener.Open(path))
+        {
+            Assert.Equal(HijackReadState.Available, opened.State);
+            Assert.False(opened.Handle!.IsInvalid);
+            Assert.Equal(new FileInfo(path).Length, opened.Length);
+            Assert.Equal(WindowsIdentity.GetCurrent().User!.Value, opened.OwnerSid);
+            Assert.NotNull(opened.LastWriteTime);
+        }
 
-        var capped = reader.Read(path, 10);
-        Assert.True(capped.Truncated);
-        Assert.Equal(10, capped.Content.Length);
-
-        Assert.Equal(HijackReadState.NotFound, reader.Read(Path.Combine(dir.Path, "missing"), 100).State);
+        using var missing = opener.Open(Path.Combine(_dir.Path, "missing"));
+        Assert.Equal(HijackReadState.NotFound, missing.State);
+        Assert.Null(missing.Handle);
     }
 
     [Fact]
-    public void RealReader_OverOneMegabyte_IsTruncatedAndStillParses()
+    public void AnInvalidNameFilter_IsRefused()
     {
-        using var dir = new TempDir();
-        var path = Path.Combine(dir.Path, "hosts");
-        var line = Encoding.ASCII.GetBytes("0.0.0.0 pad.example\n");
-        using (var file = File.Create(path))
-        {
-            for (int written = 0; written <= HostsFileSnapshot.MaxBytes; written += line.Length)
-            {
-                file.Write(line);
-            }
-        }
-
-        var source = new RegistryBrowserHijackSource(_root.View, new PathRedirectReader(path), SystemDirectory, () => false, null,
-            TimeProvider.System, NullLogger.Instance);
-        var hosts = source.ReadHosts();
-
-        Assert.Equal(HijackReadState.Available, hosts.Read);
-        Assert.True(hosts.ContentTruncated);
-        Assert.True(hosts.Content!.EntriesTruncated);
-        Assert.Equal(HostsFileSnapshot.MaxBytes / line.Length, hosts.Content.TotalEntries);
+        Assert.Throws<ArgumentException>(() => new RegistryBrowserHijackSource(_root.View, new FakeHostsOpener(() => throw new InvalidOperationException()),
+            InTestHostsParser.Instance, SystemDirectory, () => false, ["bad name"], TimeProvider.System, NullLogger.Instance));
     }
 
     [Fact]
@@ -279,45 +298,59 @@ public sealed class BrowserHijackCollectorTests : IDisposable
         Assert.IsType<RegistryBrowserHijackSource>(host.Services.GetRequiredService<IBrowserHijackSource>());
     }
 
-    [RequiresFact(Requires.RealHostsFile)]
-    public async Task RealMachine_HostsAndCurrentUserProxy_AreReadable_ReadOnly()
-    {
-        var source = new RegistryBrowserHijackSource(TimeProvider.System, NullLogger<RegistryBrowserHijackSource>.Instance);
-
-        var snapshot = await source.GetSnapshotAsync();
-
-        Assert.Equal(Path.Combine(Environment.SystemDirectory, @"drivers\etc\hosts"), snapshot.Hosts.Path, ignoreCase: true);
-        Assert.Equal(HijackReadState.Available, snapshot.Hosts.Read);
-        Assert.NotNull(snapshot.Hosts.Content);
-        var me = snapshot.Users.Single(u => u.Sid == WindowsIdentity.GetCurrent().User!.Value);
-        Assert.True(me.HiveLoaded);
-        Assert.Equal(HijackReadState.Available, me.Settings.Read);
-        Assert.NotNull(me.Settings.ConfiguresProxy);
-    }
-
-    private sealed class FakeHostsReader(HostsFileRead result) : IHostsFileReader
+    internal sealed class FakeHostsOpener(Func<HostsFileOpen> open) : IHostsFileOpener
     {
         public string? LastPath { get; private set; }
 
-        public int LastMax { get; private set; }
+        public HostsFileOpen? LastOpen { get; private set; }
 
-        public HostsFileRead Read(string path, int maxBytes)
+        public HostsFileOpen Open(string path)
         {
             LastPath = path;
-            LastMax = maxBytes;
-            return result;
+            return LastOpen = open();
         }
     }
 
-    private sealed class ThrowingHostsReader : IHostsFileReader
+    /// <summary>
+    /// A stand-in for the sandboxed worker in tests that aren't about the sandbox: reads the handle and runs the worker entry point
+    /// plus the engine's validation in the test process (the engine assembly itself never calls the parser; see the IL guard).
+    /// </summary>
+    internal sealed class InTestHostsParser : IPersistenceFileParser
     {
-        public HostsFileRead Read(string path, int maxBytes) => throw new InvalidOperationException("bug");
+        public static InTestHostsParser Instance { get; } = new();
+
+        public Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, Func<bool>? canContinue, CancellationToken cancellationToken)
+        {
+            var results = files.Select(f =>
+            {
+                long length = RandomAccess.GetLength(f.File);
+                var content = new byte[Math.Min(length, HostsFileSnapshot.MaxBytes)];
+                int read = RandomAccess.Read(f.File, content, 0);
+                var wire = WireParsedFileCodec.ParseHostsInWorker(content[..read], length > content.Length, f.KeepNames);
+                var parsed = WireParsedFileCodec.FromWire(wire, f.Kind);
+                return parsed.Error is { } error
+                    ? PersistenceParseResult.Malformed(error)
+                    : new PersistenceParseResult(PersistenceParseStatus.Parsed, null, null, null) { Hosts = parsed.Hosts };
+            }).ToArray();
+            return Task.FromResult<IReadOnlyList<PersistenceParseResult>>(results);
+        }
     }
 
-    /// <summary>The real reader, pointed at a temp file instead of the system hosts file.</summary>
-    private sealed class PathRedirectReader(string path) : IHostsFileReader
+    private sealed class RecordingParser(IPersistenceFileParser inner) : IPersistenceFileParser
     {
-        public HostsFileRead Read(string ignored, int maxBytes) => new SafeHostsFileReader().Read(path, maxBytes);
+        public List<PersistenceParseInput> Inputs { get; } = [];
+
+        public Task<PersistenceParseResult> ParseAsync(SafeFileHandle file, WorkerParseKind kind, string displayPath, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<PersistenceParseResult>> ParseBatchAsync(IReadOnlyList<PersistenceParseInput> files, Func<bool>? canContinue, CancellationToken cancellationToken)
+        {
+            Inputs.AddRange(files);
+            return inner.ParseBatchAsync(files, canContinue, cancellationToken);
+        }
     }
 
     private sealed class DenyingRegistryView : IRegistryView

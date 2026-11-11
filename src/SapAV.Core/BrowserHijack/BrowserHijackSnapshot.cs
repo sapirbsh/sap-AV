@@ -28,8 +28,14 @@ public enum HijackReadState
     /// <summary>The file is held exclusively (or an oplock would have to be broken). Unknown.</summary>
     Locked,
 
-    /// <summary>Any other failure; the part's <c>Detail</c> says what. Unknown.</summary>
+    /// <summary>Any other failure (including a hosts file the sandboxed parser refused or failed on); the part's <c>Detail</c> says what. Unknown.</summary>
     Failed,
+
+    /// <summary>
+    /// The sandboxed scan worker that parses the hosts file isn't available (no sandbox, or it can't start): the file was opened
+    /// but not parsed. The engine never parses it itself (B5 rule). Unknown.
+    /// </summary>
+    ParserUnavailable,
 }
 
 /// <summary>
@@ -163,7 +169,7 @@ public sealed record HostsFileSnapshot
     /// <summary>The read cap: the file is read up to this many bytes; a longer file sets <see cref="ContentTruncated"/>.</summary>
     public const int MaxBytes = 1024 * 1024;
 
-    /// <summary>How reading the file at <see cref="Path"/> went. Only <see cref="HijackReadState.Available"/> fills <see cref="Content"/>.</summary>
+    /// <summary>How reading the file at <see cref="Path"/> went (opened by the engine, parsed by the sandboxed worker). Only <see cref="HijackReadState.Available"/> fills <see cref="Content"/>.</summary>
     public required HijackReadState Read { get; init; }
 
     public string? Detail { get; init; }

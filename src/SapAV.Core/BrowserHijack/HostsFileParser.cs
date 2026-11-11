@@ -66,6 +66,9 @@ public sealed record HostsParseResult
 
     /// <summary>True when the input was cut (the file is over the read cap) and its last, partial line was dropped.</summary>
     public required bool PartialLastLineDropped { get; init; }
+
+    /// <summary>True when the parsed bytes were only the start of the file (over the read cap). Suspicious in itself.</summary>
+    public bool InputTruncated { get; init; }
 }
 
 /// <summary>
@@ -111,7 +114,7 @@ public static class HostsFileParser
             }
         }
 
-        return collector.Result(encoding, dropped);
+        return collector.Result(encoding, dropped) with { InputTruncated = inputTruncated };
     }
 
     /// <summary>True for strict dotted-decimal IPv4 (four parts, 0-255, no leading zeros) or an IPv6 address.</summary>

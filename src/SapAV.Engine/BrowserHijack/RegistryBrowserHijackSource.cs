@@ -1,5 +1,6 @@
 using SapAV.Core.BrowserHijack;
 using SapAV.Core.Persistence;
+using SapAV.Core.Scanning.Isolation;
 using SapAV.Core.Text;
 using SapAV.Engine.Persistence;
 
@@ -20,8 +21,10 @@ namespace SapAV.Engine.BrowserHijack;
 /// changed <c>Tcpip\Parameters\DataBasePath</c> is reported as a redirect instead of being followed.
 /// </para>
 /// <para>
-/// B5 note: the hosts text is parsed in the engine by <see cref="HostsFileParser"/> (a pure, bounded, managed function over at
-/// most 1 MB of a file only administrators can write by default). It has no I/O, so it can move into the sandboxed worker unchanged.
+/// B5 rule: the engine never parses the hosts file. It opens it with the hardened open, reads only metadata from the handle
+/// (owner, last-write time, size), and brokers the read-only handle to the sandboxed scan worker
+/// (<see cref="IPersistenceFileParser"/>, kind <see cref="WorkerParseKind.HostsFile"/>), whose answer is validated as untrusted
+/// input (<see cref="WireHostsCodec.FromWire"/>). Without a worker, the hosts content is <see cref="HijackReadState.ParserUnavailable"/>.
 /// </para>
 /// </remarks>
 public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
@@ -47,31 +50,46 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
     };
 
     private readonly IRegistryView _registry;
-    private readonly IHostsFileReader _hostsReader;
+    private readonly IHostsFileOpener _hostsOpener;
+    private readonly IPersistenceFileParser _parser;
     private readonly string _systemDirectory;
     private readonly Func<bool> _isSystem;
-    private readonly Func<string, bool>? _keepHostsName;
+    private readonly IReadOnlyList<string> _keepHostsNames;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
 
-    public RegistryBrowserHijackSource(TimeProvider time, ILogger<RegistryBrowserHijackSource> logger)
-        : this(new WindowsRegistryView(), new SafeHostsFileReader(), Environment.SystemDirectory, Sandbox.AppContainerName.IsLocalSystem,
-            null, time, logger)
+    /// <param name="parser">The sandboxed broker; null (no sandbox) leaves the hosts content <see cref="HijackReadState.ParserUnavailable"/>.</param>
+    internal RegistryBrowserHijackSource(IPersistenceFileParser? parser, TimeProvider time, ILogger<RegistryBrowserHijackSource> logger)
+        : this(new WindowsRegistryView(), new SafeHostsFileOpener(), parser ?? UnavailablePersistenceParser.NoSandbox, Environment.SystemDirectory,
+            Sandbox.AppContainerName.IsLocalSystem, null, time, logger)
     {
     }
 
-    /// <param name="keepHostsName">Hosts entries with a name this accepts are kept beyond the entry cap (E6 rules: the security-domain list).</param>
-    internal RegistryBrowserHijackSource(IRegistryView registry, IHostsFileReader hostsReader, string systemDirectory, Func<bool> isSystem,
-        Func<string, bool>? keepHostsName, TimeProvider time, ILogger logger)
+    /// <param name="keepHostsNames">
+    /// Domain suffixes whose hosts entries are kept past the entry cap (<see cref="HostsNameFilter"/>); null =
+    /// <see cref="HostsNameFilter.DefaultSecurityDomains"/>. The E6 rules (detection-dev) pass the list from <c>data/</c> here.
+    /// </param>
+    /// <exception cref="ArgumentException"><paramref name="keepHostsNames"/> is outside the filter's caps.</exception>
+    internal RegistryBrowserHijackSource(IRegistryView registry, IHostsFileOpener hostsOpener, IPersistenceFileParser parser, string systemDirectory,
+        Func<bool> isSystem, IReadOnlyList<string>? keepHostsNames, TimeProvider time, ILogger logger)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-        _hostsReader = hostsReader ?? throw new ArgumentNullException(nameof(hostsReader));
+        _hostsOpener = hostsOpener ?? throw new ArgumentNullException(nameof(hostsOpener));
+        _parser = parser ?? throw new ArgumentNullException(nameof(parser));
         _systemDirectory = string.IsNullOrWhiteSpace(systemDirectory) ? throw new ArgumentException("A system directory is needed.", nameof(systemDirectory)) : systemDirectory;
         _isSystem = isSystem ?? throw new ArgumentNullException(nameof(isSystem));
-        _keepHostsName = keepHostsName;
+        _keepHostsNames = keepHostsNames ?? HostsNameFilter.DefaultSecurityDomains;
+        if (!HostsNameFilter.IsValid(_keepHostsNames))
+        {
+            throw new ArgumentException("The hosts name filter is outside its caps or has an invalid suffix.", nameof(keepHostsNames));
+        }
+
         _time = time ?? throw new ArgumentNullException(nameof(time));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
+
+    /// <summary>The domain suffixes sent to the worker with the hosts file.</summary>
+    internal IReadOnlyList<string> KeepHostsNames => _keepHostsNames;
 
     /// <summary>The hosts file read: <c>&lt;system directory&gt;\drivers\etc\hosts</c>.</summary>
     internal string HostsPath => Path.Join(_systemDirectory, @"drivers\etc\hosts");
@@ -81,7 +99,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            return await Task.Run(() => Collect(cancellationToken), cancellationToken).ConfigureAwait(false);
+            return await Task.Run(() => CollectAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
@@ -100,7 +118,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         }
     }
 
-    internal BrowserHijackSnapshot Collect(CancellationToken cancellationToken)
+    internal async Task<BrowserHijackSnapshot> CollectAsync(CancellationToken cancellationToken)
     {
         var collectedAt = _time.GetUtcNow();
         var machine = ReadSettings(RegistryRoot.LocalMachine, InternetSettingsPath);
@@ -111,7 +129,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         var users = ReadUsers(out var usersRead, out bool usersTruncated, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var hosts = ReadHosts();
+        var hosts = await ReadHostsAsync(cancellationToken).ConfigureAwait(false);
         var snapshot = new BrowserHijackSnapshot
         {
             CollectedAt = collectedAt,
@@ -261,37 +279,84 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         }
     }
 
-    internal HostsFileSnapshot ReadHosts()
+    internal async Task<HostsFileSnapshot> ReadHostsAsync(CancellationToken cancellationToken)
     {
         var path = HostsPath;
         var (dbState, dbRaw, dbExpanded, dbRedirected) = ReadDataBasePath();
-        HostsFileRead read;
-        try
+        var snapshot = new HostsFileSnapshot
         {
-            read = _hostsReader.Read(path, HostsFileSnapshot.MaxBytes);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            read = HostsFileRead.Failed(HijackReadState.Failed, ex.GetType().Name);
-        }
-
-        return new HostsFileSnapshot
-        {
-            Read = read.State,
-            Detail = read.Detail is null ? null : SafeText.SingleLine(read.Detail, 256),
+            Read = HijackReadState.Failed,
             Path = path,
-            Length = read.Length,
-            LastWriteTime = read.LastWriteTime,
-            OwnerSid = read.OwnerSid,
-            OwnerIsTrusted = read.OwnerSid is null ? null : TrustedOwners.Contains(read.OwnerSid),
-            ContentTruncated = read.State == HijackReadState.Available && read.Truncated,
-            Content = read.State == HijackReadState.Available ? HostsFileParser.Parse(read.Content, read.Truncated, _keepHostsName) : null,
             DataBasePathRead = dbState,
             DataBasePath = dbRaw,
             DataBasePathExpanded = dbExpanded,
             DataBasePathRedirected = dbRedirected,
         };
+
+        HostsFileOpen opened;
+        try
+        {
+            opened = _hostsOpener.Open(path);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return snapshot with { Detail = ex.GetType().Name };
+        }
+
+        using (opened)
+        {
+            snapshot = snapshot with
+            {
+                Read = opened.State,
+                Detail = Detail(opened.Detail),
+                Length = opened.Length,
+                LastWriteTime = opened.LastWriteTime,
+                OwnerSid = opened.OwnerSid,
+                OwnerIsTrusted = opened.OwnerSid is null ? null : TrustedOwners.Contains(opened.OwnerSid),
+                ContentTruncated = opened.Length > HostsFileSnapshot.MaxBytes,
+            };
+            if (opened.State != HijackReadState.Available || opened.Handle is null)
+            {
+                return snapshot with { Read = opened.State == HijackReadState.Available ? HijackReadState.Failed : opened.State };
+            }
+
+            var (state, detail, content) = await ParseInWorkerAsync(opened.Handle, path, cancellationToken).ConfigureAwait(false);
+            return snapshot with
+            {
+                Read = state,
+                Detail = Detail(detail),
+                Content = content,
+                ContentTruncated = snapshot.ContentTruncated || (content?.InputTruncated ?? false),
+            };
+        }
     }
+
+    /// <summary>The hosts handle through the sandboxed worker; the broker already validated its answer (untrusted input).</summary>
+    private async Task<(HijackReadState State, string? Detail, HostsParseResult? Content)> ParseInWorkerAsync(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, string path, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<PersistenceParseResult> results;
+        try
+        {
+            results = await _parser.ParseBatchAsync([new PersistenceParseInput(handle, WorkerParseKind.HostsFile, path, _keepHostsNames)], null, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
+        {
+            return (HijackReadState.Failed, $"The sandboxed parser failed ({ex.GetType().Name}).", null);
+        }
+
+        var result = results.Count == 1 ? results[0] : null;
+        return result switch
+        {
+            { Status: PersistenceParseStatus.Parsed, Hosts: { } hosts } => (HijackReadState.Available, null, hosts),
+            { Status: PersistenceParseStatus.Unavailable or PersistenceParseStatus.NotCollected } => (HijackReadState.ParserUnavailable, result.Message, null),
+            { Status: PersistenceParseStatus.Malformed } => (HijackReadState.Failed, result.Message, null),
+            _ => (HijackReadState.Failed, "The sandboxed parser gave no hosts answer.", null),
+        };
+    }
+
+    private static string? Detail(string? text) => text is null ? null : SafeText.SingleLine(text, 256) is { Length: > 0 } line ? line : null;
 
     /// <summary>
     /// <c>Tcpip\Parameters\DataBasePath</c>: the folder the resolver takes the hosts file from. Redirected unless it is the stored

@@ -192,9 +192,20 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
 
         try
         {
-            return Read(parse) is { } content
-                ? WireParsedFileCodec.ParseInWorker(parse.Kind, content)
-                : ParseError(parse.Kind, $"The file is over the {WireParsedFileCodec.MaxFileBytes(parse.Kind)}-byte cap.");
+            if (parse.KeepNames is not null && parse.Kind != WorkerParseKind.HostsFile)
+            {
+                return ParseError(parse.Kind, "A name filter is only valid for the hosts file.");
+            }
+
+            if (Read(parse, out bool truncated) is not { } content)
+            {
+                return ParseError(parse.Kind, $"The file is over the {WireParsedFileCodec.MaxFileBytes(parse.Kind)}-byte cap.");
+            }
+
+            // E6: the hosts file is parsed here, never in the engine (B5).
+            return parse.Kind == WorkerParseKind.HostsFile
+                ? WireParsedFileCodec.ParseHostsInWorker(content, truncated, parse.KeepNames)
+                : WireParsedFileCodec.ParseInWorker(parse.Kind, content);
         }
         catch (Exception ex)
         {
@@ -208,20 +219,26 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
         Error = SafeText.SingleLine(error, WorkerLimits.MaxTextLength) is { Length: > 0 } e ? e : "error",
         Task = null,
         Link = null,
+        Hosts = null,
     };
 
-    /// <summary>The file's bytes, or null when it is over the cap for its kind.</summary>
-    private static byte[]? Read(WorkerParseFile parse)
+    /// <summary>
+    /// The file's bytes, or null when it is over the cap for its kind. A kind that parses truncated (the hosts file) gets its
+    /// first cap bytes instead, with <paramref name="truncated"/> set.
+    /// </summary>
+    private static byte[]? Read(WorkerParseFile parse, out bool truncated)
     {
         // Not owned here: the broker closes this handle value in this process after the response.
         using var file = new SafeFileHandle((IntPtr)parse.FileHandle, ownsHandle: false);
         long length = RandomAccess.GetLength(file);
-        if (length > WireParsedFileCodec.MaxFileBytes(parse.Kind))
+        int cap = WireParsedFileCodec.MaxFileBytes(parse.Kind);
+        truncated = length > cap;
+        if (truncated && !WireParsedFileCodec.ParsesTruncated(parse.Kind))
         {
             return null;
         }
 
-        var content = new byte[length];
+        var content = new byte[Math.Min(length, cap)];
         int read = 0;
         while (read < content.Length)
         {

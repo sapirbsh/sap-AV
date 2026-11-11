@@ -399,6 +399,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
                         Kind = chunk[k].Input.Kind,
                         FileHandle = remotes[k],
                         TestFault = ParseFaultInjector?.Invoke(chunk[k].Input.DisplayPath) ?? WorkerTestFault.None,
+                        KeepNames = chunk[k].Input.Kind == WorkerParseKind.HostsFile ? chunk[k].Input.KeepNames : null,
                     };
                 }
 
@@ -449,7 +450,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             slot.CountFileAndMaybeRecycle(chunk.Count);
             return new(parsed.Select(p => p.Error is { } error
                 ? PersistenceParseResult.Malformed(SafeText.SingleLine(error, WorkerLimits.MaxTextLength))
-                : new PersistenceParseResult(PersistenceParseStatus.Parsed, p.Task, p.Link, null)).ToArray(), null, null, null);
+                : new PersistenceParseResult(PersistenceParseStatus.Parsed, p.Task, p.Link, null) { Hosts = p.Hosts }).ToArray(), null, null, null);
         }
         catch (WorkerRequestException ex) when (ex.Kind == WorkerFailureKind.Unavailable)
         {
