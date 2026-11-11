@@ -981,6 +981,20 @@ and **never change the real Defender configuration** (Defender access goes throu
 - **L6:** the real-Defender test probes through the reader under test, so a reader regression makes it skip instead of
   fail. Probe with a direct query.
 
+**Notes from E5 rules (`e7846db`).** `DefenderRules.Evaluate(snapshot)` is a pure function that returns a
+`DefenderAssessment`: findings (DefenderTampering, T1562.001, "you decide"), and an outcome Clean, Unverified,
+NotApplicable, Suspicious or Malicious. Unknown inputs give Unverified, never Clean. Open (for E7/E11):
+- **E7:** pick a detection source for system-state findings. `ToDetection()` uses `DetectionSource.Heuristic` for now,
+  and changing it touches `DetectionSource` and `PipeMapping`. An Unverified outcome marks that scan part as incomplete.
+  Findings are never quarantined.
+- **E11:** remove exactly the finding's raw item, list and source.
+- Policy vs local exclusions aren't told apart, because the registry fallback mixes them.
+- Folder writability isn't checked: a custom `D:\Dev` or a user-writable ProgramData subfolder gives no finding. Pass in
+  `IPathWritability` later.
+- IP exclusions and `BlankItemsDropped` aren't judged.
+- **(L) 8.3 matching is worst-case:** `C:\PROGRA~2` (usually Program Files (x86)) reads as ProgramData → Malicious. Resolve
+  short names against the real folders when the snapshot is collected, or treat the ambiguity as Suspicious.
+
 **F. UI (ui-designer)**
 
 | Step | Owner | Deliverable | Done when (tests) |
