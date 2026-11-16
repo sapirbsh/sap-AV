@@ -131,6 +131,12 @@ public static class ScanAlerts
             "Autostart monitoring is degraded: " + problem + " New autostart entries are found only by scans until it recovers; see the engine log.",
             AlertAction.None);
 
+    /// <summary>E8 review M2: the process-events ETW session ended without the engine asking; <paramref name="problem"/> is engine text.</summary>
+    public static Alert ProcessEventsUnavailable(string problem, DateTimeOffset now) =>
+        Health(AlertType.ProcessEventsUnavailable, Verdict.Suspicious, "process monitoring", EngineTrigger, now, MitreTechniqueIds.IndicatorBlocking,
+            "Process monitoring is interrupted: " + problem + " Behaviour checks see no process starts or stops until it restarts; see the engine log.",
+            AlertAction.None);
+
     private static Alert Health(
         AlertType type, Verdict verdict, string path, ScanTrigger trigger, DateTimeOffset now, string technique, string reason, AlertAction action) =>
         new(Alert.ComputeAlertId(type, now, path, null, trigger), now, type, verdict, path, null, null, null, technique, [], [reason], null,
