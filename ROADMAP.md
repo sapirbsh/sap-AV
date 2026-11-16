@@ -995,6 +995,22 @@ NotApplicable, Suspicious or Malicious. Unknown inputs give Unverified, never Cl
 - **(L) 8.3 matching is worst-case:** `C:\PROGRA~2` (usually Program Files (x86)) reads as ProgramData → Malicious. Resolve
   short names against the real folders when the snapshot is collected, or treat the ambiguity as Suspicious.
 
+**E6 (engine) immediate review (no Critical).** H1 (the worker's character budget dropped security-domain entries) and H2
+(a UTF-16 BOM hid ASCII entries) are fixed in the review fix round, along with M1–M5, L1, L3, L8 and L10. Accepted under
+B5: the `ConnectionSettingsBlob` parser stays in the engine. Registry values aren't file content, and the parser is
+bounds-checked, never throws and doesn't recurse. Remaining:
+- **M6 (E7):** Chrome/Edge policy proxies (`SOFTWARE\Policies\Google\Chrome`, `...\Microsoft\Edge`: ProxyMode,
+  ProxyServer, ProxyPacUrl) aren't read. This is a common hijacker technique.
+- **L2:** bidi controls in host names: strip or flag them at display time.
+- **L4:** `RegistryEnvironment.Profiles` truncates by SID order. Keep loaded hives first.
+- **L5:** the 32-bit `WOW6432Node\...\WinHttpSettings` isn't read.
+- **L6:** a DataBasePath redirect is reported, but the hosts file actually used isn't read.
+- **L7:** `ProxySettingsPerUser` in the non-policy HKLM key is ignored.
+- **L9:** guard tests are weak: the write-API regex has gaps, and `Collection_WritesNothing` counts values only. The
+  worst-case answer-size test uses 45 names, not 64.
+- **For detection-dev (E6 rules):** a hosts file that stays `Locked` across snapshots is suspicious (any user can hold an
+  oplock).
+
 **F. UI (ui-designer)**
 
 | Step | Owner | Deliverable | Done when (tests) |
