@@ -1011,6 +1011,21 @@ bounds-checked, never throws and doesn't recurse. Remaining:
 - **For detection-dev (E6 rules):** a hosts file that stays `Locked` across snapshots is suspicious (any user can hold an
   oplock).
 
+**Notes from E6 rules (`ebdcf16`).** `BrowserHijackRules.Evaluate(snapshot, options?)` is a pure function in the E5 shape.
+- **MITRE:** T1557 for proxy/PAC findings (not T1090, which is the attacker proxying its own C2). T1565.001 for hosts
+  redirects. T1562.001 / DefenderTampering for blocking Windows Update or Defender domains.
+- **Domain list:** `data/browser-hijack/security-domains.txt` (97 suffixes) is embedded in Core and is now the collector's
+  keep filter. Matching is IDN-normalized.
+- **Ad-block lists** (100+ entries, 95%+ blocking) give no finding.
+- **Open:**
+  - **E7:** pass `OrganizationManaged` (domain, Entra ID or MDM join). Until then, a proxy or PAC given by host name or
+    private IP is only Unverified, even a malicious one.
+  - **E7:** track a hosts file that stays Locked across snapshots.
+  - Every logged-off profile adds an Unverified line, so multi-user PCs often come out Unverified. Consider summarizing.
+  - Redirecting a listed sign-in domain is Malicious even when the user did it on purpose (e.g. pinning github.com).
+  - User-writable folders are judged by path name, not by ACL.
+  - The collector's keep filter doesn't match non-ASCII names, and the sign-in/banking domains share its 4096-entry cap.
+
 **F. UI (ui-designer)**
 
 | Step | Owner | Deliverable | Done when (tests) |
