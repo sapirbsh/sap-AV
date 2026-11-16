@@ -51,6 +51,9 @@ public sealed record ProxySettings
 {
     public const int MaxValueLength = 4096;
 
+    /// <summary>A registry value stored larger than this (bytes) isn't read at all: it is listed in <see cref="UnreadableValues"/> and sets <see cref="Truncated"/>.</summary>
+    public const int MaxStoredBytes = 64 * 1024;
+
     /// <summary>A key whose values are unknown.</summary>
     public static ProxySettings Unknown(HijackReadState state, string? detail = null)
     {
@@ -94,7 +97,7 @@ public sealed record ProxySettings
     /// </summary>
     public ConnectionSettingsBlob? DefaultConnection { get; init; }
 
-    /// <summary>Names of values that exist with a type that couldn't be read (capped); their content is unknown.</summary>
+    /// <summary>Names of values that exist with a type that couldn't be read, or over <see cref="MaxStoredBytes"/> (capped); their content is unknown.</summary>
     public IReadOnlyList<string> UnreadableValues { get; init; } = [];
 
     /// <summary>True when a value was cut at <see cref="MaxValueLength"/>. A multi-kilobyte proxy value is odd in itself.</summary>
@@ -153,8 +156,11 @@ public sealed record WinHttpProxySettings
     /// <summary>True when the value exists but isn't REG_BINARY (unknown content).</summary>
     public bool UnexpectedType { get; init; }
 
+    /// <summary>True when the value is larger than <see cref="ProxySettings.MaxStoredBytes"/> and wasn't read (unknown content, and odd in itself).</summary>
+    public bool TooLarge { get; init; }
+
     /// <summary>True when a WinHTTP proxy is set, false when it is known not to be, null when unknown.</summary>
-    public bool? ConfiguresProxy => Read != HijackReadState.Available || UnexpectedType ? null
+    public bool? ConfiguresProxy => Read != HijackReadState.Available || UnexpectedType || TooLarge ? null
         : Settings is null ? false
         : Settings.ProxyEnabled == true || !string.IsNullOrEmpty(Settings.ProxyServer) ? true
         : Settings.Status != BlobParseStatus.Parsed ? null
@@ -188,6 +194,12 @@ public sealed record HostsFileSnapshot
 
     /// <summary>True when the owner is SYSTEM, Administrators or TrustedInstaller; false for anyone else; null when unknown.</summary>
     public bool? OwnerIsTrusted { get; init; }
+
+    /// <summary>The file's hard-link count (more than 1: another name can change it), or null when unknown.</summary>
+    public uint? NumberOfLinks { get; init; }
+
+    /// <summary>True when the DACL lets a non-administrator write or delete the file (a hijack enabler); null when unknown.</summary>
+    public bool? WritableByNonAdmins { get; init; }
 
     /// <summary>True when the file is larger than <see cref="MaxBytes"/> and only the start was parsed. Suspicious in itself.</summary>
     public bool ContentTruncated { get; init; }

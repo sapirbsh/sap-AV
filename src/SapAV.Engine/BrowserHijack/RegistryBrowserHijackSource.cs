@@ -173,7 +173,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
 
         foreach (var sid in ServiceAccounts)
         {
-            result.Add(ReadServiceAccount(sid));
+            result.Add(ReadAccount(sid, isServiceAccount: true));
         }
 
         state = listState;
@@ -181,24 +181,30 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         return result;
     }
 
-    private UserProxySettings ReadServiceAccount(string sid)
+    /// <summary>
+    /// One account's keys. The hive itself is opened first and kept open while its keys are read (E6 review M3): a hive that is
+    /// gone (a logoff since the listing) is NotLoaded, never a missing key that would read as "no proxy".
+    /// </summary>
+    private UserProxySettings ReadAccount(string sid, bool isServiceAccount)
     {
         try
         {
             using var hive = _registry.Open(RegistryRoot.Users, sid);
-            return hive is null ? NotLoaded(sid, isServiceAccount: true) : ReadAccount(sid, isServiceAccount: true);
+            if (hive is null)
+            {
+                return NotLoaded(sid, isServiceAccount);
+            }
+
+            return new UserProxySettings(sid, HiveLoaded: true, isServiceAccount,
+                ReadSettings(RegistryRoot.Users, sid + @"\" + InternetSettingsPath),
+                ReadSettings(RegistryRoot.Users, sid + @"\" + PolicyInternetSettingsPath));
         }
         catch (Exception ex) when (IsReadFailure(ex))
         {
             var unknown = ProxySettings.Unknown(StateOf(ex), "The hive can't be opened.");
-            return new UserProxySettings(sid, HiveLoaded: true, IsServiceAccount: true, unknown, unknown);
+            return new UserProxySettings(sid, HiveLoaded: true, isServiceAccount, unknown, unknown);
         }
     }
-
-    private UserProxySettings ReadAccount(string sid, bool isServiceAccount) =>
-        new(sid, HiveLoaded: true, isServiceAccount,
-            ReadSettings(RegistryRoot.Users, sid + @"\" + InternetSettingsPath),
-            ReadSettings(RegistryRoot.Users, sid + @"\" + PolicyInternetSettingsPath));
 
     private static UserProxySettings NotLoaded(string sid, bool isServiceAccount)
     {
@@ -223,17 +229,17 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
             {
                 Read = HijackReadState.Available,
                 KeyExists = true,
-                ProxyEnable = Number(key, "ProxyEnable", unreadable),
+                ProxyEnable = Number(key, "ProxyEnable", unreadable, ref cut),
                 ProxyServer = Text(key, "ProxyServer", unreadable, ref cut),
                 ProxyOverride = Text(key, "ProxyOverride", unreadable, ref cut),
                 AutoConfigUrl = Text(key, "AutoConfigURL", unreadable, ref cut),
-                ProxySettingsPerUser = Number(key, "ProxySettingsPerUser", unreadable),
+                ProxySettingsPerUser = Number(key, "ProxySettingsPerUser", unreadable, ref cut),
             };
 
             ConnectionSettingsBlob? blob = null;
             using (var connections = key.OpenSubKey(ConnectionsSubKey))
             {
-                if (connections?.Value(DefaultConnectionValue) is { } data)
+                if (connections is not null && Sized(connections, DefaultConnectionValue, unreadable, ConnectionsSubKey + @"\" + DefaultConnectionValue, ref cut) is { } data)
                 {
                     if (data.AsBinary() is { } bytes)
                     {
@@ -264,6 +270,11 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         try
         {
             using var connections = _registry.Open(RegistryRoot.LocalMachine, InternetSettingsPath + @"\" + ConnectionsSubKey);
+            if (connections?.ValueSize(WinHttpValue) > ProxySettings.MaxStoredBytes)
+            {
+                return new WinHttpProxySettings { Read = HijackReadState.Available, TooLarge = true };
+            }
+
             if (connections?.Value(WinHttpValue) is not { } data)
             {
                 return new WinHttpProxySettings { Read = HijackReadState.Available };
@@ -312,6 +323,8 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
                 Length = opened.Length,
                 LastWriteTime = opened.LastWriteTime,
                 OwnerSid = opened.OwnerSid,
+                NumberOfLinks = opened.NumberOfLinks,
+                WritableByNonAdmins = opened.WritableByNonAdmins,
                 OwnerIsTrusted = opened.OwnerSid is null ? null : TrustedOwners.Contains(opened.OwnerSid),
                 ContentTruncated = opened.Length > HostsFileSnapshot.MaxBytes,
             };
@@ -350,7 +363,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         return result switch
         {
             { Status: PersistenceParseStatus.Parsed, Hosts: { } hosts } => (HijackReadState.Available, null, hosts),
-            { Status: PersistenceParseStatus.Unavailable or PersistenceParseStatus.NotCollected } => (HijackReadState.ParserUnavailable, result.Message, null),
+            { Status: PersistenceParseStatus.Unavailable } => (HijackReadState.ParserUnavailable, result.Message, null),
             { Status: PersistenceParseStatus.Malformed } => (HijackReadState.Failed, result.Message, null),
             _ => (HijackReadState.Failed, "The sandboxed parser gave no hosts answer.", null),
         };
@@ -367,6 +380,11 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
         try
         {
             using var key = _registry.Open(RegistryRoot.LocalMachine, TcpipParametersPath);
+            if (key?.ValueSize("DataBasePath") > ProxySettings.MaxStoredBytes)
+            {
+                return (HijackReadState.Available, null, null, true); // not read; certainly not the default
+            }
+
             var data = key?.Value("DataBasePath");
             if (data is null)
             {
@@ -394,9 +412,25 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
     private static bool Same(string a, string b) =>
         string.Equals(a.Trim().TrimEnd('\\'), b.Trim().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 
-    private static long? Number(IRegistryKeyReader key, string name, List<string> unreadable)
+    /// <summary>
+    /// The value, unless it doesn't exist (null) or is stored larger than <see cref="ProxySettings.MaxStoredBytes"/> (E6 review M5):
+    /// then it isn't read at all, is listed as unreadable and sets <paramref name="cut"/>.
+    /// </summary>
+    private static RegistryData? Sized(IRegistryKeyReader key, string name, List<string> unreadable, string label, ref bool cut)
     {
-        if (key.Value(name) is not { } data)
+        if (key.ValueSize(name) > ProxySettings.MaxStoredBytes)
+        {
+            unreadable.Add(label);
+            cut = true;
+            return null;
+        }
+
+        return key.Value(name);
+    }
+
+    private static long? Number(IRegistryKeyReader key, string name, List<string> unreadable, ref bool cut)
+    {
+        if (Sized(key, name, unreadable, name, ref cut) is not { } data)
         {
             return null;
         }
@@ -412,7 +446,7 @@ public sealed class RegistryBrowserHijackSource : IBrowserHijackSource
 
     private static string? Text(IRegistryKeyReader key, string name, List<string> unreadable, ref bool cut)
     {
-        if (key.Value(name) is not { } data)
+        if (Sized(key, name, unreadable, name, ref cut) is not { } data)
         {
             return null;
         }

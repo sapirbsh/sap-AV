@@ -108,6 +108,46 @@ public sealed class BrowserHijackCollectorTests : IDisposable
     }
 
     [Fact]
+    public async Task AHiveThatGoesAwayDuringCollection_IsNotLoaded_NeverNoProxy()
+    {
+        // Review M3: listed as loaded, then logged off before its keys are read.
+        _root.AddUser(SidA, @"C:\Users\a", loaded: true);
+
+        var snapshot = await Source(registry: new VanishingHive(_root.View, SidA)).GetSnapshotAsync();
+
+        var a = snapshot.Users.Single(u => u.Sid == SidA);
+        Assert.False(a.HiveLoaded);
+        Assert.Equal(HijackReadState.NotLoaded, a.Settings.Read);
+        Assert.Null(a.Settings.ConfiguresProxy);
+    }
+
+    [Fact]
+    public async Task AnOversizedValue_IsNotRead_AndIsUnknown()
+    {
+        _root.AddUser(SidA, @"C:\Users\a", loaded: true);
+        using (var a = UserSettings(SidA))
+        {
+            a.SetValue("ProxyEnable", 1, RegistryValueKind.DWord);
+            a.SetValue("ProxyServer", new string('x', ProxySettings.MaxStoredBytes)); // UTF-16: twice the byte cap
+        }
+
+        using (var connections = _root.Machine($@"{RegistryBrowserHijackSource.InternetSettingsPath}\Connections"))
+        {
+            connections.SetValue("WinHttpSettings", new byte[ProxySettings.MaxStoredBytes + 1], RegistryValueKind.Binary);
+        }
+
+        var snapshot = await Source().GetSnapshotAsync();
+
+        var settings = snapshot.Users.Single(u => u.Sid == SidA).Settings;
+        Assert.Null(settings.ProxyServer);
+        Assert.Contains("ProxyServer", settings.UnreadableValues);
+        Assert.True(settings.Truncated);
+        Assert.Null(settings.ConfiguresProxy);
+        Assert.True(snapshot.WinHttp.TooLarge);
+        Assert.Null(snapshot.WinHttp.ConfiguresProxy);
+    }
+
+    [Fact]
     public async Task ServiceAccounts_AreReadWhenLoaded_AndUnknownWhenNot()
     {
         using (var system = _root.Users($@"S-1-5-18\{RegistryBrowserHijackSource.InternetSettingsPath}\Connections"))
@@ -276,11 +316,28 @@ public sealed class BrowserHijackCollectorTests : IDisposable
             Assert.Equal(new FileInfo(path).Length, opened.Length);
             Assert.Equal(WindowsIdentity.GetCurrent().User!.Value, opened.OwnerSid);
             Assert.NotNull(opened.LastWriteTime);
+            Assert.Equal(1u, opened.NumberOfLinks);
+            Assert.True(opened.WritableByNonAdmins); // a user owns this temp file
         }
 
         using var missing = opener.Open(Path.Combine(_dir.Path, "missing"));
         Assert.Equal(HijackReadState.NotFound, missing.State);
         Assert.Null(missing.Handle);
+    }
+
+    [Fact]
+    public void RealOpener_ALockedFile_IsRetried_ThenLockedWithAReason()
+    {
+        var path = Path.Combine(_dir.Path, "hosts");
+        File.WriteAllText(path, "127.0.0.1 a\n");
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        using var opened = new SafeHostsFileOpener(lockedAttempts: 3, lockedDelay: TimeSpan.FromMilliseconds(50)).Open(path);
+
+        Assert.Equal(HijackReadState.Locked, opened.State);
+        Assert.Contains("oplock or lease", opened.Detail);
+        Assert.True(clock.Elapsed >= TimeSpan.FromMilliseconds(90), $"retried for only {clock.Elapsed}");
     }
 
     [Fact]
@@ -351,6 +408,13 @@ public sealed class BrowserHijackCollectorTests : IDisposable
             Inputs.AddRange(files);
             return inner.ParseBatchAsync(files, canContinue, cancellationToken);
         }
+    }
+
+    /// <summary>The real test view, except that one user's hive is gone when opened directly (a logoff after the listing).</summary>
+    private sealed class VanishingHive(IRegistryView inner, string sid) : IRegistryView
+    {
+        public IRegistryKeyReader? Open(RegistryRoot root, string path) =>
+            root == RegistryRoot.Users && path.Equals(sid, StringComparison.OrdinalIgnoreCase) ? null : inner.Open(root, path);
     }
 
     private sealed class DenyingRegistryView : IRegistryView

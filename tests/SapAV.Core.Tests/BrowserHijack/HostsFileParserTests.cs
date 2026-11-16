@@ -40,9 +40,9 @@ public sealed class HostsFileParserTests
     }
 
     [Theory]
-    [InlineData("0177.0.0.1 kaspersky.com")] // octal-looking: resolvers disagree
     [InlineData("256.1.1.1 kaspersky.com")]
-    [InlineData("1 kaspersky.com")]
+    [InlineData("1.2.3.4.5 kaspersky.com")]
+    [InlineData("fe80::1%4 kaspersky.com")] // a zone ID
     [InlineData("kaspersky.com 127.0.0.1")]
     [InlineData("127.0.0.1")] // no name
     public void MalformedLines_AreCountedAndKeptRaw(string line)
@@ -56,14 +56,69 @@ public sealed class HostsFileParserTests
     }
 
     [Fact]
-    public void Utf16LittleEndianWithBom_IsDecoded()
+    public void Utf16Content_IsInTheUtf16Decoding_AndFlaggedAsAMismatch()
     {
         var bytes = new byte[] { 0xFF, 0xFE }.Concat(Encoding.Unicode.GetBytes("127.0.0.1 bitdefender.com\r\n")).ToArray();
 
         var result = HostsFileParser.Parse(bytes, inputTruncated: false);
 
         Assert.Equal(HostsTextEncoding.Utf16LittleEndian, result.Encoding);
-        Assert.Equal("bitdefender.com", Assert.Single(result.Entries).Names[0]);
+        Assert.True(result.Utf16Bom);
+        Assert.Empty(result.Entries); // what the resolver sees: NUL-riddled bytes
+        Assert.Equal("bitdefender.com", Assert.Single(result.Utf16Decoding!.Entries).Names[0]);
+        Assert.True(result.EncodingMismatch);
+        Assert.Single(result.AllEntries);
+    }
+
+    [Fact]
+    public void AsciiBehindAUtf16Bom_IsStillReadAsTheResolverReadsIt()
+    {
+        // Review H2: an editor shows garbage, but the resolver reads these bytes as ANSI and uses line 2.
+        var bytes = new byte[] { 0xFF, 0xFE }.Concat(Encoding.ASCII.GetBytes("127.0.0.1 a.example\r\n10.6.6.6 www.virustotal.com\r\n")).ToArray();
+
+        var result = HostsFileParser.Parse(bytes, inputTruncated: false);
+
+        var entry = Assert.Single(result.Entries);
+        Assert.Equal("www.virustotal.com", entry.Names[0]);
+        Assert.Equal(2, entry.Line);
+        Assert.Equal(1, result.MalformedLines[0].Line); // the BOM bytes are part of line 1
+        Assert.True(result.EncodingMismatch);
+    }
+
+    [Theory]
+    [InlineData("0177.0.0.1", "127.0.0.1")] // octal
+    [InlineData("0x7f.1", "127.0.0.1")] // hex, short form
+    [InlineData("2130706433", "127.0.0.1")] // one integer
+    [InlineData("10.1", "10.0.0.1")]
+    public void NonCanonicalIPv4_IsAnEntryWithItsRawText(string written, string canonical)
+    {
+        var entry = Assert.Single(Parse($"{written} kaspersky.com\n").Entries);
+
+        Assert.Equal(canonical, entry.Address);
+        Assert.Equal(written, entry.RawAddress);
+        Assert.True(entry.NonCanonicalAddress);
+    }
+
+    [Fact]
+    public void MalformedLines_KeepFirstLastAndFilterMatches()
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < 500; i++)
+        {
+            sb.Append("bad").Append(i).Append(" x\n");
+            if (i == 250)
+            {
+                sb.Append("999.1.1.1 www.virustotal.com\n");
+            }
+        }
+
+        var result = Parse(sb.ToString(), keep: n => n.EndsWith("virustotal.com", StringComparison.Ordinal));
+
+        Assert.Equal(501, result.MalformedCount);
+        Assert.Equal(HostsParseResult.MaxMalformedLines + 1, result.MalformedLines.Count);
+        Assert.StartsWith("bad0 ", result.MalformedLines[0].Text);
+        Assert.StartsWith("bad499 ", result.MalformedLines[^1].Text);
+        Assert.Contains(result.MalformedLines, m => m.Text.Contains("virustotal"));
     }
 
     [Fact]

@@ -36,10 +36,21 @@ internal sealed class HostsFileOpen : IDisposable
 
     public string? OwnerSid { get; }
 
+    /// <summary>E6 review M4: the file's hard-link count from the same handle, or null.</summary>
+    public uint? NumberOfLinks { get; init; }
+
+    /// <summary>E6 review M4: true when the DACL lets a non-administrator write or delete the file; null when unknown.</summary>
+    public bool? WritableByNonAdmins { get; init; }
+
     public static HostsFileOpen Failed(HijackReadState state, string? detail) => new(state, detail, null, null, null, null);
 
-    public static HostsFileOpen Opened(SafeFileHandle handle, long length, DateTimeOffset lastWriteTime, string? ownerSid) =>
-        new(HijackReadState.Available, null, handle ?? throw new ArgumentNullException(nameof(handle)), length, lastWriteTime, ownerSid);
+    public static HostsFileOpen Opened(
+        SafeFileHandle handle, long length, DateTimeOffset lastWriteTime, string? ownerSid, uint? numberOfLinks = null, bool? writableByNonAdmins = null) =>
+        new(HijackReadState.Available, null, handle ?? throw new ArgumentNullException(nameof(handle)), length, lastWriteTime, ownerSid)
+        {
+            NumberOfLinks = numberOfLinks,
+            WritableByNonAdmins = writableByNonAdmins,
+        };
 
     public void Dispose() => Handle?.Dispose();
 }
@@ -56,16 +67,37 @@ internal interface IHostsFileOpener
 /// a regular disk file only (<see cref="SecureFile.Validate"/>). Owner and last-write time come from the same handle; the content
 /// is read only by the scan worker the handle is brokered to.
 /// </summary>
-internal sealed class SafeHostsFileOpener : IHostsFileOpener
+internal sealed class SafeHostsFileOpener(int lockedAttempts = 3, TimeSpan? lockedDelay = null) : IHostsFileOpener
 {
     private const uint Options = N.FileNonDirectoryFile | SafeTree.OpenNoRecall | N.FileCompleteIfOplocked;
 
+    /// <summary>Delete, plus the rights that modify a file (write / append data, WRITE_DAC, WRITE_OWNER, generic write / all).</summary>
+    private const int WriteOrDeleteRights = Persistence.AclPathWritability.ModifyFileRights | 0x00010000 /* DELETE */;
+
+    private readonly TimeSpan _lockedDelay = lockedDelay ?? TimeSpan.FromMilliseconds(100);
+
     public HostsFileOpen Open(string path)
     {
-        var handle = SafeTree.Open(path, N.GenericRead, SafeTree.ShareAll, Options, out var failure, out int error);
+        SafeFileHandle? handle = null;
+        SafeTreeFailure failure = SafeTreeFailure.None;
+        int error = 0;
+        // E6 review M2: a Locked open (sharing violation, or an oplock / lease that would have to be broken) is retried briefly.
+        for (int attempt = 1; attempt <= Math.Max(1, lockedAttempts); attempt++)
+        {
+            handle = SafeTree.Open(path, N.GenericRead, SafeTree.ShareAll, Options, out failure, out error);
+            if (handle is not null || failure != SafeTreeFailure.Locked || attempt == lockedAttempts)
+            {
+                break;
+            }
+
+            Thread.Sleep(_lockedDelay);
+        }
+
         if (handle is null)
         {
-            return HostsFileOpen.Failed(Map(failure), $"The hosts file can't be opened ({failure}, Win32 error {error}).");
+            return HostsFileOpen.Failed(Map(failure), failure == SafeTreeFailure.Locked
+                ? $"The hosts file is in use: an oplock or lease is held, or it is open without read sharing (Win32 error {error}, {lockedAttempts} attempts)."
+                : $"The hosts file can't be opened ({failure}, Win32 error {error}).");
         }
 
         try
@@ -78,7 +110,14 @@ internal sealed class SafeHostsFileOpener : IHostsFileOpener
 
             long length = RandomAccess.GetLength(handle);
             var lastWrite = new DateTimeOffset(File.GetLastWriteTimeUtc(handle), TimeSpan.Zero);
-            return HostsFileOpen.Opened(handle, length, lastWrite, Owner(handle));
+            var descriptor = Pipe.Native.PipeNative.TryReadFileSecurity(handle);
+            bool? writable = descriptor is null ? null : new Persistence.AclPathWritability().Evaluate(descriptor, WriteOrDeleteRights) switch
+            {
+                Core.Persistence.Writability.UserWritable => true,
+                Core.Persistence.Writability.AdminOnly => false,
+                _ => null,
+            };
+            return HostsFileOpen.Opened(handle, length, lastWrite, Owner(descriptor), Links(handle), writable);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -88,9 +127,20 @@ internal sealed class SafeHostsFileOpener : IHostsFileOpener
         }
     }
 
-    private static string? Owner(SafeFileHandle handle)
+    private static uint? Links(SafeFileHandle handle)
     {
-        var descriptor = Pipe.Native.PipeNative.TryReadFileSecurity(handle);
+        try
+        {
+            return N.GetFileInformation(handle).NumberOfLinks;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string? Owner(byte[]? descriptor)
+    {
         if (descriptor is null)
         {
             return null;

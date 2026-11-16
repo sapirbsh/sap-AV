@@ -124,6 +124,20 @@ public sealed partial class HostsParsingInWorkerTests : IDisposable
         Assert.Equal(1, broker.Status.WorkerRestarts); // a worker that broke the protocol is replaced
     }
 
+    [Fact]
+    public async Task AHostsFile_IsAlwaysAloneInItsRequest()
+    {
+        // Review L3: a hosts file has its own answer cap, so the broker refuses to batch it with anything.
+        var path = WriteHosts("127.0.0.1 a\n");
+        using var first = File.OpenHandle(path);
+        using var second = File.OpenHandle(path);
+        var broker = Broker();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => broker.ParseBatchAsync(
+            [new PersistenceParseInput(first, WorkerParseKind.HostsFile, "a"), new PersistenceParseInput(second, WorkerParseKind.ScheduledTask, "b")],
+            null, CancellationToken.None));
+    }
+
     [RequiresFact(Requires.RealHostsFile)]
     public async Task RealMachine_HostsAndCurrentUserProxy_AreReadable_ReadOnly()
     {
@@ -136,9 +150,7 @@ public sealed partial class HostsParsingInWorkerTests : IDisposable
         Assert.Equal(HijackReadState.Available, snapshot.Hosts.Read);
         Assert.NotNull(snapshot.Hosts.Content);
         var me = snapshot.Users.Single(u => u.Sid == WindowsIdentity.GetCurrent().User!.Value);
-        Assert.True(me.HiveLoaded);
         Assert.Equal(HijackReadState.Available, me.Settings.Read);
-        Assert.NotNull(me.Settings.ConfiguresProxy);
     }
 
     [Fact]

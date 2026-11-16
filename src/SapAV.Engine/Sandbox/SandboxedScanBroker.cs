@@ -219,6 +219,12 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
     {
         ArgumentNullException.ThrowIfNull(files);
         cancellationToken.ThrowIfCancellationRequested();
+        if (files.Count > 1 && files.Any(f => f?.Kind == WorkerParseKind.HostsFile))
+        {
+            // E6 review L3: a hosts file has its own answer cap (WorkerLimits.MaxHostsResponseBytes), so it always goes alone.
+            throw new ArgumentException("A hosts file must be the only file of its parse request.", nameof(files));
+        }
+
         var results = new PersistenceParseResult?[files.Count];
         var send = new List<ParseItem>(files.Count);
         for (int i = 0; i < files.Count; i++)

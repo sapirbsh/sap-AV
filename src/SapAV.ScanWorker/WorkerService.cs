@@ -156,6 +156,11 @@ internal sealed class WorkerService(bool testHooksEnabled) : IDisposable
             return Failed(id, "A parse request has a null file.");
         }
 
+        if (files.Count > 1 && files.Any(f => f.Kind == WorkerParseKind.HostsFile))
+        {
+            return Failed(id, "A hosts file must be the only file of its parse request.");
+        }
+
         if (!TestHooksEnabled && files.Any(f => f.TestFault != WorkerTestFault.None))
         {
             return Failed(id, "Test faults are disabled in this worker.");
