@@ -78,6 +78,8 @@ public sealed class FakeProcessEventSource : IProcessEventSource
 
     public ProcessEvent? FindParent(ProcessEvent child) => _hub.FindParent(child);
 
+    public ProcessEvent? FindCreator(ProcessEvent child) => _hub.FindCreator(child);
+
     public void Dispose()
     {
         if (_disposed)

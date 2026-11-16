@@ -28,7 +28,10 @@ public enum KernelProcessRejection
     /// <summary>The payload has no process ID or no creation time.</summary>
     Malformed,
 
-    /// <summary>A start whose header (the creator) isn't the payload's parent, or a stop whose header isn't the exiting process.</summary>
+    /// <summary>
+    /// A stop whose header isn't the exiting process, or a start whose header (the creator) isn't the payload's parent and whose
+    /// process couldn't be verified to exist with the event's creation time.
+    /// </summary>
     HeaderMismatch,
 
     /// <summary>A stop for a process instance that is still running.</summary>
@@ -42,12 +45,20 @@ public enum KernelProcessRejection
 /// <para>
 /// <b>Forged events (E8 review H1).</b> Any user-mode process can register the Kernel-Process provider GUID and log events that
 /// look like the kernel's into our session: a fake stop could hide a running miner, fake starts could forge a parent chain or
-/// flood the stream. Checks: a start must be logged by its parent (header PID = payload ParentProcessID: the kernel logs it in
-/// the creator's context), a stop by the exiting process (header PID = payload ProcessID), and a stop is accepted only if the
-/// process instance is really gone. A second start for a known process is rejected by the hub. A forger can still log a
-/// start that names itself as the parent; that is noise, not a hidden process. Rejected events are dropped and counted.
-/// Known gap: a real start made with an explicit parent attribute (PPID spoofing) has a header that differs from the payload
-/// parent, so it is rejected too and shows up only in the rejected count.
+/// flood the stream. Checks:
+/// <list type="bullet">
+/// <item>A start logged by its parent (header PID = payload ParentProcessID: the kernel logs it in the creator's context) is
+/// accepted.</item>
+/// <item>A start whose header differs from the payload parent is a real PPID-spoofed start (T1134.004, exactly what G2a wants
+/// to see) or a forgery. It is accepted only if the started process really exists with the event's creation time; it is then
+/// flagged <see cref="ProcessEvent.ParentMismatch"/> and keeps the header PID as <see cref="ProcessEvent.CreatorProcessId"/>
+/// (the claimed parent is attacker-controlled, the creator is real). Otherwise it is rejected: forged starts for nonexistent
+/// processes and, an accepted gap until the system-logger option, spoofed processes that exited before the check.</item>
+/// <item>A stop must be logged by the exiting process (header PID = payload ProcessID) and is accepted only if the process
+/// instance is really gone.</item>
+/// <item>A second start for a known process is rejected by the hub.</item>
+/// </list>
+/// Rejected events are dropped and counted.
 /// The spoof-proof long-term option is the SystemTraceProvider process events (kernel "system logger") in a private
 /// system-logger session: only the kernel can log those, and they carry the command line too.
 /// </para>
@@ -91,12 +102,20 @@ public sealed class KernelProcessEventMapper
         }
 
         var details = SameProcess(record.CreateTime, _info.TryRead(pid));
+        bool parentMismatch = record.ParentProcessId != record.HeaderProcessId;
+        if (parentMismatch && details is null)
+        {
+            // Not verifiable as a real process with this creation time: a forgery, or a spoofed start that already exited.
+            rejection = KernelProcessRejection.HeaderMismatch;
+            return null;
+        }
+
         var (commandLine, truncated) = ProcessText.CommandLine(details?.CommandLine);
         var (livePath, livePathTruncated) = ProcessText.ImagePath(details?.ImagePath);
         return new ProcessEvent(ProcessEventKind.Started, pid, record.ParentProcessId, record.CreateTime,
             livePath ?? imageFromEvent, commandLine, truncated, record.SessionId ?? details?.SessionId,
             details?.UserSid, details?.IntegrityLevel ?? ProcessIntegrityLevel.Unknown, record.Timestamp, null,
-            livePath is not null ? livePathTruncated : imageTruncated);
+            livePath is not null ? livePathTruncated : imageTruncated, record.HeaderProcessId, parentMismatch);
     }
 
     /// <summary>
@@ -134,7 +153,7 @@ public sealed class KernelProcessEventMapper
 
         if (record.Kind == ProcessEventKind.Started)
         {
-            return record.ParentProcessId == record.HeaderProcessId ? KernelProcessRejection.None : KernelProcessRejection.HeaderMismatch;
+            return KernelProcessRejection.None; // a parent mismatch is checked in Map (it needs the live process)
         }
 
         if (record.HeaderProcessId != pid)

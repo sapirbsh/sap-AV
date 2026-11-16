@@ -49,15 +49,38 @@ public sealed class KernelProcessMappingTests
     }
 
     [Fact]
-    public void ForgedStart_NotLoggedByItsParent_IsRejected()
+    public void ParentMismatchStart_ForANonexistentProcess_IsRejected()
     {
         var mapper = new KernelProcessEventMapper(new EtwProcessEventSourceTests.FixedInfo(), Paths.ToWin32);
 
-        // A user-mode process (PID 666) logs a "start" under the Kernel-Process GUID claiming winword.exe (PID 7) as the parent.
+        // A user-mode process (PID 666) logs a "start" under the Kernel-Process GUID claiming winword.exe (PID 7) as the parent,
+        // for a PID that doesn't exist with that creation time: a forgery.
         var forged = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 666, 42, 7, T0, 1, @"C:\x\powershell.exe", T0), out var why);
 
         Assert.Null(forged);
         Assert.Equal(KernelProcessRejection.HeaderMismatch, why);
+    }
+
+    [Fact]
+    public void ParentMismatchStart_ForALiveProcess_IsAcceptedAndFlagged_KeepingTheCreator()
+    {
+        // PPID spoofing (T1134.004): PID 666 created PID 42 with winword.exe (PID 7) as its declared parent.
+        var info = new EtwProcessEventSourceTests.FixedInfo
+        {
+            [42] = new(T0, @"C:\x\powershell.exe", "powershell -enc AAAA", 1, "S-1-5-21-9-9-9-1001", ProcessIntegrityLevel.Medium),
+        };
+        var mapper = new KernelProcessEventMapper(info, Paths.ToWin32);
+
+        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 666, 42, 7, T0, 1, @"C:\x\powershell.exe", T0), out var why);
+
+        Assert.Equal(KernelProcessRejection.None, why);
+        Assert.NotNull(e);
+        Assert.True(e.ParentMismatch);
+        Assert.Equal((7, 666), (e.ParentProcessId, e.CreatorProcessId));
+
+        // A normal start: creator = parent, no flag.
+        var normal = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, 42, 7, T0, 1, @"C:\x\powershell.exe", T0), out _);
+        Assert.Equal((false, 7), (normal!.ParentMismatch, normal.CreatorProcessId));
     }
 
     [Fact]

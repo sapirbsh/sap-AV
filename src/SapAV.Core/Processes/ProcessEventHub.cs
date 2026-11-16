@@ -207,6 +207,14 @@ public sealed class ProcessEventHub
         }
     }
 
+    public ProcessEvent? FindCreator(ProcessEvent child)
+    {
+        lock (_gate)
+        {
+            return _table.FindCreator(child);
+        }
+    }
+
     /// <summary>Completes every subscription's reader; later publishes and subscriptions get nothing. Idempotent.</summary>
     public void Complete()
     {
@@ -241,6 +249,8 @@ public sealed class ProcessEventHub
     private static ProcessEvent CompleteStop(ProcessEvent stop, ProcessEvent started) => stop with
     {
         ParentProcessId = stop.ParentProcessId ?? started.ParentProcessId,
+        CreatorProcessId = stop.CreatorProcessId ?? started.CreatorProcessId,
+        ParentMismatch = stop.ParentMismatch || started.ParentMismatch,
         ImagePath = IsFullPath(stop.ImagePath) ? stop.ImagePath : started.ImagePath ?? stop.ImagePath,
         CommandLine = stop.CommandLine ?? started.CommandLine,
         CommandLineTruncated = stop.CommandLine is null ? started.CommandLineTruncated : stop.CommandLineTruncated,

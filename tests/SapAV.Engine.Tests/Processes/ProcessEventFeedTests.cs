@@ -193,6 +193,25 @@ public sealed class ProcessEventFeedTests
     }
 
     [Fact]
+    public async Task SpoofedParent_KeepsBothTheClaimedParentAndTheRealCreator()
+    {
+        using var source = new FakeProcessEventSource();
+        await source.StartAsync();
+        source.Publish(Start(7, T0, image: @"C:\Office\winword.exe"));
+        source.Publish(Start(666, T0.AddSeconds(1), image: @"C:\Users\u\AppData\Local\Temp\dropper.exe"));
+        var child = Start(42, T0.AddSeconds(2), parent: 7, image: @"C:\x\powershell.exe") with { CreatorProcessId = 666, ParentMismatch = true };
+        source.Publish(child);
+
+        Assert.Equal(@"C:\Office\winword.exe", source.FindParent(child)?.ImagePath); // claimed (attacker-controlled)
+        Assert.Equal(@"C:\Users\u\AppData\Local\Temp\dropper.exe", source.FindCreator(child)?.ImagePath); // real creator
+        var stored = source.FindProcess(child.Key)!;
+        Assert.Equal((7, 666, true), (stored.ParentProcessId, stored.CreatorProcessId, stored.ParentMismatch));
+
+        var stop = source.Publish(Stop(42, child.StartTime!.Value))!;
+        Assert.Equal((666, true), (stop.CreatorProcessId, stop.ParentMismatch)); // carried into the stop
+    }
+
+    [Fact]
     public void CommandLine_IsCappedHeadAndTail_WithTruncatedFlag()
     {
         string head = "miner.exe --donate-level 1 ";

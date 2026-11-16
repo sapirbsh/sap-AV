@@ -43,7 +43,9 @@ public readonly record struct ProcessKey(int ProcessId, DateTimeOffset StartTime
 /// </summary>
 /// <param name="Kind">Start, stop or pre-existing.</param>
 /// <param name="ProcessId">The PID.</param>
-/// <param name="ParentProcessId">The creating process's PID, or null when unknown. The parent may have exited and its PID
+/// <param name="ParentProcessId">The parent PID the OS records for the process (the claimed parent), or null when unknown. A
+/// process can be created with an explicit parent attribute (PPID spoofing, T1134.004), so when <paramref name="ParentMismatch"/>
+/// is set this value is attacker-controlled and <paramref name="CreatorProcessId"/> is the real creator. The parent may have exited and its PID
 /// may already be reused: match it with <see cref="ProcessTable.FindParent"/>, which checks the start times.</param>
 /// <param name="StartTime">Process creation time (UTC), or null when unknown. With <paramref name="ProcessId"/> it forms the
 /// <see cref="Key"/> that defeats PID reuse.</param>
@@ -59,6 +61,11 @@ public readonly record struct ProcessKey(int ProcessId, DateTimeOffset StartTime
 /// <param name="Timestamp">When the event happened (stop: exit time; pre-existing: when the snapshot was taken).</param>
 /// <param name="ExitCode">Exit code, for <see cref="ProcessEventKind.Stopped"/> only.</param>
 /// <param name="ImagePathTruncated">True when <paramref name="ImagePath"/> was capped.</param>
+/// <param name="CreatorProcessId">For a live start event: the process that really created it (the ETW header's PID, logged
+/// by the kernel in the creator's context). Null for pre-existing entries and when unknown.</param>
+/// <param name="ParentMismatch">True when the creator isn't the claimed parent (<paramref name="ParentProcessId"/>): a sign of
+/// PPID spoofing (T1134.004) that the parent-child rules (G2a) should judge. Such a start is only accepted when the process
+/// was verified to exist with the event's creation time.</param>
 public sealed record ProcessEvent(
     ProcessEventKind Kind,
     int ProcessId,
@@ -72,7 +79,9 @@ public sealed record ProcessEvent(
     ProcessIntegrityLevel IntegrityLevel,
     DateTimeOffset Timestamp,
     int? ExitCode = null,
-    bool ImagePathTruncated = false)
+    bool ImagePathTruncated = false,
+    int? CreatorProcessId = null,
+    bool ParentMismatch = false)
 {
     /// <summary>PID + start time: the identity of this process instance.</summary>
     public ProcessKey Key => new(ProcessId, StartTime?.ToUniversalTime() ?? DateTimeOffset.MinValue);

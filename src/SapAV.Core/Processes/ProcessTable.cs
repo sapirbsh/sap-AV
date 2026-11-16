@@ -169,12 +169,28 @@ public sealed class ProcessTable
     /// <summary>
     /// The known running parent of <paramref name="child"/>: the latest process with the child's parent PID that started no
     /// later than the child. Null when unknown, when the parent exited, or when the PID now belongs to a younger process
-    /// (PID reuse: a process can't be the parent of one that started before it).
+    /// (PID reuse: a process can't be the parent of one that started before it). For a <see cref="ProcessEvent.ParentMismatch"/>
+    /// entry this is the <b>claimed</b> parent, which is attacker-controlled; <see cref="FindCreator"/> gives the real one.
     /// </summary>
     public ProcessEvent? FindParent(ProcessEvent child)
     {
         ArgumentNullException.ThrowIfNull(child);
-        if (child.ParentProcessId is not { } parentPid || parentPid == child.ProcessId)
+        return FindOlderByPid(child.ParentProcessId, child);
+    }
+
+    /// <summary>
+    /// The known running process that really created <paramref name="child"/> (<see cref="ProcessEvent.CreatorProcessId"/>),
+    /// with the same PID-reuse check as <see cref="FindParent"/>. Equals the parent unless the parent was spoofed.
+    /// </summary>
+    public ProcessEvent? FindCreator(ProcessEvent child)
+    {
+        ArgumentNullException.ThrowIfNull(child);
+        return FindOlderByPid(child.CreatorProcessId, child);
+    }
+
+    private ProcessEvent? FindOlderByPid(int? pid, ProcessEvent child)
+    {
+        if (pid is not { } parentPid || parentPid == child.ProcessId)
         {
             return null;
         }

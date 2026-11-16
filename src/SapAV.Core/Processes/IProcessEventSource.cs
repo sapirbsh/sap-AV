@@ -50,6 +50,13 @@ public interface IProcessEventSource : IDisposable
 
     /// <summary>The known running parent of <paramref name="child"/>, or null (unknown, exited, or its PID was reused).</summary>
     ProcessEvent? FindParent(ProcessEvent child);
+
+    /// <summary>
+    /// The known running process that really created <paramref name="child"/> (the ETW creator), or null. Differs from
+    /// <see cref="FindParent"/> only when <see cref="ProcessEvent.ParentMismatch"/> is set (PPID spoofing): then the parent is
+    /// attacker-controlled and the creator is the real one.
+    /// </summary>
+    ProcessEvent? FindCreator(ProcessEvent child);
 }
 
 /// <summary>
