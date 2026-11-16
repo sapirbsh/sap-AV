@@ -70,6 +70,12 @@ public enum Requires
     /// Missing when Defender isn't installed or its service is stopped (e.g. a third-party antivirus is active) (E5).
     /// </summary>
     DefenderWmi,
+
+    /// <summary>
+    /// A throwaway sap-AV ETW real-time session with Microsoft-Windows-Kernel-Process can be created and stopped (E8). Needs an
+    /// elevated process; checked for elevation first, so a normal run never tries. The probe's session is always stopped.
+    /// </summary>
+    EtwSession,
 }
 
 internal static class TestRequirements
@@ -96,6 +102,7 @@ internal static class TestRequirements
         [Requires.UsnJournal] = new(ProbeUsnJournal),
         [Requires.CloudFilesApi] = new(ProbeCloudFilesApi),
         [Requires.DefenderWmi] = new(ProbeDefenderWmi),
+        [Requires.EtwSession] = new(ProbeEtwSession),
         [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),
@@ -135,6 +142,60 @@ internal static class TestRequirements
         return result.Status == SapAV.Engine.Defender.WmiReadStatus.Ok && result.Instances.Count > 0
             ? null
             : $"Defender's WMI status class didn't answer: {result.Status} {result.Detail}";
+    }
+
+    /// <summary>Prefix of every ETW session a test creates; names carry the test process's PID so orphans can be cleaned up.</summary>
+    public const string TestEtwSessionPrefix = "sap-AV-Test-KernelProcess-";
+
+    /// <summary>Stops test sessions left by a test process that was killed (its PID no longer runs).</summary>
+    public static void StopOrphanedTestEtwSessions()
+    {
+        var factory = SapAV.Engine.Processes.TraceEventKernelProcessSessionFactory.Instance;
+        foreach (var name in SapAV.Engine.Processes.EtwSessionNames.FindOrphaned(factory.GetActiveSessionNames(), TestEtwSessionPrefix, IsAlive))
+        {
+            factory.StopSession(name);
+        }
+
+        static bool IsAlive(int pid)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                return !process.HasExited;
+            }
+            catch (ArgumentException)
+            {
+                return false; // no such process
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return true; // exists but can't be queried: leave its session alone
+            }
+        }
+    }
+
+    private static string? ProbeEtwSession()
+    {
+        var factory = SapAV.Engine.Processes.TraceEventKernelProcessSessionFactory.Instance;
+        if (factory.IsElevated() != true)
+        {
+            return "the test process is not elevated (ETW sessions need an administrator)";
+        }
+
+        StopOrphanedTestEtwSessions();
+        string name = SapAV.Engine.Processes.EtwSessionNames.WithOwner(TestEtwSessionPrefix, Environment.ProcessId, "probe");
+        try
+        {
+            using var session = factory.Create(name, 1);
+            session.Stop();
+        }
+        catch (Exception ex)
+        {
+            factory.StopSession(name);
+            return $"no ETW session can be created here: {ex.GetType().Name} 0x{ex.HResult:X8}";
+        }
+
+        return factory.GetActiveSessionNames().Contains(name) ? "the probe's ETW session didn't stop" : null;
     }
 
     private static string? ProbeUsnJournal()

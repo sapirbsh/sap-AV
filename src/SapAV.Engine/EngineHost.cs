@@ -127,6 +127,12 @@ public static class EngineHost
         builder.Services.Configure<RealTime.RealTimeOptions>(builder.Configuration.GetSection(RealTime.RealTimeOptions.SectionName));
         builder.Services.AddHostedService<RealTime.RealTimeService>();
 
+        // Process events (E8): ETW real-time session on Microsoft-Windows-Kernel-Process + a snapshot of running processes, for
+        // the miner (E9) and infostealer (E10) monitors and the parent-child chains (G2a). Started only as a service / SYSTEM.
+        builder.Services.Configure<Processes.ProcessEventSourceOptions>(builder.Configuration.GetSection(Processes.ProcessEventSourceOptions.SectionName));
+        builder.Services.AddSingleton<Core.Processes.IProcessEventSource, Processes.EtwProcessEventSource>();
+        builder.Services.AddHostedService<Processes.ProcessEventSourceService>();
+
         // Real-time persistence monitoring (D4): registry and folder change watches on every autostart location, re-collecting
         // only what changed, diffed against an HMAC-protected baseline in %ProgramData%\sap-AV\Persistence; new or changed
         // entries are judged by the persistence scanner above (alerts 2001 / 2002). Read-only: nothing is removed (D5).

@@ -16,6 +16,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <!-- E8: ETW real-time sessions (process start/stop; E10 file reads). Approved 2026-11-11, pinned exactly. Its build props
+         would copy native helpers (KernelTraceControl.dll, msdia140.dll) and COM interop assemblies the real-time path never
+         uses; they are left out so the SYSTEM service ships no unused native DLLs. -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="[4.0.0]" ExcludeAssets="build;buildTransitive" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.13" />
     <!-- E5: read-only WMI (Defender status and exclusions; E7 process command lines). Approved 2026-11-11, pinned exactly. -->
