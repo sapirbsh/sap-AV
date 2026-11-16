@@ -328,8 +328,8 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 - **E2 done** (`bf000ca`…`03fd7e6`): 228 curated YARA-Forge rules, permissive licenses only, explicit category mapping.
 - **E5 done:** read-only Defender collector (`d548bea`, review fixes `f5a10e4`) and the exclusion/protection-state rules (`e7846db`). They are wired into scans in E7.
 - **E6 done:** read-only proxy, WinHTTP and hosts collector (`60546a0`…`f98e466`, hosts parsed in the sandboxed worker, review fixes) and the proxy/hosts hijack rules (`ebdcf16`).
-- **E8 in progress:** ETW process start/stop events; review fixes (forged-event checks, session watchdog, memory caps) being built.
-- **Next:** finish E8, then E7, E9–E12.
+- **E8 done:** ETW process start/stop events (`e26a330`, review fixes `5609697`, PPID-mismatch flag `694c30f`); health event 9012.
+- **Next:** E7 (pack checks in Quick/Full Scan), then E9–E12.
 
 **Open for the user**
 - **Please remove `C:\ProgramData\sap-AV` (elevated):** a test run on 2026-10-29 accidentally created the real engine
@@ -343,7 +343,7 @@ CI is green after D5 (`4c72989`); elevated collection took 2.6 s.
 
 ## What's left
 
-- **E:** cracked-software threat pack. Left: E7–E12, then the section test and review passes.
+- **E:** cracked-software threat pack. Left: E7, E9–E12, then the section test and review passes.
 - **F:** the GUI (F1–F8).
 - **G:** signature features (G1–G5), ending with the Phase 1 security review (G5).
-- **Progress:** 30 of 60 build steps done (about 50%).
+- **Progress:** 31 of 60 build steps done (about 52%).

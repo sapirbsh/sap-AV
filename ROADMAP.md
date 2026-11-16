@@ -1026,6 +1026,33 @@ bounds-checked, never throws and doesn't recurse. Remaining:
   - User-writable folders are judged by path name, not by ACL.
   - The collector's keep filter doesn't match non-ASCII names, and the sign-in/banking domains share its 4096-entry cap.
 
+**Notes from E8 (`e26a330`, review fixes `5609697`).**
+- **Source:** an ETW real-time session `sap-AV-Engine-KernelProcess` on Microsoft-Windows-Kernel-Process, using
+  TraceEvent 4.0.0, pinned, without its native helper DLLs. It starts only as the Windows service or with `StartInConsole`.
+- **Immediate review (no Critical).** All fixed:
+  - H1, forged events under the provider GUID: header/payload PID checks, a liveness check for stops, duplicate starts
+    rejected, and a `RejectedEvents` counter.
+  - M1: one bad event can't stop the session.
+  - M2: a session watchdog with backoff, and health event 9012 (T1562.006).
+  - M3: image paths capped at 2048 characters, the table at 8192 entries, subscriptions at 8192 at most.
+  - M4: dead entries pruned, no start-time-less entries, a Toolhelp reconcile every 5 min.
+  - L1, L2, L3, L5, L7.
+- **Decision (2026-11-16, main session):** a start whose creator (header PID) differs from the claimed parent isn't
+  dropped. It is kept, flagged `ParentMismatch` with `CreatorProcessId`, when the process really exists with a matching
+  creation time. Otherwise it is rejected. PPID spoofing (T1134.004) stays visible for G2a.
+- **Open:**
+  - **L4 (G2a/E10):** for pre-existing processes the command line is the current PEB value, which the process can
+    rewrite. Treat it as less trustworthy.
+  - **L6:** the pre-existing snapshot runs inside the hosted service's StartAsync, under the lifecycle lock. Move it after
+    start.
+  - Short-lived processes (under about 1 s) get no command line, SID or integrity level. The fix is SystemTraceProvider
+    process events in a private system-logger session, which are also spoof-proof.
+  - The real-ETW integration test needs elevation and has only run on CI.
+- **CI timing flakes (2026-11-16):** once, at `4b720de`, `RealMachineCollectionTests.RealMachine_CollectsWithinBudget_AndFindsServices`
+  failed: scheduled tasks took 91 s on a slow runner (1.2 s at the same code one commit earlier). The next run was green.
+  Locally, timing tests (FullScan pause/resume, RealTime storm, SectionC QuickScan via pipe) fail only when two agents run
+  the suite at the same time. Watch them; if one repeats on CI, widen its budget or mark it as a load-sensitive test.
+
 **F. UI (ui-designer)**
 
 | Step | Owner | Deliverable | Done when (tests) |
@@ -1142,6 +1169,7 @@ YARA rules may override with their own `mitre` meta value.
   | 9009 | EventLogIntegrityDegraded | Error | The `sap-AV` log's CustomSD or message DLL location changed (section B) |
   | 9010 | RealTimeUnavailable | Error | Real-time file monitoring can't start, a thread failed, or no folder can be watched (section D review M4) |
   | 9011 | PersistenceMonitorUnavailable | Error | Persistence monitoring can't start, its thread failed, or its protected baseline store was refused (section D review M4) |
+  | 9012 | ProcessEventsUnavailable | Error | The ETW process-event session ended without the engine asking (stopped or tampered with); the watchdog restarts it with backoff. MITRE T1562.006 (E8 review M2) |
 
   `AlertAction.NeedsUserConfirmation` (B3) marks a Malicious file that auto-quarantine refused (protected location,
   SYSTEM/TrustedInstaller owner, or unknown owner).
