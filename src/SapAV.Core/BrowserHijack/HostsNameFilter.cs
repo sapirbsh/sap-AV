@@ -5,8 +5,9 @@ namespace SapAV.Core.BrowserHijack;
 /// travel to the scan worker. A name matches a suffix when it equals it or ends with <c>"." + suffix</c> (case-insensitive).
 /// </summary>
 /// <remarks>
-/// <see cref="DefaultSecurityDomains"/> is a fixed starter list (Microsoft / Defender / Windows Update, major antivirus vendors,
-/// VirusTotal). Detection-dev's E6 rules will replace it with the list from <c>data/</c>; the caps here bound the request size.
+/// <see cref="DefaultSecurityDomains"/> is the shipped domain list from <c>data/browser-hijack/security-domains.txt</c> (Windows
+/// Update / Defender, antivirus vendors and scanners, major sign-in and banking sites), the same list the E6 rules judge entries
+/// against. The caps here bound the request size.
 /// </remarks>
 public static class HostsNameFilter
 {
@@ -16,19 +17,12 @@ public static class HostsNameFilter
     /// <summary>All suffixes together (keeps the worker request far below its size cap).</summary>
     public const int MaxTotalCharacters = 8192;
 
-    public static IReadOnlyList<string> DefaultSecurityDomains { get; } =
-    [
-        // Microsoft, Defender, Windows Update
-        "microsoft.com", "windowsupdate.com", "update.microsoft.com", "windows.com", "msftncsi.com", "live.com", "microsoftonline.com",
-        "wdcp.microsoft.com", "smartscreen.microsoft.com", "mp.microsoft.com", "delivery.mp.microsoft.com", "windowsdefender.com",
-        // Online scanners
-        "virustotal.com", "hybrid-analysis.com", "any.run", "malwarebytes.com",
-        // Antivirus vendors
-        "avast.com", "avg.com", "avira.com", "bitdefender.com", "bitdefender.net", "eset.com", "f-secure.com", "withsecure.com",
-        "kaspersky.com", "kaspersky-labs.com", "mcafee.com", "norton.com", "nortonlifelock.com", "gendigital.com", "sophos.com",
-        "trendmicro.com", "drweb.com", "emsisoft.com", "gdata.de", "pandasecurity.com", "webroot.com", "zonealarm.com",
-        "comodo.com", "crowdstrike.com", "sentinelone.com",
-    ];
+    /// <summary>
+    /// Every suffix of the shipped domain list (<c>data/browser-hijack/security-domains.txt</c>, see
+    /// <see cref="SecurityDomainList.Default"/>): the same instance on every call. A computed property, not a static field, so
+    /// this class has no static initializer that could cycle with <see cref="SecurityDomainList"/>'s validation.
+    /// </summary>
+    public static IReadOnlyList<string> DefaultSecurityDomains => SecurityDomainList.Default.KeepSuffixes;
 
     /// <summary>True when the list is within the caps and every suffix is a plausible DNS name (ASCII letters, digits, '-' and inner dots).</summary>
     public static bool IsValid(IReadOnlyList<string>? suffixes)

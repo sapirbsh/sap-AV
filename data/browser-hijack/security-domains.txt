@@ -1,0 +1,119 @@
+# sap-AV browser-hijack domain list (ROADMAP E6).
+#
+# Used two ways:
+#  - the browser-hijack rules judge hosts-file entries for these domains (SecurityDomainList / BrowserHijackRules);
+#  - the hosts collector keeps entries for these domains past its entry cap (HostsNameFilter.DefaultSecurityDomains).
+#
+# Format: "[group]" starts a group; every other line is one domain suffix, which matches the domain itself and every
+# subdomain ("microsoft.com" matches "www.microsoft.com", never "evilmicrosoft.com" or "microsoft.com.evil.net").
+# Lower-case ASCII only (write IDN domains in punycode), no leading or trailing dot. '#' starts a comment.
+# Caps (HostsNameFilter): at most 128 suffixes and 8192 characters in total.
+#
+# Groups (a name in more than one group takes the most severe):
+#  defender  Windows Update, Microsoft Defender, SmartScreen. Redirect or block -> Malicious (block = Defender tampering).
+#  security  Antivirus vendors and online scanners.            Redirect or block -> Malicious.
+#  accounts  Major sign-in, banking, payment and crypto sites.  Redirect -> Malicious. Block -> nothing (privacy and
+#            social-media block lists do that on purpose).
+
+[defender]
+windowsupdate.com
+update.microsoft.com
+ws.microsoft.com
+mp.microsoft.com
+wdcp.microsoft.com
+wdcpalt.microsoft.com
+wd.microsoft.com
+definitionupdates.microsoft.com
+go.microsoft.com
+smartscreen.microsoft.com
+smartscreen-prod.microsoft.com
+urs.microsoft.com
+checkappexec.microsoft.com
+securitycenter.windows.com
+windowsdefender.com
+
+[security]
+virustotal.com
+hybrid-analysis.com
+any.run
+joesandbox.com
+urlscan.io
+abuse.ch
+malwarebytes.com
+avast.com
+avg.com
+avira.com
+bitdefender.com
+bitdefender.net
+eset.com
+f-secure.com
+withsecure.com
+kaspersky.com
+kaspersky-labs.com
+mcafee.com
+norton.com
+nortonlifelock.com
+gendigital.com
+symantec.com
+symantecliveupdate.com
+sophos.com
+trendmicro.com
+drweb.com
+emsisoft.com
+gdata.de
+pandasecurity.com
+webroot.com
+zonealarm.com
+comodo.com
+crowdstrike.com
+sentinelone.com
+k7computing.com
+quickheal.com
+clamav.net
+
+[accounts]
+microsoft.com
+windows.com
+live.com
+microsoftonline.com
+office.com
+outlook.com
+msftncsi.com
+msftconnecttest.com
+google.com
+gmail.com
+apple.com
+icloud.com
+amazon.com
+facebook.com
+instagram.com
+whatsapp.com
+x.com
+twitter.com
+linkedin.com
+github.com
+discord.com
+telegram.org
+steampowered.com
+steamcommunity.com
+epicgames.com
+roblox.com
+yahoo.com
+dropbox.com
+paypal.com
+americanexpress.com
+capitalone.com
+chase.com
+bankofamerica.com
+wellsfargo.com
+citi.com
+hsbc.com
+barclays.co.uk
+santander.co.uk
+revolut.com
+wise.com
+coinbase.com
+binance.com
+kraken.com
+blockchain.com
+metamask.io

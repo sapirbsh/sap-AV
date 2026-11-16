@@ -23,6 +23,11 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- E6: the browser-hijack domain list (rules + the hosts collector's keep filter), embedded so it can't be swapped on disk. -->
+    <EmbeddedResource Include="..\..\data\browser-hijack\security-domains.txt" LogicalName="SapAV.Core.BrowserHijack.security-domains.txt" Link="BrowserHijack\security-domains.txt" />
+  </ItemGroup>
+
   <!-- YARA-X engine: pinned native DLL, downloaded once, hash-verified, copied to the output. -->
   <Import Project="..\..\native\yara-x\YaraX.targets" />
 
