@@ -219,6 +219,12 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
     {
         ArgumentNullException.ThrowIfNull(files);
         cancellationToken.ThrowIfCancellationRequested();
+        if (files.Count > 1 && files.Any(f => f?.Kind == WorkerParseKind.HostsFile))
+        {
+            // E6 review L3: a hosts file has its own answer cap (WorkerLimits.MaxHostsResponseBytes), so it always goes alone.
+            throw new ArgumentException("A hosts file must be the only file of its parse request.", nameof(files));
+        }
+
         var results = new PersistenceParseResult?[files.Count];
         var send = new List<ParseItem>(files.Count);
         for (int i = 0; i < files.Count; i++)
@@ -399,6 +405,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
                         Kind = chunk[k].Input.Kind,
                         FileHandle = remotes[k],
                         TestFault = ParseFaultInjector?.Invoke(chunk[k].Input.DisplayPath) ?? WorkerTestFault.None,
+                        KeepNames = chunk[k].Input.Kind == WorkerParseKind.HostsFile ? chunk[k].Input.KeepNames : null,
                     };
                 }
 
@@ -449,7 +456,7 @@ internal sealed class SandboxedScanBroker : IScanBroker, Persistence.IPersistenc
             slot.CountFileAndMaybeRecycle(chunk.Count);
             return new(parsed.Select(p => p.Error is { } error
                 ? PersistenceParseResult.Malformed(SafeText.SingleLine(error, WorkerLimits.MaxTextLength))
-                : new PersistenceParseResult(PersistenceParseStatus.Parsed, p.Task, p.Link, null)).ToArray(), null, null, null);
+                : new PersistenceParseResult(PersistenceParseStatus.Parsed, p.Task, p.Link, null) { Hosts = p.Hosts }).ToArray(), null, null, null);
         }
         catch (WorkerRequestException ex) when (ex.Kind == WorkerFailureKind.Unavailable)
         {

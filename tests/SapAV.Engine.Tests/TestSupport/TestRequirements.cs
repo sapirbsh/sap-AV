@@ -76,6 +76,12 @@ public enum Requires
     /// elevated process; checked for elevation first, so a normal run never tries. The probe's session is always stopped.
     /// </summary>
     EtwSession,
+
+    /// <summary>
+    /// The real hosts file (<c>%SystemRoot%\System32\drivers\etc\hosts</c>) exists and is readable (E6, read-only integration
+    /// test). Missing on some stripped-down images.
+    /// </summary>
+    RealHostsFile,
 }
 
 internal static class TestRequirements
@@ -103,6 +109,9 @@ internal static class TestRequirements
         [Requires.CloudFilesApi] = new(ProbeCloudFilesApi),
         [Requires.DefenderWmi] = new(ProbeDefenderWmi),
         [Requires.EtwSession] = new(ProbeEtwSession),
+        [Requires.RealHostsFile] = new(() => File.Exists(Path.Combine(Environment.SystemDirectory, "drivers", "etc", "hosts"))
+            ? null
+            : "the hosts file doesn't exist on this machine"),
         [Requires.SlowTests] = new(() => Environment.GetEnvironmentVariable(SlowTestsVariable)?.Trim() == "1"
             ? null
             : $"opt-in: set {SlowTestsVariable}=1 to run the long real-machine tests"),

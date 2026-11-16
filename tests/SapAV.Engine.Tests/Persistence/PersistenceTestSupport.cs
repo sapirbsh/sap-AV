@@ -115,6 +115,6 @@ internal sealed class WireTestParser : IPersistenceFileParser
         var parsed = WireParsedFileCodec.FromWire(WireParsedFileCodec.ParseInWorker(kind, content[..read]), kind);
         return Task.FromResult(parsed.Error is { } error
             ? PersistenceParseResult.Malformed(error)
-            : new PersistenceParseResult(PersistenceParseStatus.Parsed, parsed.Task, parsed.Link, null));
+            : new PersistenceParseResult(PersistenceParseStatus.Parsed, parsed.Task, parsed.Link, null) { Hosts = parsed.Hosts });
     }
 }

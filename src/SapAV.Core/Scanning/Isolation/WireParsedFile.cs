@@ -13,6 +13,12 @@ public enum WorkerParseKind
 
     /// <summary>A shell link (<see cref="ShellLinkParser"/>).</summary>
     ShellLink,
+
+    /// <summary>
+    /// The hosts file (E6, <see cref="BrowserHijack.HostsFileParser"/>): read up to <see cref="BrowserHijack.HostsFileSnapshot.MaxBytes"/>
+    /// (a longer file is parsed from its start and flagged), answered as <see cref="WireParsedFile.Hosts"/>.
+    /// </summary>
+    HostsFile,
 }
 
 /// <summary>
@@ -35,6 +41,12 @@ public sealed record WorkerParseFile
     public required long FileHandle { get; init; }
 
     public required WorkerTestFault TestFault { get; init; }
+
+    /// <summary>
+    /// <see cref="WorkerParseKind.HostsFile"/> only: domain suffixes whose entries are kept past the entry cap
+    /// (<see cref="BrowserHijack.HostsNameFilter"/>, within its caps); null for every other kind.
+    /// </summary>
+    public required IReadOnlyList<string>? KeepNames { get; init; }
 }
 
 /// <summary>A parsed autostart definition, worker to engine. <b>Untrusted</b>: rebuilt by <see cref="WireParsedFileCodec.FromWire"/>.</summary>
@@ -42,12 +54,15 @@ public sealed record WireParsedFile
 {
     public required WorkerParseKind Kind { get; init; }
 
-    /// <summary>Why the file isn't well-formed; then <see cref="Task"/> and <see cref="Link"/> are null.</summary>
+    /// <summary>Why the file isn't well-formed; then <see cref="Task"/>, <see cref="Link"/> and <see cref="Hosts"/> are null.</summary>
     public required string? Error { get; init; }
 
     public required WireTaskDefinition? Task { get; init; }
 
     public required WireShellLink? Link { get; init; }
+
+    /// <summary>E6: the parsed hosts file (for <see cref="WorkerParseKind.HostsFile"/> only).</summary>
+    public required WireHostsFile? Hosts { get; init; }
 }
 
 public sealed record WireTaskDefinition
@@ -96,8 +111,8 @@ public sealed record WireShellLink
     public required bool Truncated { get; init; }
 }
 
-/// <summary>The checked result of <see cref="WireParsedFileCodec.FromWire"/>: exactly one of the three is set.</summary>
-public sealed record ParsedPersistenceFile(TaskDefinitionInfo? Task, ShellLinkInfo? Link, string? Error);
+/// <summary>The checked result of <see cref="WireParsedFileCodec.FromWire"/>: exactly one of the four is set.</summary>
+public sealed record ParsedPersistenceFile(TaskDefinitionInfo? Task, ShellLinkInfo? Link, string? Error, BrowserHijack.HostsParseResult? Hosts = null);
 
 /// <summary>
 /// The worker's parse entry point and the engine's check of its answer. <see cref="ParseInWorker"/> runs the file parsers,
@@ -111,12 +126,41 @@ public static class WireParsedFileCodec
     public const int MaxTotalCharacters = 32_767;
 
     /// <summary>Most bytes the file may have for <paramref name="kind"/>.</summary>
-    public static int MaxFileBytes(WorkerParseKind kind) => kind == WorkerParseKind.ScheduledTask ? TaskXml.MaxBytes : ShellLinkParser.MaxSize;
+    public static int MaxFileBytes(WorkerParseKind kind) => kind switch
+    {
+        WorkerParseKind.ScheduledTask => TaskXml.MaxBytes,
+        WorkerParseKind.HostsFile => BrowserHijack.HostsFileSnapshot.MaxBytes,
+        _ => ShellLinkParser.MaxSize,
+    };
+
+    /// <summary>True when a file over <see cref="MaxFileBytes"/> is parsed from its start (flagged) instead of refused: the hosts file.</summary>
+    public static bool ParsesTruncated(WorkerParseKind kind) => kind == WorkerParseKind.HostsFile;
+
+    /// <summary>
+    /// E6: runs the hosts parser on the first <see cref="BrowserHijack.HostsFileSnapshot.MaxBytes"/> of the file. Only the scan worker
+    /// (and tests) may call it. An invalid <paramref name="keepNames"/> list is an error answer.
+    /// </summary>
+    public static WireParsedFile ParseHostsInWorker(byte[] content, bool inputTruncated, IReadOnlyList<string>? keepNames)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        if (!BrowserHijack.HostsNameFilter.IsValid(keepNames))
+        {
+            return new WireParsedFile { Kind = WorkerParseKind.HostsFile, Error = "The hosts name filter is outside its caps.", Task = null, Link = null, Hosts = null };
+        }
+
+        var result = BrowserHijack.HostsFileParser.Parse(content, inputTruncated, BrowserHijack.HostsNameFilter.ToPredicate(keepNames));
+        return new WireParsedFile { Kind = WorkerParseKind.HostsFile, Error = null, Task = null, Link = null, Hosts = WireHostsCodec.ToWire(result) };
+    }
 
     /// <summary>Runs the parser. Malformed input comes back as <see cref="WireParsedFile.Error"/>, not an exception.</summary>
     public static WireParsedFile ParseInWorker(WorkerParseKind kind, byte[] content)
     {
         ArgumentNullException.ThrowIfNull(content);
+        if (kind == WorkerParseKind.HostsFile)
+        {
+            return ParseHostsInWorker(content, inputTruncated: false, keepNames: null);
+        }
+
         string? error;
         if (kind == WorkerParseKind.ScheduledTask)
         {
@@ -127,6 +171,7 @@ public static class WireParsedFileCodec
                 Error = task is null ? error ?? "The task file can't be parsed." : null,
                 Task = task is null ? null : ToWire(task),
                 Link = null,
+                Hosts = null,
             };
         }
 
@@ -137,6 +182,7 @@ public static class WireParsedFileCodec
             Error = link is null ? error ?? "The shortcut can't be parsed." : null,
             Task = null,
             Link = link is null ? null : ToWire(link),
+            Hosts = null,
         };
     }
 
@@ -167,11 +213,20 @@ public static class WireParsedFileCodec
     {
         ArgumentNullException.ThrowIfNull(wire);
         Require(wire.Kind == expected, $"a {wire.Kind} answer to a {expected} request");
-        Require((wire.Error is null ? 0 : 1) + (wire.Task is null ? 0 : 1) + (wire.Link is null ? 0 : 1) == 1, "not exactly one of error, task and link");
+        Require((wire.Error is null ? 0 : 1) + (wire.Task is null ? 0 : 1) + (wire.Link is null ? 0 : 1) + (wire.Hosts is null ? 0 : 1) == 1,
+            "not exactly one of error, task, link and hosts");
         if (wire.Error is { } error)
         {
             Require(error.Length is > 0 and <= WorkerLimits.MaxTextLength, "an error text outside its length");
             return new ParsedPersistenceFile(null, null, error);
+        }
+
+        // Each kind may only carry its own answer.
+        Require(wire.Hosts is null || expected == WorkerParseKind.HostsFile, "a hosts answer to another kind");
+        Require(expected != WorkerParseKind.HostsFile || wire.Hosts is not null, "a non-hosts answer to a hosts request");
+        if (wire.Hosts is { } hosts)
+        {
+            return new ParsedPersistenceFile(null, null, null, WireHostsCodec.FromWire(hosts));
         }
 
         return wire.Task is { } task
