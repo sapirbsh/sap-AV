@@ -94,7 +94,7 @@ public sealed partial class HostsParsingInWorkerTests : IDisposable
         Assert.True(content.Entries[0].IsBlocking);
         var kept = Assert.Single(content.Entries, e => e.Names.Contains("www.virustotal.com"));
         Assert.False(kept.IsBlocking); // recomputed engine-side from the address
-        Assert.Equal(WindowsIdentity.GetCurrent().User!.Value, hosts.OwnerSid); // metadata from the engine's own handle
+        Assert.Equal(BrowserHijackCollectorTests.OwnerOf(path), hosts.OwnerSid); // metadata from the engine's own handle
         Assert.True(broker.Status.WorkersRunning >= 1); // it really went through a worker
     }
 

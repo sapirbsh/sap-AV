@@ -314,7 +314,7 @@ public sealed class BrowserHijackCollectorTests : IDisposable
             Assert.Equal(HijackReadState.Available, opened.State);
             Assert.False(opened.Handle!.IsInvalid);
             Assert.Equal(new FileInfo(path).Length, opened.Length);
-            Assert.Equal(WindowsIdentity.GetCurrent().User!.Value, opened.OwnerSid);
+            Assert.Equal(OwnerOf(path), opened.OwnerSid); // elevated runs (CI): new files are owned by Administrators
             Assert.NotNull(opened.LastWriteTime);
             Assert.Equal(1u, opened.NumberOfLinks);
             Assert.True(opened.WritableByNonAdmins); // a user owns this temp file
@@ -416,6 +416,10 @@ public sealed class BrowserHijackCollectorTests : IDisposable
         public IRegistryKeyReader? Open(RegistryRoot root, string path) =>
             root == RegistryRoot.Users && path.Equals(sid, StringComparison.OrdinalIgnoreCase) ? null : inner.Open(root, path);
     }
+
+    /// <summary>The file's owner SID (elevated runs, such as CI, create files owned by Administrators, not the user).</summary>
+    internal static string OwnerOf(string path) =>
+        new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier))!.Value;
 
     private sealed class DenyingRegistryView : IRegistryView
     {
