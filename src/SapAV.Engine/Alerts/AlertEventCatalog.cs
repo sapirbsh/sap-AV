@@ -35,6 +35,7 @@ public readonly record struct AlertEventDefinition(int EventId, EventLogEntryTyp
 ///   9009   | EventLogIntegrityDegraded | Error      | The sap-AV log's CustomSD or message DLL isn't the expected one (B6 M2)
 ///   9010   | RealTimeUnavailable      | Error       | Real-time file monitoring didn't start, a thread failed, or nothing is watched (D review M4)
 ///   9011   | PersistenceMonitorUnavailable | Error  | Persistence monitoring didn't start, its thread failed, or its baseline store was refused
+///   9012   | ProcessEventsUnavailable | Error       | The process-events ETW session ended without the engine asking (E8 review M2); restarted with backoff
 /// </code>
 /// Ranges: 1000-1999 file detections, 2000-2999 system-change detections (persistence, Defender tampering,
 /// honeytokens, process chains), 3000-3999 user / remediation actions, 9000-9999 engine health.
@@ -66,6 +67,7 @@ public static class AlertEventCatalog
     public const int EventLogIntegrityDegradedEventId = 9009;
     public const int RealTimeUnavailableEventId = 9010;
     public const int PersistenceMonitorUnavailableEventId = 9011;
+    public const int ProcessEventsUnavailableEventId = 9012;
 
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> is not a defined value.</exception>
     public static AlertEventDefinition For(AlertType type) => type switch
@@ -89,6 +91,7 @@ public static class AlertEventCatalog
         AlertType.EventLogIntegrityDegraded => new(EventLogIntegrityDegradedEventId, EventLogEntryType.Error),
         AlertType.RealTimeUnavailable => new(RealTimeUnavailableEventId, EventLogEntryType.Error),
         AlertType.PersistenceMonitorUnavailable => new(PersistenceMonitorUnavailableEventId, EventLogEntryType.Error),
+        AlertType.ProcessEventsUnavailable => new(ProcessEventsUnavailableEventId, EventLogEntryType.Error),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Undefined alert type."),
     };
 }

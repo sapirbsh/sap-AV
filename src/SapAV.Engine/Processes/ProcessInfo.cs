@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
@@ -14,10 +15,29 @@ public sealed record ProcessDetails(
     string? UserSid,
     ProcessIntegrityLevel IntegrityLevel);
 
+/// <summary>Whether a process instance (PID + start time) still runs.</summary>
+public enum ProcessLiveness
+{
+    /// <summary>No process with that PID, it has exited, or the PID now belongs to a process with another start time.</summary>
+    Gone,
+
+    /// <summary>The same process instance is still running.</summary>
+    Running,
+
+    /// <summary>It exists but couldn't be checked.</summary>
+    Unknown,
+}
+
 /// <summary>Reads <see cref="ProcessDetails"/> of a live process. Never throws; null when the process can't be opened. Faked in tests.</summary>
 public interface IProcessInfoReader
 {
     ProcessDetails? TryRead(int processId);
+
+    /// <summary>
+    /// Whether the process with this PID and start time still runs (E8 review H1: a stop event for a running process is forged;
+    /// M4: pruning stale table entries). A null <paramref name="startTime"/> matches any instance with the PID.
+    /// </summary>
+    ProcessLiveness CheckLiveness(int processId, DateTimeOffset? startTime);
 }
 
 /// <summary>One row of the running-process snapshot (Toolhelp): PID, parent PID and the short exe name.</summary>
@@ -61,13 +81,55 @@ public sealed class NativeProcessInfoReader : IProcessInfoReader
         return new ProcessDetails(start, ReadImagePath(process), ReadCommandLine(process), session, sid, integrity);
     }
 
+    public ProcessLiveness CheckLiveness(int processId, DateTimeOffset? startTime)
+    {
+        if (processId <= 0)
+        {
+            return ProcessLiveness.Unknown; // Idle / System: never "gone"
+        }
+
+        using var process = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation | ProcessNative.Synchronize, false, (uint)processId);
+        if (process.IsInvalid)
+        {
+            // ERROR_INVALID_PARAMETER: no such PID (its process object is gone). Anything else (access denied) is not proof.
+            return Marshal.GetLastPInvokeError() == ProcessNative.ErrorInvalidParameter ? ProcessLiveness.Gone : ProcessLiveness.Unknown;
+        }
+
+        if (startTime is { } expected)
+        {
+            if (!ProcessNative.GetProcessTimes(process, out long creation, out _, out _, out _) || creation <= 0)
+            {
+                return ProcessLiveness.Unknown;
+            }
+
+            if ((DateTimeOffset.FromFileTime(creation) - expected).Duration() > KernelProcessEventMapper.StartTimeTolerance)
+            {
+                return ProcessLiveness.Gone; // the PID was reused: the instance asked about is gone
+            }
+        }
+
+        return ProcessNative.WaitForSingleObject(process, 0) switch
+        {
+            ProcessNative.WaitObject0 => ProcessLiveness.Gone, // exited; only open handles keep the object around
+            ProcessNative.WaitTimeout => ProcessLiveness.Running,
+            _ => ProcessLiveness.Unknown,
+        };
+    }
+
     private static string? ReadImagePath(SafeProcessHandle process)
     {
-        var buffer = new char[32768];
-        uint size = (uint)buffer.Length;
-        return ProcessNative.QueryFullProcessImageNameW(process, 0, buffer, ref size) && size > 0 && size <= buffer.Length
-            ? new string(buffer, 0, (int)size)
-            : null;
+        var buffer = ArrayPool<char>.Shared.Rent(32768);
+        try
+        {
+            uint size = 32768;
+            return ProcessNative.QueryFullProcessImageNameW(process, 0, buffer, ref size) && size > 0 && size <= 32768
+                ? new string(buffer, 0, (int)size)
+                : null;
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer);
+        }
     }
 
     private static unsafe string? ReadCommandLine(SafeProcessHandle process)
@@ -80,15 +142,22 @@ public sealed class NativeProcessInfoReader : IProcessInfoReader
             return null;
         }
 
-        var buffer = new byte[needed];
-        fixed (byte* p = buffer)
+        var buffer = ArrayPool<byte>.Shared.Rent(needed);
+        try
         {
-            if (ProcessNative.NtQueryInformationProcess(process, ProcessNative.ProcessCommandLineInformation, p, needed, out _) != 0)
+            fixed (byte* p = buffer)
             {
-                return null;
-            }
+                if (ProcessNative.NtQueryInformationProcess(process, ProcessNative.ProcessCommandLineInformation, p, needed, out _) != 0)
+                {
+                    return null;
+                }
 
-            return CommandLineFromBuffer(buffer, (nint)p);
+                return CommandLineFromBuffer(buffer.AsSpan(0, needed), (nint)p);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -96,7 +165,7 @@ public sealed class NativeProcessInfoReader : IProcessInfoReader
     /// The text of the UNICODE_STRING at the start of <paramref name="buffer"/> (mapped at <paramref name="baseAddress"/>), or null
     /// when its pointer or length doesn't lie inside the buffer. Never reads outside the buffer.
     /// </summary>
-    internal static string? CommandLineFromBuffer(byte[] buffer, nint baseAddress)
+    internal static string? CommandLineFromBuffer(ReadOnlySpan<byte> buffer, nint baseAddress)
     {
         int headerSize = nint.Size == 8 ? 16 : 8;
         if (buffer.Length < headerSize)
@@ -104,8 +173,8 @@ public sealed class NativeProcessInfoReader : IProcessInfoReader
             return null;
         }
 
-        int length = BitConverter.ToUInt16(buffer, 0);
-        long pointer = nint.Size == 8 ? BitConverter.ToInt64(buffer, 8) : BitConverter.ToInt32(buffer, 4);
+        int length = BitConverter.ToUInt16(buffer);
+        long pointer = nint.Size == 8 ? BitConverter.ToInt64(buffer[8..]) : BitConverter.ToInt32(buffer[4..]);
         if (length == 0)
         {
             return string.Empty;
@@ -117,7 +186,7 @@ public sealed class NativeProcessInfoReader : IProcessInfoReader
             return null;
         }
 
-        return System.Text.Encoding.Unicode.GetString(buffer, (int)offset, length);
+        return System.Text.Encoding.Unicode.GetString(buffer.Slice((int)offset, length));
     }
 
     private static (string? Sid, ProcessIntegrityLevel Integrity) ReadToken(SafeProcessHandle process)
@@ -221,6 +290,10 @@ public sealed class ToolhelpProcessSnapshot : IRunningProcessSnapshot
 internal static unsafe class ProcessNative
 {
     public const uint ProcessQueryLimitedInformation = 0x1000;
+    public const uint Synchronize = 0x00100000;
+    public const int ErrorInvalidParameter = 87;
+    public const uint WaitObject0 = 0;
+    public const uint WaitTimeout = 0x102;
     public const uint TokenQuery = 0x0008;
     public const int TokenUserClass = 1;
     public const int TokenIntegrityLevelClass = 25;
@@ -248,6 +321,9 @@ internal static unsafe class ProcessNative
 
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
     public static extern SafeProcessHandle OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    public static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -163,6 +163,36 @@ public sealed class ProcessEventFeedTests
     }
 
     [Fact]
+    public void FullTable_PrunesGoneProcessesFirst_AndNeverStoresEntriesWithoutStartTime()
+    {
+        var table = new ProcessTable(capacity: 3, isGone: p => p.ProcessId == 1);
+        table.TryAdd(Start(1, T0));
+        table.TryAdd(Start(2, T0));
+        table.TryAdd(Start(3, T0));
+        table.TryAdd(Start(4, T0));
+
+        Assert.Null(table.FindLatestByPid(1)); // gone: pruned
+        Assert.NotNull(table.FindLatestByPid(2)); // live: not evicted
+        Assert.Equal((0L, 1L), (table.Evicted, table.Pruned));
+        Assert.False(table.TryAdd(Start(5, T0) with { StartTime = null }));
+        Assert.Equal(3, table.Count);
+    }
+
+    [Fact]
+    public async Task SecondStartForAKnownProcess_IsRejected_AndCannotRewriteItsParent()
+    {
+        using var source = new FakeProcessEventSource();
+        await source.StartAsync();
+        source.Publish(Start(100, T0, parent: 4, image: @"C:\Apps\real.exe"));
+
+        Assert.Null(source.Publish(Start(100, T0, parent: 666, image: @"C:\Apps\forged.exe")));
+
+        Assert.Equal(1, source.Status.RejectedEvents);
+        var known = source.FindProcess(new ProcessKey(100, T0));
+        Assert.Equal((4, @"C:\Apps\real.exe"), (known?.ParentProcessId, known?.ImagePath));
+    }
+
+    [Fact]
     public void CommandLine_IsCappedHeadAndTail_WithTruncatedFlag()
     {
         string head = "miner.exe --donate-level 1 ";

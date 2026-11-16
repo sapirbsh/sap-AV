@@ -14,8 +14,12 @@ public interface IKernelProcessSession : IDisposable
     /// <summary>Events the OS reports lost for this session so far; null when it can't be read.</summary>
     long? EventsLost { get; }
 
-    /// <summary>Delivers records on the calling thread until the session is stopped. <paramref name="onRecord"/> must not throw.</summary>
-    void Run(Action<KernelProcessRecord> onRecord);
+    /// <summary>
+    /// Delivers records on the calling thread until the session is stopped. Each event goes through
+    /// <see cref="KernelProcessDispatch.Deliver"/>: a failure while decoding or handling one event goes to <paramref name="onError"/>
+    /// and the stream continues.
+    /// </summary>
+    void Run(Action<KernelProcessRecord> onRecord, Action<Exception> onError);
 
     /// <summary>Stops the OS session (Run then returns). Idempotent, callable from any thread, never throws.</summary>
     void Stop();
@@ -135,23 +139,23 @@ internal sealed class TraceEventKernelProcessSession : IKernelProcessSession
         }
     }
 
-    public void Run(Action<KernelProcessRecord> onRecord)
+    public void Run(Action<KernelProcessRecord> onRecord, Action<Exception> onError)
     {
         ArgumentNullException.ThrowIfNull(onRecord);
+        ArgumentNullException.ThrowIfNull(onError);
         var source = _session.Source;
-        source.Dynamic.All += data =>
+        source.Dynamic.All += data => KernelProcessDispatch.Deliver(() =>
         {
             if (data.ProviderGuid != ProviderGuid)
             {
-                return;
+                return null;
             }
 
             int id = (int)data.ID;
-            if (id is ProcessStartId or ProcessStopId)
-            {
-                onRecord(Extract(data, id == ProcessStartId ? ProcessEventKind.Started : ProcessEventKind.Stopped));
-            }
-        };
+            return id is ProcessStartId or ProcessStopId
+                ? Extract(data, id == ProcessStartId ? ProcessEventKind.Started : ProcessEventKind.Stopped)
+                : null;
+        }, onRecord, onError);
         source.Process();
     }
 
@@ -184,22 +188,57 @@ internal sealed class TraceEventKernelProcessSession : IKernelProcessSession
 
     public void Dispose() => Stop();
 
-    /// <summary>The header's process ID is the logging thread's; the subject process is in the payload.</summary>
+    /// <summary>
+    /// The header's process ID is the logging process's (kept for the forgery checks); the subject process is in the payload. A
+    /// missing payload ProcessID stays null (L1): the mapper rejects it instead of trusting the header.
+    /// </summary>
     private static KernelProcessRecord Extract(TraceEvent data, ProcessEventKind kind)
     {
         var timestamp = KernelProcessPayload.ToUtc(data.TimeStamp) ?? DateTimeOffset.UtcNow;
-        int pid = KernelProcessPayload.ToInt32(data.PayloadByName("ProcessID")) ?? data.ProcessID;
+        int header = data.ProcessID;
+        int? pid = KernelProcessPayload.ToInt32(data.PayloadByName("ProcessID"));
         var create = KernelProcessPayload.ToUtc(data.PayloadByName("CreateTime"));
         var image = data.PayloadByName("ImageName") as string;
         if (kind == ProcessEventKind.Started)
         {
-            return new KernelProcessRecord(kind, pid, KernelProcessPayload.ToInt32(data.PayloadByName("ParentProcessID")), create,
+            return new KernelProcessRecord(kind, header, pid, KernelProcessPayload.ToInt32(data.PayloadByName("ParentProcessID")), create,
                 KernelProcessPayload.ToInt32(data.PayloadByName("SessionID")), image, timestamp);
         }
 
         var exit = KernelProcessPayload.ToUtc(data.PayloadByName("ExitTime"));
-        return new KernelProcessRecord(kind, pid, null, create, null, image, exit ?? timestamp,
+        return new KernelProcessRecord(kind, header, pid, null, create, null, image, exit ?? timestamp,
             KernelProcessPayload.ToInt32(data.PayloadByName("ExitCode")));
+    }
+}
+
+/// <summary>Runs one event's decode + handling so that nothing escapes into TraceEvent's dispatch loop (E8 review M1).</summary>
+public static class KernelProcessDispatch
+{
+    /// <summary>
+    /// Calls <paramref name="extract"/> and, for a non-null record, <paramref name="onRecord"/>. Any exception except
+    /// <see cref="OutOfMemoryException"/> goes to <paramref name="onError"/> (which must not throw), so one bad event never ends
+    /// the session.
+    /// </summary>
+    public static void Deliver(Func<KernelProcessRecord?> extract, Action<KernelProcessRecord> onRecord, Action<Exception> onError)
+    {
+        try
+        {
+            if (extract() is { } record)
+            {
+                onRecord(record);
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            try
+            {
+                onError(ex);
+            }
+            catch (Exception inner) when (inner is not OutOfMemoryException)
+            {
+                // nothing may escape into the dispatch loop
+            }
+        }
     }
 }
 

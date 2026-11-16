@@ -59,7 +59,7 @@ public sealed class EtwProcessEventSourceTests
         Assert.True(existing.IsPreExisting);
         Assert.Equal("explorer.exe", existing.CommandLine);
 
-        factory.Last!.Feed(new KernelProcessRecord(ProcessEventKind.Started, 60, 50, T0, 1, @"C:\Windows\System32\cmd.exe", T0));
+        factory.Last!.Feed(new KernelProcessRecord(ProcessEventKind.Started, 50, 60, 50, T0, 1, @"C:\Windows\System32\cmd.exe", T0));
         var started = await sub.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(60, started.ProcessId);
         Assert.Equal(50, source.FindParent(started)?.ProcessId);
@@ -112,7 +112,64 @@ public sealed class EtwProcessEventSourceTests
     }
 
     [Fact]
-    public async Task HostedService_StartsOnlyAsServiceOrSystem_OrWhenAskedInConsole()
+    public async Task Watchdog_RestartsALostSession_WithBackoff_AndRaisesTheHealthCallback()
+    {
+        var factory = new FakeSessionFactory();
+        using var source = Source(factory);
+        source.RestartBackoff = [TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(20)];
+        var problems = new ConcurrentQueue<string>();
+        source.Unavailable = problems.Enqueue;
+        await source.StartAsync();
+
+        factory.CreateError = new COMException("no resources", unchecked((int)0x800705AA)); // the first restarts fail
+        factory.Last!.EndFromOutside();
+        await WaitFor(() => factory.Creates >= 3);
+        Assert.Equal(ProcessEventSourceHealth.Unavailable, source.Status.Health);
+        Assert.Contains("without the engine asking", Assert.Single(problems), StringComparison.Ordinal);
+
+        factory.CreateError = null;
+        await WaitFor(() => source.Status.Health == ProcessEventSourceHealth.Running);
+
+        // An explicit stop is not a loss: no alert, no restart.
+        await source.StopAsync();
+        int creates = factory.Creates;
+        await Task.Delay(200);
+        Assert.Equal(creates, factory.Creates);
+        Assert.Single(problems);
+    }
+
+    [Fact]
+    public async Task ForgedOrBrokenEvents_AreDroppedAndCounted_AndTheStreamStaysAlive()
+    {
+        var factory = new FakeSessionFactory();
+        using var source = Source(factory);
+        using var sub = source.Subscribe();
+        await source.StartAsync();
+        var session = factory.Last!;
+
+        session.FeedBroken(); // decoding throws: counted, the session keeps running
+        session.Feed(new KernelProcessRecord(ProcessEventKind.Started, 666, 61, 50, T0, 1, "forged.exe", T0)); // header isn't the parent
+        session.Feed(new KernelProcessRecord(ProcessEventKind.Started, 50, 62, 50, T0, 1, "real.exe", T0));
+
+        var delivered = await sub.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(62, delivered.ProcessId);
+        Assert.Equal(1, source.Errors);
+        Assert.Equal(1, source.Status.RejectedEvents);
+        Assert.Equal(ProcessEventSourceHealth.Running, source.Status.Health);
+    }
+
+    [Fact]
+    public void HealthAlert_ProcessEventsUnavailable_IsEvent9012_IndicatorBlocking()
+    {
+        var alert = SapAV.Engine.Alerts.ScanAlerts.ProcessEventsUnavailable("the ETW session ended.", DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(new SapAV.Engine.Alerts.AlertEventDefinition(9012, System.Diagnostics.EventLogEntryType.Error), SapAV.Engine.Alerts.AlertEventCatalog.For(alert.Type));
+        Assert.Equal("T1562.006", alert.TechniqueId);
+        Assert.True(Core.Mitre.MitreCatalog.IsKnown(alert.TechniqueId));
+    }
+
+    [Fact]
+    public async Task HostedService_StartsOnlyAsAService_OrWhenAskedInConsole()
     {
         using var source = new FakeProcessEventSource();
         var console = new ProcessEventSourceService(source, new ProcessEventSourceOptions(), NullLogger<ProcessEventSourceService>.Instance, () => false);
@@ -185,7 +242,13 @@ public sealed class EtwProcessEventSourceTests
 
     internal sealed class FixedInfo : Dictionary<int, ProcessDetails>, IProcessInfoReader
     {
+        /// <summary>PIDs whose process still runs (any start time); every other PID is gone.</summary>
+        public HashSet<int> Running { get; } = [];
+
         public ProcessDetails? TryRead(int processId) => TryGetValue(processId, out var d) ? d : null;
+
+        public ProcessLiveness CheckLiveness(int processId, DateTimeOffset? startTime) =>
+            Running.Contains(processId) ? ProcessLiveness.Running : ProcessLiveness.Gone;
     }
 
     internal sealed class FakeSessionFactory : IKernelProcessSessionFactory
@@ -194,7 +257,9 @@ public sealed class EtwProcessEventSourceTests
 
         public Exception? CreateError { get; set; }
 
-        public int Creates { get; private set; }
+        private int _creates;
+
+        public int Creates => Volatile.Read(ref _creates);
 
         public List<string> Stopped { get; } = [];
 
@@ -212,7 +277,7 @@ public sealed class EtwProcessEventSourceTests
 
         public IKernelProcessSession Create(string name, int bufferSizeMB)
         {
-            Creates++;
+            Interlocked.Increment(ref _creates);
             if (CreateError is not null)
             {
                 throw CreateError;
@@ -224,7 +289,7 @@ public sealed class EtwProcessEventSourceTests
 
     internal sealed class FakeSession(string name) : IKernelProcessSession
     {
-        private readonly BlockingCollection<KernelProcessRecord?> _queue = [];
+        private readonly BlockingCollection<Func<KernelProcessRecord?>?> _queue = [];
 
         public string Name { get; } = name;
 
@@ -236,22 +301,25 @@ public sealed class EtwProcessEventSourceTests
 
         public ManualResetEventSlim RunReturned { get; } = new();
 
-        public void Feed(KernelProcessRecord record) => _queue.Add(record);
+        public void Feed(KernelProcessRecord record) => _queue.Add(() => record);
+
+        /// <summary>An event whose decoding throws (e.g. a malformed payload).</summary>
+        public void FeedBroken() => _queue.Add(() => throw new FormatException("synthetic decode failure"));
 
         public void EndFromOutside() => _queue.Add(null);
 
-        public void Run(Action<KernelProcessRecord> onRecord)
+        public void Run(Action<KernelProcessRecord> onRecord, Action<Exception> onError)
         {
             try
             {
-                foreach (var record in _queue.GetConsumingEnumerable())
+                foreach (var extract in _queue.GetConsumingEnumerable())
                 {
-                    if (record is null)
+                    if (extract is null)
                     {
                         return;
                     }
 
-                    onRecord(record);
+                    KernelProcessDispatch.Deliver(extract, onRecord, onError); // the same guard as the real session
                 }
             }
             finally

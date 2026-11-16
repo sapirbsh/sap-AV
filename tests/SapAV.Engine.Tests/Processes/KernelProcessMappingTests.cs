@@ -19,7 +19,7 @@ public sealed class KernelProcessMappingTests
         };
         var mapper = new KernelProcessEventMapper(info, Paths.ToWin32);
 
-        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 42, 7, T0, 2, @"\Device\HarddiskVolume1\Tools\a.exe", T0));
+        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, 42, 7, T0, 2, @"\Device\HarddiskVolume1\Tools\a.exe", T0), out _)!;
 
         Assert.Equal(ProcessEventKind.Started, e.Kind);
         Assert.Equal(new ProcessKey(42, T0), e.Key);
@@ -39,13 +39,70 @@ public sealed class KernelProcessMappingTests
         };
         var mapper = new KernelProcessEventMapper(info, Paths.ToWin32);
 
-        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 42, 7, T0, 2, @"\Device\HarddiskVolume10\x\a.exe", T0));
+        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, 42, 7, T0, 2, @"\Device\HarddiskVolume10\x\a.exe", T0), out _)!;
 
         Assert.Equal(@"D:\x\a.exe", e.ImagePath); // from the event itself, Volume10 not confused with Volume1
         Assert.Null(e.CommandLine);
         Assert.Null(e.UserSid);
         Assert.Equal(ProcessIntegrityLevel.Unknown, e.IntegrityLevel);
         Assert.Equal(2, e.SessionId);
+    }
+
+    [Fact]
+    public void ForgedStart_NotLoggedByItsParent_IsRejected()
+    {
+        var mapper = new KernelProcessEventMapper(new EtwProcessEventSourceTests.FixedInfo(), Paths.ToWin32);
+
+        // A user-mode process (PID 666) logs a "start" under the Kernel-Process GUID claiming winword.exe (PID 7) as the parent.
+        var forged = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 666, 42, 7, T0, 1, @"C:\x\powershell.exe", T0), out var why);
+
+        Assert.Null(forged);
+        Assert.Equal(KernelProcessRejection.HeaderMismatch, why);
+    }
+
+    [Fact]
+    public void ForgedStop_LoggedByAnotherProcess_OrForAProcessThatStillRuns_IsRejected()
+    {
+        var info = new EtwProcessEventSourceTests.FixedInfo { Running = { 42 } };
+        var mapper = new KernelProcessEventMapper(info, Paths.ToWin32);
+
+        Assert.Null(mapper.Map(new KernelProcessRecord(ProcessEventKind.Stopped, 666, 42, null, T0, null, "xmrig.exe", T0, 0), out var why));
+        Assert.Equal(KernelProcessRejection.HeaderMismatch, why);
+
+        // Even logged "by" the miner itself: it still runs, so the stop is forged (a miner hiding itself from the monitors).
+        Assert.Null(mapper.Map(new KernelProcessRecord(ProcessEventKind.Stopped, 42, 42, null, T0, null, "xmrig.exe", T0, 0), out why));
+        Assert.Equal(KernelProcessRejection.StillRunning, why);
+
+        info.Running.Clear();
+        var real = mapper.Map(new KernelProcessRecord(ProcessEventKind.Stopped, 42, 42, null, T0, null, "xmrig.exe", T0, 0), out why);
+        Assert.Equal(KernelProcessRejection.None, why);
+        Assert.Equal(ProcessEventKind.Stopped, real?.Kind);
+    }
+
+    [Fact]
+    public void MissingPayloadPidOrCreateTime_IsRejected_NeverFallsBackToTheHeader()
+    {
+        var mapper = new KernelProcessEventMapper(new EtwProcessEventSourceTests.FixedInfo(), Paths.ToWin32);
+
+        Assert.Null(mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, null, 7, T0, 1, "a.exe", T0), out var why));
+        Assert.Equal(KernelProcessRejection.Malformed, why);
+        Assert.Null(mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, 42, 7, null, 1, "a.exe", T0), out why));
+        Assert.Equal(KernelProcessRejection.Malformed, why);
+    }
+
+    [Fact]
+    public void LongImagePath_IsCappedHeadAndTail_WithTruncatedFlag()
+    {
+        string path = @"C:\" + string.Join('\\', Enumerable.Repeat("deep", 2000)) + @"\miner.exe";
+        var mapper = new KernelProcessEventMapper(new EtwProcessEventSourceTests.FixedInfo(), Paths.ToWin32);
+
+        var e = mapper.Map(new KernelProcessRecord(ProcessEventKind.Started, 7, 42, 7, T0, 1, path, T0), out _)!;
+
+        Assert.True(e.ImagePathTruncated);
+        Assert.Equal(ProcessText.MaxPathChars, e.ImagePath!.Length);
+        Assert.StartsWith(@"C:\deep", e.ImagePath);
+        Assert.EndsWith(@"\miner.exe", e.ImagePath); // the file name stays visible
+        Assert.Equal("miner.exe", e.ImageName);
     }
 
     [Fact]
@@ -101,13 +158,13 @@ public sealed class KernelProcessMappingTests
         BitConverter.GetBytes((ushort)text.Length).CopyTo(buffer, 0);
         BitConverter.GetBytes((long)(Base + 16)).CopyTo(buffer, 8);
         text.CopyTo(buffer, 16);
-        Assert.Equal("app.exe -a", NativeProcessInfoReader.CommandLineFromBuffer(buffer, Base));
+        Assert.Equal("app.exe -a", NativeProcessInfoReader.CommandLineFromBuffer(buffer.AsSpan(), Base));
 
         BitConverter.GetBytes((ushort)(text.Length + 2)).CopyTo(buffer, 0); // length past the end
-        Assert.Null(NativeProcessInfoReader.CommandLineFromBuffer(buffer, Base));
+        Assert.Null(NativeProcessInfoReader.CommandLineFromBuffer(buffer.AsSpan(), Base));
         BitConverter.GetBytes((ushort)text.Length).CopyTo(buffer, 0);
         BitConverter.GetBytes((long)0x7FFF0000).CopyTo(buffer, 8); // pointer outside the buffer
-        Assert.Null(NativeProcessInfoReader.CommandLineFromBuffer(buffer, Base));
+        Assert.Null(NativeProcessInfoReader.CommandLineFromBuffer(buffer.AsSpan(), Base));
     }
 
     [Fact]

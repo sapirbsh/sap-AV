@@ -48,7 +48,7 @@ public readonly record struct ProcessKey(int ProcessId, DateTimeOffset StartTime
 /// <param name="StartTime">Process creation time (UTC), or null when unknown. With <paramref name="ProcessId"/> it forms the
 /// <see cref="Key"/> that defeats PID reuse.</param>
 /// <param name="ImagePath">Full Win32 path of the image, or null when unknown (a short name only when nothing better was
-/// available).</param>
+/// available). Capped by <see cref="ProcessText.MaxPathChars"/> (head and tail kept).</param>
 /// <param name="CommandLine">The command line (raw text, control characters replaced, capped by <see cref="ProcessText"/>), or
 /// null when it couldn't be read (e.g. the process exited before it could be queried).</param>
 /// <param name="CommandLineTruncated">True when <paramref name="CommandLine"/> was capped (head and tail kept). A very long
@@ -58,6 +58,7 @@ public readonly record struct ProcessKey(int ProcessId, DateTimeOffset StartTime
 /// <param name="IntegrityLevel">The token's integrity level.</param>
 /// <param name="Timestamp">When the event happened (stop: exit time; pre-existing: when the snapshot was taken).</param>
 /// <param name="ExitCode">Exit code, for <see cref="ProcessEventKind.Stopped"/> only.</param>
+/// <param name="ImagePathTruncated">True when <paramref name="ImagePath"/> was capped.</param>
 public sealed record ProcessEvent(
     ProcessEventKind Kind,
     int ProcessId,
@@ -70,7 +71,8 @@ public sealed record ProcessEvent(
     string? UserSid,
     ProcessIntegrityLevel IntegrityLevel,
     DateTimeOffset Timestamp,
-    int? ExitCode = null)
+    int? ExitCode = null,
+    bool ImagePathTruncated = false)
 {
     /// <summary>PID + start time: the identity of this process instance.</summary>
     public ProcessKey Key => new(ProcessId, StartTime?.ToUniversalTime() ?? DateTimeOffset.MinValue);

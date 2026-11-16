@@ -128,9 +128,16 @@ public static class EngineHost
         builder.Services.AddHostedService<RealTime.RealTimeService>();
 
         // Process events (E8): ETW real-time session on Microsoft-Windows-Kernel-Process + a snapshot of running processes, for
-        // the miner (E9) and infostealer (E10) monitors and the parent-child chains (G2a). Started only as a service / SYSTEM.
+        // the miner (E9) and infostealer (E10) monitors and the parent-child chains (G2a). Started only as the Windows service.
         builder.Services.Configure<Processes.ProcessEventSourceOptions>(builder.Configuration.GetSection(Processes.ProcessEventSourceOptions.SectionName));
-        builder.Services.AddSingleton<Core.Processes.IProcessEventSource, Processes.EtwProcessEventSource>();
+        builder.Services.AddSingleton<Core.Processes.IProcessEventSource>(sp =>
+        {
+            var source = ActivatorUtilities.CreateInstance<Processes.EtwProcessEventSource>(sp);
+            // E8 review M2: health alert 9012 when the ETW session ends without the engine asking (it restarts with backoff).
+            source.Unavailable = problem => sp.GetService<IAlertDispatcher>()?.Post(
+                ScanAlerts.ProcessEventsUnavailable(problem, sp.GetRequiredService<TimeProvider>().GetUtcNow()), health: true);
+            return source;
+        });
         builder.Services.AddHostedService<Processes.ProcessEventSourceService>();
 
         // Real-time persistence monitoring (D4): registry and folder change watches on every autostart location, re-collecting

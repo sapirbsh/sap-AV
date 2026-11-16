@@ -59,10 +59,10 @@ public interface IProcessEventSource : IDisposable
 public sealed class ProcessEventSubscription : IDisposable
 {
     /// <summary>Default buffer size: enough for a burst of process starts (a build, a login) without holding much memory.</summary>
-    public const int DefaultCapacity = 4096;
+    public const int DefaultCapacity = 2048;
 
-    /// <summary>Largest allowed buffer.</summary>
-    public const int MaxCapacity = 1 << 20;
+    /// <summary>Largest allowed buffer. An event can hold about 20 KB (capped command line and path), so this bounds a buffer at ~160 MB worst case.</summary>
+    public const int MaxCapacity = 8192;
 
     private readonly Channel<ProcessEvent> _channel;
     private readonly Action<ProcessEventSubscription>? _onDispose;

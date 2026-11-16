@@ -93,4 +93,10 @@ public enum AlertType
     /// backoff), or its protected baseline store was refused (the baseline is kept in memory only).
     /// </summary>
     PersistenceMonitorUnavailable,
+
+    /// <summary>
+    /// The process event source (E8) lost its ETW session without the engine asking (stopped from outside, or it failed). It
+    /// restarts with backoff; until then the behaviour monitors (E9, E10, G2a) see no process starts or stops.
+    /// </summary>
+    ProcessEventsUnavailable,
 }

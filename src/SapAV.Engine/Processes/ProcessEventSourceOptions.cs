@@ -17,7 +17,7 @@ public sealed partial class ProcessEventSourceOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>
-    /// Start the ETW session in a console (debug) run too. Off by default: only the Windows service or a SYSTEM process starts it,
+    /// Start the ETW session in a console (debug) run too. Off by default: only the Windows service starts it (not a SYSTEM console run either),
     /// so an elevated test host or a CI runner (which builds and starts hosts) never creates a kernel trace session.
     /// </summary>
     public bool StartInConsole { get; set; }

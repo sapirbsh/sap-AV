@@ -2,8 +2,9 @@ namespace SapAV.Core.Processes;
 
 /// <summary>
 /// The shared core of every <see cref="IProcessEventSource"/>: the process table, fan-out to bounded subscriptions, counters
-/// and health. <see cref="Publish"/> is safe to call from an ETW callback: it never blocks on a consumer (full buffers drop
-/// their oldest event) and takes only a short internal lock.
+/// and health. <see cref="Publish"/> is safe to call from an ETW callback: it never waits for a consumer (full buffers drop
+/// their oldest event). It takes a short internal lock; when the table is full it may also run the prune check (one
+/// query-only process open per entry, at most once per quarter-capacity of additions).
 /// </summary>
 public sealed class ProcessEventHub
 {
@@ -11,6 +12,7 @@ public sealed class ProcessEventHub
     private readonly ProcessTable _table;
     private ProcessEventSubscription[] _subscriptions = [];
     private long _received;
+    private long _rejected;
     private long _lost;              // over all sessions (reported in the status)
     private long _lostBeforeSession; // part of _lost from earlier sessions
     private long _droppedByClosedSubscriptions;
@@ -19,9 +21,11 @@ public sealed class ProcessEventHub
     private string? _sessionName;
     private bool _completed;
 
-    public ProcessEventHub(int tableCapacity = ProcessTable.DefaultCapacity)
+    /// <param name="tableCapacity">Most processes remembered.</param>
+    /// <param name="isGone">Optional liveness check (PID + start time) used to prune a full table and by <see cref="Reconcile"/>.</param>
+    public ProcessEventHub(int tableCapacity = ProcessTable.DefaultCapacity, Func<ProcessEvent, bool>? isGone = null)
     {
-        _table = new ProcessTable(tableCapacity);
+        _table = new ProcessTable(tableCapacity, isGone);
     }
 
     public ProcessEventSourceStatus Status
@@ -36,7 +40,7 @@ public sealed class ProcessEventHub
                     dropped += subscription.Dropped;
                 }
 
-                return new ProcessEventSourceStatus(_health, _detail, _received, _lost, dropped, _sessionName);
+                return new ProcessEventSourceStatus(_health, _detail, _received, _lost, dropped, _sessionName, _rejected);
             }
         }
     }
@@ -108,10 +112,30 @@ public sealed class ProcessEventHub
         return subscription;
     }
 
+    /// <summary>Counts an event the source dropped as malformed or forged (see <see cref="ProcessEventSourceStatus.RejectedEvents"/>).</summary>
+    public void CountRejected()
+    {
+        lock (_gate)
+        {
+            _rejected++;
+        }
+    }
+
+    /// <summary>Removes known processes that <paramref name="isGone"/> says no longer run (periodic reconciliation); returns how many.</summary>
+    public int Reconcile(Func<ProcessEvent, bool> isGone)
+    {
+        lock (_gate)
+        {
+            return _table.RemoveWhere(isGone);
+        }
+    }
+
     /// <summary>
     /// Updates the table and delivers the event to every subscriber. Returns the delivered event (a stop is completed from the
-    /// matching start: image path, command line, parent, user), or null when it was not delivered (a pre-existing entry for a
-    /// process that is already known, or the hub is completed).
+    /// matching start: image path, command line, parent, user), or null when it was not delivered: a pre-existing entry for a
+    /// process that is already known, a second start for a known process (real ETW never sends one: it is counted as
+    /// rejected, so a forged start can't overwrite a real process's parent or image), or the hub is completed. Entries without
+    /// a start time are delivered but not remembered.
     /// </summary>
     public ProcessEvent? Publish(ProcessEvent processEvent)
     {
@@ -127,7 +151,7 @@ public sealed class ProcessEventHub
             switch (processEvent.Kind)
             {
                 case ProcessEventKind.Existing:
-                    if (!_table.TryAdd(processEvent))
+                    if (processEvent.StartTime is not null && !_table.TryAdd(processEvent))
                     {
                         return null; // already reported by a start event (the snapshot runs after the session starts)
                     }
@@ -135,9 +159,12 @@ public sealed class ProcessEventHub
                     delivered = processEvent;
                     break;
                 case ProcessEventKind.Started:
-                    // A start for a known key replaces the old entry: the start event is the authoritative record.
-                    _table.Remove(processEvent.Key);
-                    _table.TryAdd(processEvent);
+                    if (processEvent.StartTime is not null && !_table.TryAdd(processEvent))
+                    {
+                        _rejected++;
+                        return null;
+                    }
+
                     delivered = processEvent;
                     break;
                 default:

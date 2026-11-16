@@ -38,6 +38,7 @@ public class MitreCatalogTests
         { "T1036.002", "Masquerading: Right-to-Left Override" },
         { "T1211", "Exploitation for Defense Evasion" }, // B5: a file that crashes or hangs the scan worker
         { "T1562.001", "Impair Defenses: Disable or Modify Tools" }, // B3: engine-health alerts (no rules, store full)
+        { "T1562.006", "Impair Defenses: Indicator Blocking" }, // E8 review M2: process-events ETW session lost (health alert 9012)
         // C3: persistence judgement
         { "T1574.009", "Hijack Execution Flow: Path Interception by Unquoted Path" },
         { "T1574.010", "Hijack Execution Flow: Services File Permissions Weakness" },

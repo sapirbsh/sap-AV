@@ -34,6 +34,12 @@ public static class MitreTechniqueIds
     /// </summary>
     public const string DisableOrModifyTools = "T1562.001";
 
+    /// <summary>
+    /// Impair Defenses: Indicator Blocking. Used by the process-events health alert (E8) when the ETW session that feeds the
+    /// behaviour monitors ends without the engine asking (e.g. stopped with logman by an attacker).
+    /// </summary>
+    public const string IndicatorBlocking = "T1562.006";
+
     // C3: persistence judgement (autostart entries).
 
     /// <summary>An unquoted program path with spaces where a standard user can plant the shorter path.</summary>

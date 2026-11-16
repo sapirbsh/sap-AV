@@ -29,13 +29,17 @@ public enum ProcessEventSourceHealth
 /// <param name="LostEvents">Events the operating system reported as lost before delivery (ETW-level loss).</param>
 /// <param name="DroppedEvents">Events dropped because a subscriber's buffer was full (oldest first), over all subscribers.</param>
 /// <param name="SessionName">The OS session name, when there is one (e.g. the ETW session), for diagnostics.</param>
+/// <param name="RejectedEvents">Events dropped as malformed or forged (a user-mode process can log events under the
+/// Kernel-Process provider GUID): a missing process ID, a header that doesn't match the payload, a stop for a process that
+/// still runs, a second start for a known process. Should stay 0; anything else is worth a look.</param>
 public sealed record ProcessEventSourceStatus(
     ProcessEventSourceHealth Health,
     string? Detail,
     long EventsReceived,
     long LostEvents,
     long DroppedEvents,
-    string? SessionName = null)
+    string? SessionName = null,
+    long RejectedEvents = 0)
 {
     public static ProcessEventSourceStatus NotStarted { get; } = new(ProcessEventSourceHealth.Stopped, "not started", 0, 0, 0);
 

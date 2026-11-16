@@ -26,7 +26,7 @@ public sealed class EtwProcessEventSourceIntegrationTests
             NativeProcessInfoReader.Instance, new DevicePathMapper().ToWin32);
         try
         {
-            using var sub = source.Subscribe(capacity: 65536);
+            using var sub = source.Subscribe(capacity: ProcessEventSubscription.MaxCapacity);
             var status = await source.StartAsync();
             Assert.True(status.IsReceiving, $"{status.Health}: {status.Detail}");
             Assert.Contains(source.GetKnownProcesses(), p => p.ProcessId == Environment.ProcessId && p.IsPreExisting);
@@ -79,7 +79,8 @@ public sealed class EtwProcessEventSourceIntegrationTests
         finally
         {
             source.Dispose();
-            Assert.DoesNotContain(options.SessionName, factory.GetActiveSessionNames());
         }
+
+        Assert.DoesNotContain(options.SessionName, factory.GetActiveSessionNames());
     }
 }

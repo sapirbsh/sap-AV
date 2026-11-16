@@ -2,39 +2,63 @@ namespace SapAV.Core.Processes;
 
 /// <summary>
 /// The processes believed to be running, keyed by <see cref="ProcessKey"/> (PID + start time) so a reused PID never matches the
-/// old process. Bounded: when full, the oldest entry is evicted (stop events can be lost, so entries can go stale). Not
-/// thread-safe; <see cref="ProcessEventHub"/> serializes access.
+/// old process. Bounded: when full, entries whose process is gone are pruned first (stop events can be lost or forged-away,
+/// so entries can go stale), then the oldest entry is evicted. Entries without a start time are never stored (they can't be
+/// told apart from a reused PID). Not thread-safe; <see cref="ProcessEventHub"/> serializes access.
 /// </summary>
 public sealed class ProcessTable
 {
     /// <summary>Default capacity: far above the few hundred processes a PC runs, small enough to bound memory.</summary>
-    public const int DefaultCapacity = 32768;
+    public const int DefaultCapacity = 8192;
 
     private readonly Dictionary<ProcessKey, ProcessEvent> _byKey = [];
     private readonly Dictionary<int, List<ProcessKey>> _byPid = []; // usually one entry per PID
     private readonly Queue<ProcessKey> _order = new();
+    private readonly Func<ProcessEvent, bool>? _isGone;
+    private int _addsSincePrune = int.MaxValue;
 
-    public ProcessTable(int capacity = DefaultCapacity)
+    /// <param name="capacity">Most entries kept.</param>
+    /// <param name="isGone">Optional: true when the process of an entry no longer runs (checked by PID and start time). Used to
+    /// prune a full table before anything live is evicted, at most once per quarter-capacity of additions.</param>
+    public ProcessTable(int capacity = DefaultCapacity, Func<ProcessEvent, bool>? isGone = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         Capacity = capacity;
+        _isGone = isGone;
     }
 
     public int Capacity { get; }
 
     public int Count => _byKey.Count;
 
-    /// <summary>Entries removed because the table was full.</summary>
+    /// <summary>Live-looking entries removed because the table was full and nothing could be pruned.</summary>
     public long Evicted { get; private set; }
 
-    /// <summary>Adds a running process. False (nothing changes) if this exact process instance is already known.</summary>
+    /// <summary>Entries removed because their process was found gone (pruning and reconciliation).</summary>
+    public long Pruned { get; private set; }
+
+    /// <summary>
+    /// Adds a running process. False (nothing changes) if this exact process instance is already known, or if it has no start
+    /// time (it is still delivered to subscribers by the hub, just not remembered).
+    /// </summary>
     public bool TryAdd(ProcessEvent process)
     {
         ArgumentNullException.ThrowIfNull(process);
+        if (process.StartTime is null)
+        {
+            return false;
+        }
+
         var key = process.Key;
         if (_byKey.ContainsKey(key))
         {
             return false;
+        }
+
+        if (_byKey.Count >= Capacity && _isGone is not null && _addsSincePrune >= Math.Max(1, Capacity / 4))
+        {
+            _addsSincePrune = 0;
+            RemoveWhere(_isGone);
         }
 
         while (_byKey.Count >= Capacity && _order.TryDequeue(out var oldest))
@@ -53,6 +77,10 @@ public sealed class ProcessTable
         }
 
         keys.Add(key);
+        if (_addsSincePrune != int.MaxValue)
+        {
+            _addsSincePrune++;
+        }
 
         if (_order.Count > Capacity * 2)
         {
@@ -61,6 +89,8 @@ public sealed class ProcessTable
 
         return true;
     }
+
+    public bool Contains(ProcessKey key) => _byKey.ContainsKey(key);
 
     /// <summary>Removes and returns the process with this identity, or null if it isn't known.</summary>
     public ProcessEvent? Remove(ProcessKey key)
@@ -80,6 +110,38 @@ public sealed class ProcessTable
         }
 
         return removed;
+    }
+
+    /// <summary>Removes every entry <paramref name="isGone"/> says no longer runs; returns how many. A throwing check keeps the entry.</summary>
+    public int RemoveWhere(Func<ProcessEvent, bool> isGone)
+    {
+        ArgumentNullException.ThrowIfNull(isGone);
+        var gone = new List<ProcessKey>();
+        foreach (var (key, process) in _byKey)
+        {
+            bool remove;
+            try
+            {
+                remove = isGone(process);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                remove = false;
+            }
+
+            if (remove)
+            {
+                gone.Add(key);
+            }
+        }
+
+        foreach (var key in gone)
+        {
+            Remove(key);
+        }
+
+        Pruned += gone.Count;
+        return gone.Count;
     }
 
     public ProcessEvent? Find(ProcessKey key) => _byKey.GetValueOrDefault(key);
