@@ -12,6 +12,7 @@ public class WireParsedFileCodecTests
         Error = null,
         Task = new WireTaskDefinition { Enabled = true, UserId = null, Truncated = false, Actions = actions },
         Link = null,
+        Hosts = null,
     };
 
     private static WireTaskAction Exec(string? command = "a.exe") =>
@@ -57,6 +58,7 @@ public class WireParsedFileCodecTests
                 IdListPath = escaped, IdListUnsupported = false, LinkInfoPath = escaped, LinkInfoNetworkShare = escaped,
                 EnvironmentTarget = escaped, RelativePath = escaped, WorkingDirectory = escaped, Arguments = escaped, Truncated = false,
             },
+            Hosts = null,
         };
 
         Assert.InRange(WorkerJson.Serialize(wire, WorkerLimits.MaxResponseBytes).Length, 1, WorkerLimits.MaxResponseBytes);

@@ -71,7 +71,7 @@ internal sealed class WorkerLoop(WorkerService service, Stream input, Stream out
     /// <summary>The frame cap the broker reads this request's answer with (a parse batch scales with its file count).</summary>
     private static int ResponseCap(WorkerRequest request) =>
         request.Kind == WorkerRequestKind.Parse && request.Parse?.Files is { } files
-            ? WorkerLimits.MaxParseResponseBytes(files.Count)
+            ? WorkerLimits.MaxParseResponseBytes(files.Select(f => f?.Kind ?? WorkerParseKind.ScheduledTask).ToArray())
             : WorkerLimits.MaxResponseBytes;
 
     /// <summary>Test hooks only: answers with a deliberately broken response. False for faults handled by the service.</summary>

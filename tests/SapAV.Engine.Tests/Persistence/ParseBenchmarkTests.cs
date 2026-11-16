@@ -108,7 +108,7 @@ public sealed class ParseBenchmarkTests(ITestOutputHelper output) : IDisposable
             long s3 = Stopwatch.GetTimestamp();
             var response = slot.ParseAsync(new WorkerParseRequest
             {
-                Files = [new WorkerParseFile { Kind = WorkerParseKind.ScheduledTask, FileHandle = remote, TestFault = WorkerTestFault.None }],
+                Files = [new WorkerParseFile { Kind = WorkerParseKind.ScheduledTask, FileHandle = remote, TestFault = WorkerTestFault.None, KeepNames = null }],
             }, CancellationToken.None).GetAwaiter().GetResult();
             long s4 = Stopwatch.GetTimestamp();
             worker.CloseInWorker(remote);

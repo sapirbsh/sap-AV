@@ -374,7 +374,7 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
         IntPtr remote = worker.DuplicateInto(files.Inputs[0].File, WorkerProcess.ReadOnlyFileAccess);
         try
         {
-            var tooMany = Enumerable.Repeat(new WorkerParseFile { Kind = WorkerParseKind.ScheduledTask, FileHandle = remote, TestFault = WorkerTestFault.None },
+            var tooMany = Enumerable.Repeat(new WorkerParseFile { Kind = WorkerParseKind.ScheduledTask, FileHandle = remote, TestFault = WorkerTestFault.None, KeepNames = null },
                 WorkerLimits.MaxParseBatch + 1).ToArray();
 
             var response = await slot.ParseAsync(new WorkerParseRequest { Files = tooMany }, CancellationToken.None);
@@ -444,6 +444,9 @@ public sealed class PersistenceParsingInWorkerTests : IDisposable
             typeof(TaskXml).GetMethod(nameof(TaskXml.Parse))!,
             typeof(ShellLinkParser).GetMethod(nameof(ShellLinkParser.Parse))!,
             typeof(WireParsedFileCodec).GetMethod(nameof(WireParsedFileCodec.ParseInWorker))!,
+            typeof(SapAV.Core.BrowserHijack.HostsFileParser).GetMethod(nameof(SapAV.Core.BrowserHijack.HostsFileParser.Parse))!, // E6
+            typeof(WireParsedFileCodec).GetMethod(nameof(WireParsedFileCodec.ParseHostsInWorker))!,
+            typeof(WireHostsCodec).GetMethod(nameof(WireHostsCodec.ToWire))!,
         ];
         var engine = typeof(PersistenceCollector).Assembly;
         const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;

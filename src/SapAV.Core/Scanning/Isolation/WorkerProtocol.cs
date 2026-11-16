@@ -39,6 +39,20 @@ public static class WorkerLimits
     /// </summary>
     public static int MaxParseResponseBytes(int files) => MaxResponseBytes * Math.Clamp(files, 1, MaxParseBatch);
 
+    /// <summary>
+    /// E6: the answer cap for one hosts file (<see cref="WorkerParseKind.HostsFile"/>): its entries are capped by
+    /// <see cref="WireHostsCodec.MaxCharacters"/> and <see cref="WireHostsCodec.MaxEntries"/>, which fit this even fully escaped.
+    /// </summary>
+    public const int MaxHostsResponseBytes = 8 * 1024 * 1024;
+
+    /// <summary>The answer cap for a parse request with these kinds: the per-file cap for each file, the hosts cap for a hosts file.</summary>
+    public static int MaxParseResponseBytes(IReadOnlyList<WorkerParseKind> kinds)
+    {
+        ArgumentNullException.ThrowIfNull(kinds);
+        int hosts = kinds.Count(k => k == WorkerParseKind.HostsFile);
+        return MaxParseResponseBytes(Math.Max(1, kinds.Count - hosts)) + Math.Min(hosts, 1) * MaxHostsResponseBytes;
+    }
+
     /// <summary>JSON nesting limit for both directions.</summary>
     public const int MaxJsonDepth = 16;
 

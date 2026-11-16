@@ -109,7 +109,7 @@ internal sealed class WorkerSlot(int index, WorkerLauncher launcher, SandboxOpti
     /// </summary>
     public Task<WorkerResponse> ParseAsync(WorkerParseRequest parse, CancellationToken cancellationToken) =>
         ExchangeAsync(WorkerRequestKind.Parse, null, null, parse, WorkerLimits.MaxRequestBytes, options.ParseBatchTimeout(parse.Files.Count),
-            cancellationToken, WorkerLimits.MaxParseResponseBytes(parse.Files.Count));
+            cancellationToken, WorkerLimits.MaxParseResponseBytes(parse.Files.Select(f => f.Kind).ToArray()));
 
     /// <summary>A request completed normally: the backoff starts over.</summary>
     public void Succeeded() => _consecutiveFailures = 0;

@@ -58,6 +58,12 @@ internal interface IRegistryKeyReader : IDisposable
     RegistryData? Value(string name);
 
     IRegistryKeyReader? OpenSubKey(string name);
+
+    /// <summary>
+    /// E6 review M5: the value's stored size in bytes, without reading its data; null when it doesn't exist or the size is unknown
+    /// (a reader that can't tell). Lets a caller refuse an oversized value before <see cref="Value"/> allocates it.
+    /// </summary>
+    long? ValueSize(string name) => null;
 }
 
 /// <summary>
@@ -65,8 +71,12 @@ internal interface IRegistryKeyReader : IDisposable
 /// Registry symbolic links are followed by the OS (as for any reader); that can only change which key is read, never
 /// write anything.
 /// </summary>
-internal sealed class WindowsRegistryView : IRegistryView
+internal sealed partial class WindowsRegistryView : IRegistryView
 {
+    [System.Runtime.InteropServices.LibraryImport("advapi32.dll", StringMarshalling = System.Runtime.InteropServices.StringMarshalling.Utf16)]
+    private static partial int RegQueryValueExW(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, string valueName, IntPtr reserved, IntPtr type,
+        IntPtr data, ref uint dataSize);
+
     private readonly RegistryKey _machine;
     private readonly RegistryKey _users;
 
@@ -104,6 +114,13 @@ internal sealed class WindowsRegistryView : IRegistryView
 
         public IRegistryKeyReader? OpenSubKey(string name) =>
             key.OpenSubKey(name, writable: false) is { } sub ? new Reader(sub) : null;
+
+        public long? ValueSize(string name)
+        {
+            uint size = 0;
+            int error = RegQueryValueExW(key.Handle, name, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref size);
+            return error == 0 ? size : null; // ERROR_SUCCESS with a null buffer: size holds the data length
+        }
 
         public void Dispose() => key.Dispose();
     }
